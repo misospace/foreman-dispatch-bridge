@@ -5,6 +5,7 @@ from bridge.models import ClaimedItem
 from bridge.workload import (
     build_workload,
     coder_agent_for,
+    revision_coder_agent_for,
     gate_profile_for,
     parse_gate_profiles,
     parse_lane_coder_agents,
@@ -22,6 +23,7 @@ def run_once(
     namespace: str,
     gate_profiles: Optional[dict] = None,
     lane_coder_agents: Optional[dict] = None,
+    revision_coder_agents: Optional[dict] = None,
 ) -> list:
     """Claim one ready issue per lane and materialize a Workload for each. Returns per-lane outcomes.
 
@@ -35,6 +37,7 @@ def run_once(
     """
     gate_profiles = gate_profiles or {}
     lane_coder_agents = lane_coder_agents or {}
+    revision_coder_agents = revision_coder_agents or {}
     results = []
     for lane in lanes:
         item = claim_one(agent_name, lane)
@@ -47,6 +50,7 @@ def run_once(
             gate_profile_for(item.repo, gate_profiles),
             agent_name,
             coder_agent=coder_agent_for(item.lane, lane_coder_agents),
+            revision_coder_agent=revision_coder_agent_for(item.lane, revision_coder_agents),
         )
         create_workload(manifest)
         results.append(f"{lane}:created:{manifest['metadata']['name']}")
@@ -67,6 +71,8 @@ def _real_main() -> None:  # pragma: no cover - thin wiring, exercised in the cl
     max_attempts = int(os.environ.get("RETRY_MAX_ATTEMPTS", str(DEFAULT_MAX_ATTEMPTS)))
     # Lane -> coder Agent map, e.g. '{"*": "coder", "frontier": "coder-frontier"}'.
     lane_coder_agents = parse_lane_coder_agents(os.environ.get("LANE_CODER_AGENTS"))
+    # Lane -> revision-tuned coder Agent map (Workload.spec.revisionCoderAgentRef).
+    revision_coder_agents = parse_lane_coder_agents(os.environ.get("REVISION_CODER_AGENTS"))
     # When set, exhausted Workloads outside this lane escalate into it (re-lane +
     # unclaim) instead of tombstoning. Empty disables escalation.
     escalation_lane = os.environ.get("ESCALATION_LANE", "").strip()
@@ -179,7 +185,7 @@ def _real_main() -> None:  # pragma: no cover - thin wiring, exercised in the cl
 
     for line in run_once(
         lanes, agent_name, dispatch.claim_one, create_workload, namespace,
-        gate_profiles, lane_coder_agents,
+        gate_profiles, lane_coder_agents, revision_coder_agents,
     ):
         print(line)
 

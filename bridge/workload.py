@@ -78,6 +78,15 @@ def coder_agent_for(lane: str, lane_coder_agents: dict) -> str:
     return lane_coder_agents.get(lane) or lane_coder_agents.get(LANE_CODER_WILDCARD) or CODER_AGENT
 
 
+def revision_coder_agent_for(lane: str, revision_coder_agents: dict) -> str:
+    """Resolve a lane's revision-tuned coder Agent (Workload.spec.revisionCoderAgentRef,
+    LLMKube#959): exact match, then "*", else "" (unset -> controller falls back to the
+    base coder and warns)."""
+    if not revision_coder_agents:
+        return ""
+    return revision_coder_agents.get(lane) or revision_coder_agents.get(LANE_CODER_WILDCARD) or ""
+
+
 def workload_name(item: ClaimedItem) -> str:
     owner_repo = item.repo.replace("/", "-").lower()
     return f"wl-{owner_repo}-{item.issue_number}"
@@ -133,6 +142,7 @@ def build_workload(
     attempt: int = 1,
     coder_agent: str = CODER_AGENT,
     feedback: str = "",
+    revision_coder_agent: str = "",
 ) -> dict:
     # A retry reuses its predecessor's deterministic branch name; if that
     # attempt pushed, the retry's push dies non-fast-forward (#1). Foreman's
@@ -159,6 +169,8 @@ def build_workload(
             "verifierAgentRef": {"name": VERIFIER_AGENT},
             "reviewerAgentRefs": [{"name": name} for name in REVIEWER_AGENTS],
         }
+        if revision_coder_agent:
+            spec["revisionCoderAgentRef"] = {"name": revision_coder_agent}
     if allow_overwrite:
         # Top-level as well: the operator stamps it onto issue-path payloads
         # (LLMKube#948); harmless duplication on the pipeline path. Ignored by
