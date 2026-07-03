@@ -83,7 +83,9 @@ def workload_name(item: ClaimedItem) -> str:
     return f"wl-{owner_repo}-{item.issue_number}"
 
 
-def _pipeline_steps(item: ClaimedItem, name: str, coder_agent: str, feedback: str) -> list:
+def _pipeline_steps(
+    item: ClaimedItem, name: str, coder_agent: str, feedback: str, allow_overwrite: bool = False
+) -> list:
     """Explicit spec.pipeline mirroring the operator's issues-path decomposition
     (code -> verify -> review-*), with the retry feedback injected as the code
     step's payload.prompt — the only channel that reaches the coder's user
@@ -98,7 +100,11 @@ def _pipeline_steps(item: ClaimedItem, name: str, coder_agent: str, feedback: st
             "name": f"code-{n}",
             "kind": "issue-fix",
             "agentRef": {"name": coder_agent},
-            "payload": {**payload, "prompt": feedback},
+            "payload": (
+                {**payload, "prompt": feedback, "allowOverwrite": True}
+                if allow_overwrite
+                else {**payload, "prompt": feedback}
+            ),
         },
         {
             "name": f"verify-{n}",
@@ -128,13 +134,21 @@ def build_workload(
     coder_agent: str = CODER_AGENT,
     feedback: str = "",
 ) -> dict:
+    # A retry reuses its predecessor's deterministic branch name; if that
+    # attempt pushed, the retry's push dies non-fast-forward (#1). Foreman's
+    # opt-in spec.allowOverwrite (LLMKube#948) lets the coder replace its own
+    # stale ref via force-with-lease. First attempts must NOT set it: their
+    # branch shouldn't exist, and failing loudly preserves the audit trail.
+    allow_overwrite = attempt > 1
     if feedback:
         # Retry with context: explicit pipeline so payload.prompt can carry the
         # previous attempt's review findings / failure to the coder.
         spec = {
             "intent": item.intent,
             "repo": item.repo,
-            "pipeline": _pipeline_steps(item, workload_name(item), coder_agent, feedback),
+            "pipeline": _pipeline_steps(
+                item, workload_name(item), coder_agent, feedback, allow_overwrite
+            ),
         }
     else:
         spec = {
@@ -145,6 +159,12 @@ def build_workload(
             "verifierAgentRef": {"name": VERIFIER_AGENT},
             "reviewerAgentRefs": [{"name": name} for name in REVIEWER_AGENTS],
         }
+    if allow_overwrite:
+        # Top-level as well: the operator stamps it onto issue-path payloads
+        # (LLMKube#948); harmless duplication on the pipeline path. Ignored by
+        # pre-#948 CRDs (extra-field pruning), so this is inert until foreman
+        # ships it.
+        spec["allowOverwrite"] = True
     if gate_profile:
         # Passed through verbatim. Foreman >= 0.8.23 copies Workload.spec.gateProfile
         # onto every decomposed AgenticTask (the coder self-gate + verify Job), so a
