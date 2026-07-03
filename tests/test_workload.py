@@ -100,3 +100,23 @@ def test_coder_agent_for_prefers_exact_then_wildcard_then_default():
 def test_build_workload_uses_explicit_coder_agent():
     wl = build_workload(ITEM, "llm", coder_agent="coder-frontier")
     assert wl["spec"]["coderAgentRef"] == {"name": "coder-frontier"}
+
+
+def test_build_workload_first_attempt_has_no_allow_overwrite():
+    wl = build_workload(ITEM, namespace="llm", attempt=1)
+    assert "allowOverwrite" not in wl["spec"]
+
+
+def test_build_workload_retry_sets_allow_overwrite_on_issues_path():
+    wl = build_workload(ITEM, namespace="llm", attempt=2)
+    assert wl["spec"]["allowOverwrite"] is True
+    assert "pipeline" not in wl["spec"]
+
+
+def test_build_workload_retry_sets_allow_overwrite_on_pipeline_code_step():
+    wl = build_workload(ITEM, namespace="llm", attempt=2, feedback="reviewer said no")
+    assert wl["spec"]["allowOverwrite"] is True
+    code = [s for s in wl["spec"]["pipeline"] if s["kind"] == "issue-fix"]
+    assert len(code) == 1 and code[0]["payload"]["allowOverwrite"] is True
+    verify = [s for s in wl["spec"]["pipeline"] if s["kind"] == "verify"]
+    assert "allowOverwrite" not in verify[0]["payload"]
