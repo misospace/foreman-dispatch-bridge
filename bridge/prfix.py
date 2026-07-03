@@ -1,6 +1,8 @@
 from dataclasses import dataclass
 from typing import Optional
 
+from bridge.workload import CODER_AGENT
+
 # Lane values dispatch assigns to a PR-fix item. NEEDS_HUMAN is never actioned
 # (dispatch enqueues those already BLOCKED, so they never reach `queued`).
 ACTIONABLE_LANES = ("NORMAL", "ESCALATED")
@@ -42,3 +44,34 @@ def parse_pr_fix_item(raw) -> Optional[PrFixItem]:
         reason=str(raw.get("reason") or ""),
         feedback=[str(f) for f in feedback] if isinstance(feedback, list) else [],
     )
+
+
+PRFIX_CODER_WILDCARD = "*"
+DEFAULT_PRFIX_LANE_AGENTS = {"NORMAL": "coder", "ESCALATED": "coder-frontier"}
+
+_TYPE_HEADERS = {
+    "CI_FAILURE": "CI failure:",
+    "REVIEW_FEEDBACK": "Review feedback:",
+    "MERGE_CONFLICT": "Merge conflict:",
+}
+
+
+def pr_fix_coder_for(lane: str, lane_agents: dict) -> str:
+    """Resolve a PrFixLane to a coder Agent name: exact, then "*", else "coder"."""
+    if not lane_agents:
+        return CODER_AGENT
+    return lane_agents.get(lane) or lane_agents.get(PRFIX_CODER_WILDCARD) or CODER_AGENT
+
+
+def assemble_fix_prompt(item: "PrFixItem") -> str:
+    """Build the code step's payload.prompt from the item: a type header,
+    the reason, then each feedback line as a bullet."""
+    lines = []
+    header = _TYPE_HEADERS.get(item.type)
+    if header:
+        lines.append(header)
+    if item.reason:
+        lines.append(item.reason)
+    for fb in item.feedback:
+        lines.append(f"- {fb}")
+    return "\n".join(lines)
