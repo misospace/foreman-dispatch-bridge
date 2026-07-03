@@ -172,11 +172,18 @@ def _wl(pr, phase, attempt=1, name=None):
 
 
 def test_rebuild_prfix_manifest_bumps_attempt_and_strips_status():
-    fresh = rebuild_prfix_manifest(_wl(5, "Failed", attempt=1), attempt=2)
+    wl = _wl(5, "Failed", attempt=1)
+    wl["metadata"]["resourceVersion"] = "123"
+    wl["metadata"]["uid"] = "abc-uid"
+    fresh = rebuild_prfix_manifest(wl, attempt=2)
     assert fresh["metadata"]["annotations"]["foreman.llmkube.dev/attempt"] == "2"
     assert "status" not in fresh
+    assert "resourceVersion" not in fresh["metadata"]
+    assert "uid" not in fresh["metadata"]
     assert fresh["metadata"]["name"] == "prfix-o-r-5"
-    assert "resourceVersion" not in fresh["metadata"] and "uid" not in fresh["metadata"]
+    assert fresh["metadata"]["labels"] == {"created-by": PRFIX_CREATED_BY, "lane": "NORMAL"}
+    assert fresh["metadata"]["annotations"]["foreman.llmkube.dev/prfix-repo"] == "o/r"
+    assert fresh["metadata"]["annotations"]["foreman.llmkube.dev/prfix-pr"] == "5"
 
 
 def test_reconcile_succeeded_marks_fixed_and_deletes():
@@ -206,16 +213,17 @@ def test_reconcile_failed_under_max_deletes_and_recreates():
 
 
 def test_reconcile_failed_at_max_marks_blocked():
-    marks = []
+    marks, deleted = [], []
     out = reconcile_pr_fixes(
         list_prfix_workloads=lambda: [_wl(5, "Failed", attempt=3)],
-        delete_workload=lambda n: None, create_workload=lambda m: None,
+        delete_workload=deleted.append, create_workload=lambda m: None,
         mark_pr_fix=lambda repo, pr, status, note: marks.append((repo, pr, status, note)),
         max_attempts=3,
     )
     assert marks[0][:3] == ("o/r", 5, "BLOCKED")
     assert "3/3" in marks[0][3]                       # note carries attempt count
     assert out == ["prfix-o-r-5:giveup:3/3"]
+    assert deleted == []
 
 
 def test_reconcile_ignores_nonterminal_and_isolates_errors():

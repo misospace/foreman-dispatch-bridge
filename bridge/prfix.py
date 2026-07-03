@@ -215,8 +215,8 @@ def reconcile_pr_fixes(list_prfix_workloads, delete_workload, create_workload,
             continue
         repo, pr = _prfix_key(wl)
         ann = (wl.get("metadata") or {}).get("annotations") or {}
-        attempt = int(ann.get(ATTEMPT_ANNOTATION, "1") or "1")
         try:
+            attempt = int(ann.get(ATTEMPT_ANNOTATION, "1") or "1")
             if phase in ("Succeeded", "Completed"):
                 if repo and pr is not None:
                     mark_pr_fix(repo, pr, "FIXED", f"foreman fix Workload {name} succeeded")
