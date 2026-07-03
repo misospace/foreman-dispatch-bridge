@@ -188,15 +188,32 @@ def test_rebuild_prfix_manifest_bumps_attempt_and_strips_status():
 
 def test_reconcile_succeeded_marks_fixed_and_deletes():
     marks, deleted = [], []
+
+    def _mark(repo, pr, status, note):
+        marks.append((repo, pr, status))
+        return True
+
     out = reconcile_pr_fixes(
         list_prfix_workloads=lambda: [_wl(5, "Succeeded")],
         delete_workload=deleted.append,
         create_workload=lambda m: (_ for _ in ()).throw(AssertionError("no recreate")),
-        mark_pr_fix=lambda repo, pr, status, note: marks.append((repo, pr, status)),
+        mark_pr_fix=_mark,
     )
     assert marks == [("o/r", 5, "FIXED")]
     assert deleted == ["prfix-o-r-5"]
     assert out == ["prfix-o-r-5:fixed"]
+
+
+def test_reconcile_succeeded_mark_fails_keeps_workload():
+    deleted = []
+    out = reconcile_pr_fixes(
+        list_prfix_workloads=lambda: [_wl(5, "Succeeded")],
+        delete_workload=deleted.append,
+        create_workload=lambda m: (_ for _ in ()).throw(AssertionError("no recreate")),
+        mark_pr_fix=lambda *a: False,
+    )
+    assert deleted == []
+    assert out == ["prfix-o-r-5:fixed-mark-pending"]
 
 
 def test_reconcile_failed_under_max_deletes_and_recreates():

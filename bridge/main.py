@@ -203,9 +203,10 @@ def _real_main() -> None:  # pragma: no cover - thin wiring, exercised in the cl
 
         def mark_pr_fix(repo, pr, status, note=""):
             try:
-                dispatch.mark_pr_fix(repo, pr, status, note)
+                return dispatch.mark_pr_fix(repo, pr, status, note)
             except Exception as e:  # best-effort; tombstone remains, next tick retries
                 print(f"prfix-mark-failed:{repo}#{pr}:{status}:{e}")
+                return False
 
         for line in reconcile_pr_fixes(
             list_prfix_workloads, delete_workload, create_workload,

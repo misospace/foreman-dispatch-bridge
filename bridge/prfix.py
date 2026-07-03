@@ -202,11 +202,12 @@ def _prfix_key(wl: dict):
 
 def reconcile_pr_fixes(list_prfix_workloads, delete_workload, create_workload,
                        mark_pr_fix, max_attempts=3) -> list:
-    """Settle prior fix Workloads: Succeeded -> mark FIXED + delete; Failed
-    under the attempt cap -> delete + recreate at attempt+1; Failed at the cap
-    -> mark BLOCKED + leave a tombstone. Non-terminal Workloads are untouched.
-    Per-Workload isolation so one wedged delete/create/mark cannot abort the
-    pass or the drain that follows."""
+    """Settle prior fix Workloads: Succeeded -> mark FIXED, delete only if the
+    mark succeeded (else leave the tombstone so the next tick retries the mark);
+    Failed under the attempt cap -> delete + recreate at attempt+1; Failed at
+    the cap -> mark BLOCKED + leave a tombstone. Non-terminal Workloads are
+    untouched. Per-Workload isolation so one wedged delete/create/mark cannot
+    abort the pass or the drain that follows."""
     results = []
     for wl in list_prfix_workloads():
         name = ((wl.get("metadata") or {}).get("name")) or "?"
@@ -218,10 +219,14 @@ def reconcile_pr_fixes(list_prfix_workloads, delete_workload, create_workload,
         try:
             attempt = int(ann.get(ATTEMPT_ANNOTATION, "1") or "1")
             if phase in ("Succeeded", "Completed"):
+                ok = False
                 if repo and pr is not None:
-                    mark_pr_fix(repo, pr, "FIXED", f"foreman fix Workload {name} succeeded")
-                delete_workload(name)
-                results.append(f"{name}:fixed")
+                    ok = mark_pr_fix(repo, pr, "FIXED", f"foreman fix Workload {name} succeeded")
+                if ok:
+                    delete_workload(name)
+                    results.append(f"{name}:fixed")
+                else:
+                    results.append(f"{name}:fixed-mark-pending")
             elif attempt < max_attempts:
                 delete_workload(name)
                 create_workload(rebuild_prfix_manifest(wl, attempt + 1))
