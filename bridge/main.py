@@ -10,6 +10,11 @@ from bridge.workload import (
     parse_lane_coder_agents,
 )
 from bridge.retry import reconcile_failures, feedback_from_tasks, DEFAULT_MAX_ATTEMPTS
+from bridge.prfix import (
+    reconcile_pr_fixes, drain_pr_fixes, prfix_workload_name,
+    DEFAULT_PRFIX_LANE_AGENTS, ACTIONABLE_LANES, PRFIX_CREATED_BY,
+)
+import json
 
 ClaimOne = Callable[[str, str], Optional[ClaimedItem]]  # (agent_name, lane) -> item | None
 
@@ -70,6 +75,10 @@ def _real_main() -> None:  # pragma: no cover - thin wiring, exercised in the cl
     # When set, exhausted Workloads outside this lane escalate into it (re-lane +
     # unclaim) instead of tombstoning. Empty disables escalation.
     escalation_lane = os.environ.get("ESCALATION_LANE", "").strip()
+    pr_fix_enabled = os.environ.get("PR_FIX_ENABLED", "").strip().lower() in ("1", "true", "yes")
+    pr_fix_max_attempts = int(os.environ.get("PR_FIX_MAX_ATTEMPTS", "3"))
+    _raw_lane_agents = os.environ.get("PR_FIX_LANE_AGENTS", "").strip()
+    pr_fix_lane_agents = json.loads(_raw_lane_agents) if _raw_lane_agents else dict(DEFAULT_PRFIX_LANE_AGENTS)
 
     def http_get(url, headers):
         r = requests.get(url, headers=headers, timeout=20)
@@ -182,6 +191,37 @@ def _real_main() -> None:  # pragma: no cover - thin wiring, exercised in the cl
         gate_profiles, lane_coder_agents,
     ):
         print(line)
+
+    if pr_fix_enabled:
+        def list_prfix_workloads() -> list:
+            resp = api.list_namespaced_custom_object(
+                group="foreman.llmkube.dev", version="v1alpha1",
+                namespace=namespace, plural="workloads",
+                label_selector=f"created-by={PRFIX_CREATED_BY}",
+            )
+            return resp.get("items", [])
+
+        def mark_pr_fix(repo, pr, status, note=""):
+            try:
+                dispatch.mark_pr_fix(repo, pr, status, note)
+            except Exception as e:  # best-effort; tombstone remains, next tick retries
+                print(f"prfix-mark-failed:{repo}#{pr}:{status}:{e}")
+
+        for line in reconcile_pr_fixes(
+            list_prfix_workloads, delete_workload, create_workload,
+            mark_pr_fix, max_attempts=pr_fix_max_attempts,
+        ):
+            print(line)
+
+        existing = {
+            (wl.get("metadata") or {}).get("name") for wl in list_prfix_workloads()
+        }
+        for line in drain_pr_fixes(
+            lambda: dispatch.list_pr_fix_queued(list(ACTIONABLE_LANES)),
+            existing, create_workload,
+            gate_profiles, pr_fix_lane_agents, agent_name, namespace,
+        ):
+            print(line)
 
 
 if __name__ == "__main__":
