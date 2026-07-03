@@ -169,3 +169,68 @@ def drain_pr_fixes(list_queued, existing_prfix_names, create_workload,
         except Exception as e:
             results.append(f"{tag}:error:{e}")
     return results
+
+
+_TERMINAL = ("Succeeded", "Completed", "Failed")
+
+
+def rebuild_prfix_manifest(wl: dict, attempt: int) -> dict:
+    """Reconstruct a clean, create-able manifest from a listed fix Workload,
+    overriding the attempt annotation. Strips server-managed metadata and
+    status so it can be re-created under the same name after delete."""
+    meta = wl.get("metadata") or {}
+    ann = dict(meta.get("annotations") or {})
+    ann[ATTEMPT_ANNOTATION] = str(attempt)
+    return {
+        "apiVersion": "foreman.llmkube.dev/v1alpha1",
+        "kind": "Workload",
+        "metadata": {
+            "name": meta.get("name"),
+            "namespace": meta.get("namespace"),
+            "labels": dict(meta.get("labels") or {}),
+            "annotations": ann,
+        },
+        "spec": wl.get("spec") or {},
+    }
+
+
+def _prfix_key(wl: dict):
+    ann = (wl.get("metadata") or {}).get("annotations") or {}
+    pr = ann.get(PRFIX_PR_ANNOTATION)
+    return ann.get(PRFIX_REPO_ANNOTATION), (int(pr) if pr and pr.isdigit() else None)
+
+
+def reconcile_pr_fixes(list_prfix_workloads, delete_workload, create_workload,
+                       mark_pr_fix, max_attempts=3) -> list:
+    """Settle prior fix Workloads: Succeeded -> mark FIXED + delete; Failed
+    under the attempt cap -> delete + recreate at attempt+1; Failed at the cap
+    -> mark BLOCKED + leave a tombstone. Non-terminal Workloads are untouched.
+    Per-Workload isolation so one wedged delete/create/mark cannot abort the
+    pass or the drain that follows."""
+    results = []
+    for wl in list_prfix_workloads():
+        name = ((wl.get("metadata") or {}).get("name")) or "?"
+        phase = ((wl.get("status") or {}).get("phase")) or ""
+        if phase not in _TERMINAL:
+            continue
+        repo, pr = _prfix_key(wl)
+        ann = (wl.get("metadata") or {}).get("annotations") or {}
+        attempt = int(ann.get(ATTEMPT_ANNOTATION, "1") or "1")
+        try:
+            if phase in ("Succeeded", "Completed"):
+                if repo and pr is not None:
+                    mark_pr_fix(repo, pr, "FIXED", f"foreman fix Workload {name} succeeded")
+                delete_workload(name)
+                results.append(f"{name}:fixed")
+            elif attempt < max_attempts:
+                delete_workload(name)
+                create_workload(rebuild_prfix_manifest(wl, attempt + 1))
+                results.append(f"{name}:retry:{attempt + 1}/{max_attempts}")
+            else:
+                if repo and pr is not None:
+                    mark_pr_fix(repo, pr, "BLOCKED",
+                                f"foreman fix exhausted {attempt}/{max_attempts} attempts ({name})")
+                results.append(f"{name}:giveup:{attempt}/{max_attempts}")
+        except Exception as e:
+            results.append(f"{name}:error:{e}")
+    return results
