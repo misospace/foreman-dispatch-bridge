@@ -120,3 +120,31 @@ def test_build_workload_retry_sets_allow_overwrite_on_pipeline_code_step():
     assert len(code) == 1 and code[0]["payload"]["allowOverwrite"] is True
     verify = [s for s in wl["spec"]["pipeline"] if s["kind"] == "verify"]
     assert "allowOverwrite" not in verify[0]["payload"]
+
+
+def test_revision_coder_agent_for_prefers_exact_then_wildcard_then_empty():
+    from bridge.workload import revision_coder_agent_for
+    agents = {"*": "coder-revision", "frontier": "coder-revision-frontier"}
+    assert revision_coder_agent_for("frontier", agents) == "coder-revision-frontier"
+    assert revision_coder_agent_for("local", agents) == "coder-revision"
+    assert revision_coder_agent_for("local", {"frontier": "x"}) == ""  # no wildcard -> unset
+    assert revision_coder_agent_for("anything", {}) == ""  # unset -> controller falls back + warns
+
+
+def test_build_workload_omits_revision_coder_ref_by_default():
+    wl = build_workload(ITEM, namespace="llm")
+    assert "revisionCoderAgentRef" not in wl["spec"]
+
+
+def test_build_workload_stamps_revision_coder_ref_when_set():
+    wl = build_workload(ITEM, namespace="llm", revision_coder_agent="coder-revision")
+    assert wl["spec"]["revisionCoderAgentRef"] == {"name": "coder-revision"}
+
+
+def test_build_workload_feedback_path_has_no_revision_coder_ref():
+    # revisionCoderAgentRef is a WorkloadSpec field for the controller's issues-path
+    # iteration loop; the explicit-pipeline feedback path has no reviewerAgentRefs to
+    # iterate, so it must not carry the field.
+    wl = build_workload(ITEM, namespace="llm", feedback="do better", revision_coder_agent="coder-revision")
+    assert "pipeline" in wl["spec"]
+    assert "revisionCoderAgentRef" not in wl["spec"]
