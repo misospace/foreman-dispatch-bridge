@@ -92,10 +92,8 @@ def prfix_workload_name(item: "PrFixItem") -> str:
 def build_fix_workload(item, namespace, gate_profile, agent_name, coder_agent, attempt=1) -> dict:
     """Explicit code -> verify pipeline that amends the PR's head branch.
 
-    reviseFromBranch (LLMKube#967) makes the executor fetch + check out the PR
-    branch so the coder edits real prior work; allowOverwrite (#948) lets the
-    push force-with-lease the existing ref. No reviewer/openPullRequest: the PR
-    already exists and its own CI + external reviewer re-gate the update."""
+    reviseFromBranch makes the executor fetch and check out the PR branch;
+    allowOverwrite lets the push force-with-lease the existing ref."""
     n = item.pr
     code_payload = {
         "repo": item.repo,
