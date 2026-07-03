@@ -127,6 +127,14 @@ Unit tests in `tests/test_prfix.py`, all with injected callables (no cluster, no
 - `reconcile_pr_fixes` transitions: succeeded→FIXED+delete, failed<max→delete+recreate at attempt+1, failed≥max→BLOCKED+tombstone, per-Workload isolation on a raising delete.
 - `drain_pr_fixes`: creates for new items, skips items with an in-flight `prfix-*` Workload, skips branchless items, per-item isolation, `NEEDS_HUMAN`/other lanes never actioned.
 
+## Surfacing NEEDS_HUMAN / BLOCKED to the operator
+
+The actuator produces two "a human should look" signals: `NEEDS_HUMAN` items (dispatch enqueues these straight to `BLOCKED`, so they never reach the actuator) and items the actuator marks `BLOCKED` after 3 failed attempts. In both cases the item ends as `status=BLOCKED` with a descriptive `PrFixHistory` note.
+
+**Today there is no active surfacing.** BLOCKED items are visible only via `GET /api/pr-fix-queue/queued?include_blocked=true` — no PR label, comment, board section, or notification. The bridge cannot close this gap itself (its secret carries only `DISPATCH_AGENT_TOKEN`, no GitHub credentials, and surfacing is not a consumer's job).
+
+The actuator's contribution is to make the `BLOCKED` mark carry a **specific, actionable note** (the failure summary + attempt count + Workload name) so dispatch has the material to surface. Actually surfacing it — the recommended mechanism being a `needs-human` GitHub label + a one-line comment on the PR when an item transitions to `BLOCKED` (dispatch already owns GitHub label operations via claim/unclaim), and a BLOCKED section on the dispatch board — is a **dispatch-side change, tracked separately** (filed as a dispatch issue). It is out of scope for the bridge actuator but is the answer to "how do I see these."
+
 ## Out of scope (v1)
 
 - `evidenceKeys[]` blob-log fetching (feedback[] + reason only).
