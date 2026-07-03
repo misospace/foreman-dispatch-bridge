@@ -101,3 +101,51 @@ def test_build_fix_workload_omits_issue_when_absent():
                             "llm", None, "a", "coder")
     assert "issue" not in wl["spec"]["pipeline"][0]["payload"]
     assert "gateProfile" not in wl["spec"]
+
+
+from bridge.prfix import drain_pr_fixes
+
+
+def _raw(repo="o/r", pr=1, lane="NORMAL", branch="b", **kw):
+    d = {"repo": repo, "pr": pr, "lane": lane, "branch": branch, "type": "OTHER", "reason": "x"}
+    d.update(kw)
+    return d
+
+
+def test_drain_creates_for_new_items():
+    created = []
+    out = drain_pr_fixes(
+        list_queued=lambda: [_raw(repo="o/r", pr=5)],
+        existing_prfix_names=set(),
+        create_workload=created.append,
+        gate_profiles={}, lane_agents={}, agent_name="a", namespace="llm",
+    )
+    assert len(created) == 1 and created[0]["metadata"]["name"] == "prfix-o-r-5"
+    assert out == ["o/r#5:created:prfix-o-r-5"]
+
+
+def test_drain_skips_in_flight_and_branchless():
+    created = []
+    out = drain_pr_fixes(
+        list_queued=lambda: [_raw(pr=5), _raw(pr=6, branch=None)],
+        existing_prfix_names={"prfix-o-r-5"},          # 5 already in flight
+        create_workload=created.append,
+        gate_profiles={}, lane_agents={}, agent_name="a", namespace="llm",
+    )
+    assert created == []
+    assert "o/r#5:skip:in-flight" in out and "o/r#6:skip:no-branch" in out
+
+
+def test_drain_isolates_per_item_failure():
+    created = []
+    def create(m):
+        if m["metadata"]["name"] == "prfix-o-r-5":
+            raise RuntimeError("boom")
+        created.append(m)
+    out = drain_pr_fixes(
+        list_queued=lambda: [_raw(pr=5), _raw(pr=6)],
+        existing_prfix_names=set(), create_workload=create,
+        gate_profiles={}, lane_agents={}, agent_name="a", namespace="llm",
+    )
+    assert [m["metadata"]["name"] for m in created] == ["prfix-o-r-6"]   # 6 still created
+    assert any("o/r#5:error:" in line for line in out)

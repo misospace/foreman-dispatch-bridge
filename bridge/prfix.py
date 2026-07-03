@@ -135,3 +135,37 @@ def build_fix_workload(item, namespace, gate_profile, agent_name, coder_agent, a
         },
         "spec": spec,
     }
+
+
+def drain_pr_fixes(list_queued, existing_prfix_names, create_workload,
+                   gate_profiles, lane_agents, agent_name, namespace) -> list:
+    """Create a fix Workload per newly-QUEUED item. list_queued returns raw
+    dicts already filtered to actionable lanes by the API query. An item is
+    skipped when it has no branch (nothing to amend) or already has an
+    in-flight prfix Workload (reconcile owns it; the item stays QUEUED). One
+    bad item never aborts the pass."""
+    lane_agents = lane_agents or {}
+    results = []
+    for raw in list_queued():
+        item = parse_pr_fix_item(raw)
+        if item is None:
+            results.append("unparseable:skip")
+            continue
+        tag = f"{item.repo}#{item.pr}"
+        if not item.branch:
+            results.append(f"{tag}:skip:no-branch")
+            continue
+        name = prfix_workload_name(item)
+        if name in existing_prfix_names:
+            results.append(f"{tag}:skip:in-flight")
+            continue
+        try:
+            manifest = build_fix_workload(
+                item, namespace, gate_profile_for(item.repo, gate_profiles),
+                agent_name, pr_fix_coder_for(item.lane, lane_agents), attempt=1,
+            )
+            create_workload(manifest)
+            results.append(f"{tag}:created:{name}")
+        except Exception as e:
+            results.append(f"{tag}:error:{e}")
+    return results
