@@ -133,7 +133,7 @@ The actuator produces two "a human should look" signals: `NEEDS_HUMAN` items (di
 
 **Today there is no active surfacing.** BLOCKED items are visible only via `GET /api/pr-fix-queue/queued?include_blocked=true` — no PR label, comment, board section, or notification. The bridge cannot close this gap itself (its secret carries only `DISPATCH_AGENT_TOKEN`, no GitHub credentials, and surfacing is not a consumer's job).
 
-The actuator's contribution is to make the `BLOCKED` mark carry a **specific, actionable note** (the failure summary + attempt count + Workload name) so dispatch has the material to surface. Actually surfacing it — the recommended mechanism being a `needs-human` GitHub label + a one-line comment on the PR when an item transitions to `BLOCKED` (dispatch already owns GitHub label operations via claim/unclaim), and a BLOCKED section on the dispatch board — is a **dispatch-side change, tracked separately** (filed as a dispatch issue). It is out of scope for the bridge actuator but is the answer to "how do I see these."
+The actuator's contribution is to make the `BLOCKED` mark carry a **specific, actionable note** (the failure summary + attempt count + Workload name) so dispatch has the material to surface. Actually surfacing it — the recommended mechanism being a `needs-human` GitHub label + a one-line comment on the PR when an item transitions to `BLOCKED` (dispatch already owns GitHub label operations via claim/unclaim), and a BLOCKED section on the dispatch board — is a **dispatch-side change, tracked separately** (misospace/dispatch#557). It is out of scope for the bridge actuator but is the answer to "how do I see these."
 
 ## Out of scope (v1)
 
