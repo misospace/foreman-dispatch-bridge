@@ -58,3 +58,46 @@ def test_parse_pr_fix_item_unusable_returns_none():
     assert parse_pr_fix_item({"pr": 7}) is None          # no repo
     assert parse_pr_fix_item({"repo": "o/r"}) is None     # no pr
     assert parse_pr_fix_item("not a dict") is None
+
+
+from bridge.prfix import (
+    prfix_workload_name, build_fix_workload,
+    PRFIX_REPO_ANNOTATION, PRFIX_PR_ANNOTATION, PRFIX_CREATED_BY,
+)
+
+
+def test_prfix_workload_name_deterministic_sanitized():
+    assert prfix_workload_name(_item(repo="misospace/miso-gallery", pr=295)) == "prfix-misospace-miso-gallery-295"
+
+
+def test_build_fix_workload_code_verify_only_no_review():
+    item = _item(repo="o/r", pr=9, issue=42, branch="foreman/wl-x/issue-42",
+                 type="REVIEW_FEEDBACK", reason="address comments", feedback=["use Rel not prefix"])
+    wl = build_fix_workload(item, namespace="llm", gate_profile={"language": "python"},
+                            agent_name="foreman-coder", coder_agent="coder", attempt=1)
+    assert wl["metadata"]["name"] == "prfix-o-r-9"
+    assert wl["metadata"]["namespace"] == "llm"
+    assert wl["metadata"]["labels"]["created-by"] == PRFIX_CREATED_BY
+    assert wl["metadata"]["labels"]["lane"] == "NORMAL"
+    assert wl["metadata"]["annotations"][PRFIX_REPO_ANNOTATION] == "o/r"
+    assert wl["metadata"]["annotations"][PRFIX_PR_ANNOTATION] == "9"
+    assert wl["metadata"]["annotations"]["foreman.llmkube.dev/attempt"] == "1"
+    steps = wl["spec"]["pipeline"]
+    kinds = [s["kind"] for s in steps]
+    assert kinds == ["issue-fix", "verify"]                     # code + verify only, NO review
+    code = steps[0]
+    assert code["agentRef"] == {"name": "coder"}
+    assert code["payload"]["branch"] == "foreman/wl-x/issue-42"
+    assert code["payload"]["reviseFromBranch"] == "foreman/wl-x/issue-42"
+    assert code["payload"]["allowOverwrite"] is True
+    assert code["payload"]["issue"] == 42
+    assert "address comments" in code["payload"]["prompt"]
+    assert wl["spec"]["gateProfile"] == {"language": "python"}
+    assert "openPullRequest" not in code["payload"]
+
+
+def test_build_fix_workload_omits_issue_when_absent():
+    wl = build_fix_workload(_item(repo="o/r", pr=9, issue=None, branch="b"),
+                            "llm", None, "a", "coder")
+    assert "issue" not in wl["spec"]["pipeline"][0]["payload"]
+    assert "gateProfile" not in wl["spec"]
