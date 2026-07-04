@@ -135,3 +135,31 @@ def test_find_issue_id_scans_lanes_and_matches_repo_number():
     c = DispatchClient("http://d", "tok", http_get, lambda u, h, p: {})
     assert c.find_issue_id("agent", ["local", "frontier"], "a/b", 7) == "id-7"
     assert c.find_issue_id("agent", ["local", "frontier"], "a/b", 99) == ""
+
+
+def test_list_pr_fix_queued_queries_each_lane():
+    calls = []
+    def http_get(url, headers):
+        calls.append(url)
+        return [{"repo": "o/r", "pr": 1}] if "NORMAL" in url else [{"repo": "o/r", "pr": 2}]
+    c = DispatchClient("http://d", "t", http_get, lambda *a: {})
+    items = c.list_pr_fix_queued(["NORMAL", "ESCALATED"])
+    assert {i["pr"] for i in items} == {1, 2}
+    assert any("lane=NORMAL" in u and "/api/pr-fix-queue/queued" in u for u in calls)
+    assert any("lane=ESCALATED" in u for u in calls)
+
+
+def test_mark_pr_fix_posts_payload():
+    seen = {}
+    def http_post(url, headers, payload):
+        seen["url"] = url; seen["payload"] = payload
+        return {"ok": True}
+    c = DispatchClient("http://d", "t", lambda *a: [], http_post)
+    assert c.mark_pr_fix("o/r", 5, "FIXED", "done") is True
+    assert seen["url"].endswith("/api/pr-fix-queue/mark")
+    assert seen["payload"] == {"repo": "o/r", "pr": 5, "status": "FIXED", "note": "done"}
+
+
+def test_mark_pr_fix_false_when_post_returns_none():
+    c = DispatchClient("http://d", "t", lambda *a: [], lambda *a: None)
+    assert c.mark_pr_fix("o/r", 5, "FIXED") is False

@@ -127,3 +127,19 @@ class DispatchClient:
         Workload tombstone, so the next tick retries the escalation.
         """
         return self.set_lane(item, lane, reason) and self.unclaim(item, agent_name)
+
+    def list_pr_fix_queued(self, lanes: list) -> list:
+        """List QUEUED PR-fix items across the given lanes (one GET per lane,
+        concatenated). A non-list response for a lane contributes nothing."""
+        items = []
+        for lane in lanes:
+            url = f"{self._base}/api/pr-fix-queue/queued?lane={lane}"
+            data = self._get(url, self._headers())
+            if isinstance(data, list):
+                items.extend(data)
+        return items
+
+    def mark_pr_fix(self, repo: str, pr: int, status: str, note: str = "") -> bool:
+        """Transition a PR-fix item's status (QUEUED/FIXED/BLOCKED/...)."""
+        payload = {"repo": repo, "pr": pr, "status": status, "note": note}
+        return self._post(f"{self._base}/api/pr-fix-queue/mark", self._headers(), payload) is not None
