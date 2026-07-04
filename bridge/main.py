@@ -29,6 +29,8 @@ def run_once(
     gate_profiles: Optional[dict] = None,
     lane_coder_agents: Optional[dict] = None,
     revision_coder_agents: Optional[dict] = None,
+    in_progress: int = 0,
+    max_in_progress: int = 0,
 ) -> list:
     """Claim one ready issue per lane and materialize a Workload for each. Returns per-lane outcomes.
 
@@ -39,12 +41,21 @@ def run_once(
     lane_coder_agents maps a lane -> a coder Agent name (with "*" wildcard), so
     an escalation lane can route to a stronger (e.g. cloud-proxy) coder.
     None/empty routes every lane to the default coder.
+
+    max_in_progress (when > 0) caps how many issues are worked at once: claiming
+    stops once in_progress reaches the cap, so the pipeline works a bounded set
+    instead of the whole backlog. in_progress is the current count of active
+    (non-terminal) bridge Workloads, supplied by the caller. Retries are not
+    gated here (they re-run already-claimed work).
     """
     gate_profiles = gate_profiles or {}
     lane_coder_agents = lane_coder_agents or {}
     revision_coder_agents = revision_coder_agents or {}
     results = []
     for lane in lanes:
+        if max_in_progress and in_progress >= max_in_progress:
+            results.append(f"{lane}:capped:{in_progress}/{max_in_progress}")
+            continue
         item = claim_one(agent_name, lane)
         if item is None:
             results.append(f"{lane}:empty")
@@ -58,6 +69,7 @@ def run_once(
             revision_coder_agent=revision_coder_agent_for(item.lane, revision_coder_agents),
         )
         create_workload(manifest)
+        in_progress += 1
         results.append(f"{lane}:created:{manifest['metadata']['name']}")
     return results
 
@@ -113,16 +125,28 @@ def _real_main() -> None:  # pragma: no cover - thin wiring, exercised in the cl
             if e.status != 409:  # 409 = Workload already exists -> idempotent no-op
                 raise
 
-    def list_failed_workloads() -> list:
+    def list_bridge_workloads() -> list:
         resp = api.list_namespaced_custom_object(
             group="foreman.llmkube.dev", version="v1alpha1",
             namespace=namespace, plural="workloads",
             label_selector="created-by=dispatch-bridge",
         )
+        return resp.get("items", [])
+
+    def list_failed_workloads() -> list:
         return [
-            wl for wl in resp.get("items", [])
+            wl for wl in list_bridge_workloads()
             if (wl.get("status") or {}).get("phase") == "Failed"
         ]
+
+    def count_active_workloads() -> int:
+        # Non-terminal bridge Workloads = issues currently being worked. Drives
+        # the in-progress cap so claiming stops once the working set is full.
+        terminal = {"Completed", "Failed"}
+        return sum(
+            1 for wl in list_bridge_workloads()
+            if ((wl.get("status") or {}).get("phase") or "") not in terminal
+        )
 
     def delete_workload(name: str) -> None:
         # Foreground delete + poll: the retry recreates the same name, so the old
@@ -192,9 +216,14 @@ def _real_main() -> None:  # pragma: no cover - thin wiring, exercised in the cl
     ):
         print(line)
 
+    # Cap concurrent in-progress work so the pipeline drains a bounded set
+    # instead of claiming the whole backlog at once (0 = uncapped).
+    max_in_progress = int(os.environ.get("MAX_IN_PROGRESS", "0"))
+    active = count_active_workloads() if max_in_progress else 0
     for line in run_once(
         lanes, agent_name, dispatch.claim_one, create_workload, namespace,
         gate_profiles, lane_coder_agents, revision_coder_agents,
+        in_progress=active, max_in_progress=max_in_progress,
     ):
         print(line)
 
