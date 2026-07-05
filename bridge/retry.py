@@ -143,8 +143,18 @@ def reconcile_failures(
                 and item.lane != escalation_lane
                 and item.issue_id
             )
-            if can_escalate and escalate(item):
-                delete_workload(name)
+            # An escalate hook that raises (dispatch 400 on unclaim for a
+            # closed/done issue) must not abort the rest of the reconcile pass
+            # and the downstream claim/pr-fix passes. Treat a raise like a False
+            # return: keep the tombstone, the next tick retries the escalation.
+            try:
+                escalated = bool(can_escalate and escalate(item))
+                if escalated:
+                    delete_workload(name)
+            except Exception as e:
+                results.append(f"{name}:escalate-error:{e}")
+                continue
+            if escalated:
                 results.append(f"{name}:escalated:{item.lane or '?'}->{escalation_lane}")
             else:
                 results.append(f"{name}:giveup:{attempt}/{max_attempts}")

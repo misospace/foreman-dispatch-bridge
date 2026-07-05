@@ -108,6 +108,27 @@ def test_reconcile_keeps_tombstone_when_escalate_fails():
     assert r.deleted == []             # keep the tombstone; next tick retries escalation
 
 
+def test_reconcile_escalate_that_raises_keeps_tombstone_and_continues():
+    # A closed/done issue makes dispatch's unclaim return 400, which the escalate
+    # hook surfaces as a raise. That must not abort the reconcile pass: keep the
+    # raiser's tombstone and keep processing the rest of the Failed Workloads
+    # (and, downstream, the claim + pr-fix passes).
+    r = _Recorder([
+        _failed_wl("wl-a-b-7", attempt=3, issue_id="id-7"),
+        _failed_wl("wl-c-d-9", repo="c/d", issue=9, attempt=1, issue_id="id-9"),
+    ])
+
+    def boom(item):
+        raise RuntimeError("400 unclaim: closed issue")
+
+    out = reconcile_failures("foreman-coder", r.list_failed, r.create, r.delete,
+                             "llm", {}, max_attempts=3,
+                             escalate=boom, escalation_lane="frontier")
+    assert out[0] == "wl-a-b-7:escalate-error:400 unclaim: closed issue"
+    assert out[1] == "wl-c-d-9:retry:2/3"      # the workload after the raiser still processed
+    assert r.deleted == ["wl-c-d-9"]           # raiser's tombstone kept; only the retry deleted
+
+
 def test_reconcile_never_escalates_out_of_the_escalation_lane():
     r = _Recorder([_failed_wl("wl-a-b-7", attempt=3, lane="frontier")])
     out = reconcile_failures("foreman-coder", r.list_failed, r.create, r.delete,
