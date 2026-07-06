@@ -91,10 +91,56 @@ def test_parse_lane_coder_agents_empty_is_empty_dict():
 def test_coder_agent_for_prefers_exact_then_wildcard_then_default():
     from bridge.workload import coder_agent_for
     agents = {"*": "coder", "frontier": "coder-frontier"}
-    assert coder_agent_for("frontier", agents) == "coder-frontier"
-    assert coder_agent_for("local", agents) == "coder"
-    assert coder_agent_for("local", {"frontier": "coder-frontier"}) == "coder"  # no wildcard -> default
-    assert coder_agent_for("anything", {}) == "coder"
+    assert coder_agent_for("frontier", None, agents) == "coder-frontier"
+    assert coder_agent_for("local", None, agents) == "coder"
+    assert coder_agent_for("local", None, {"frontier": "coder-frontier"}) == "coder"  # no wildcard -> default
+    assert coder_agent_for("anything", None, {}) == "coder"
+
+
+def test_parse_base_coder_agents_empty_is_empty_dict():
+    from bridge.workload import parse_base_coder_agents
+    assert parse_base_coder_agents(None) == {}
+    assert parse_base_coder_agents("") == {}
+    assert parse_base_coder_agents("  ") == {}
+
+
+def test_parse_base_coder_agents_parses_json_map():
+    from bridge.workload import parse_base_coder_agents
+    raw = '{"python": "coder-python", "node": "coder-node", "go": "coder-go", "*": "coder"}'
+    assert parse_base_coder_agents(raw) == {
+        "python": "coder-python", "node": "coder-node", "go": "coder-go", "*": "coder",
+    }
+
+
+def test_coder_agent_for_routes_base_lane_by_language():
+    from bridge.workload import coder_agent_for
+    base = {"python": "coder-python", "node": "coder-node", "go": "coder-go", "*": "coder"}
+    assert coder_agent_for("local", "python", {}, base) == "coder-python"
+    assert coder_agent_for("local", "node", {}, base) == "coder-node"
+    assert coder_agent_for("local", "go", {}, base) == "coder-go"
+
+
+def test_coder_agent_for_base_lane_falls_back_to_wildcard_for_unknown_language():
+    from bridge.workload import coder_agent_for
+    base = {"python": "coder-python", "*": "coder"}
+    assert coder_agent_for("local", "generic", {}, base) == "coder"
+    assert coder_agent_for("local", None, {}, base) == "coder"
+
+
+def test_coder_agent_for_explicit_lane_wins_over_language():
+    # Escalation (frontier) and revision tiers are language-agnostic: an
+    # explicit per-lane mapping wins outright regardless of the repo's language.
+    from bridge.workload import coder_agent_for
+    lane_agents = {"frontier": "coder-frontier"}
+    base = {"python": "coder-python", "*": "coder"}
+    assert coder_agent_for("frontier", "python", lane_agents, base) == "coder-frontier"
+    assert coder_agent_for("frontier", "node", lane_agents, base) == "coder-frontier"
+
+
+def test_coder_agent_for_empty_base_coder_agents_is_legacy_behavior():
+    from bridge.workload import coder_agent_for
+    assert coder_agent_for("local", "python", {}, {}) == "coder"
+    assert coder_agent_for("local", "python", {}, None) == "coder"
 
 
 def test_build_workload_uses_explicit_coder_agent():

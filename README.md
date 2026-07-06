@@ -31,7 +31,8 @@ issue per lane.
 | `DISPATCH_LANES` | `local,cloud,frontier` | lanes polled per tick |
 | `FOREMAN_NAMESPACE` | `llm` | namespace for Workloads |
 | `GATEPROFILE_MAP` | *(empty)* | JSON `{repo: GateProfile}` with `"*"` wildcard |
-| `LANE_CODER_AGENTS` | *(empty)* | JSON `{lane: coderAgentName}` with `"*"` wildcard |
+| `LANE_CODER_AGENTS` | *(empty)* | JSON `{lane: coderAgentName}` with `"*"` wildcard; wins over `BASE_CODER_AGENTS` |
+| `BASE_CODER_AGENTS` | *(empty)* | JSON `{language: coderAgentName}` with `"*"` wildcard; routes the base lane's coder by the repo's `GATEPROFILE_MAP` language |
 | `ESCALATION_LANE` | *(empty = off)* | lane exhausted issues re-lane into |
 | `RETRY_MAX_ATTEMPTS` | `3` | attempts before escalate/tombstone |
 | `PR_FIX_ENABLED` | *(off)* | enable the PR-fix drain/reconcile loop |

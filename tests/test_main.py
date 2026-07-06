@@ -90,3 +90,63 @@ def test_cap_zero_is_uncapped():
     run_once(LANES, "foreman/coder", _claim_stub({"local": item}),
              created.append, namespace="llm", in_progress=999, max_in_progress=0)
     assert len(created) == 1  # cap 0 => no gating even with high in_progress
+
+
+def test_base_lane_routes_to_python_coder_by_repo_language():
+    created = []
+    item = ClaimedItem(repo="misospace/miso-py", issue_number=1, intent="fix", lane="local")
+    gate_profiles = {"misospace/miso-py": {"language": "python"}}
+    base_coder_agents = {"python": "coder-python", "node": "coder-node", "*": "coder"}
+    run_once(LANES, "foreman/coder", _claim_stub({"local": item}), created.append,
+             namespace="llm", gate_profiles=gate_profiles, base_coder_agents=base_coder_agents)
+    assert created[0]["spec"]["coderAgentRef"]["name"] == "coder-python"
+
+
+def test_base_lane_routes_to_node_coder_by_repo_language():
+    created = []
+    item = ClaimedItem(repo="misospace/dispatch", issue_number=2, intent="fix", lane="local")
+    gate_profiles = {"misospace/dispatch": {"language": "node"}}
+    base_coder_agents = {"python": "coder-python", "node": "coder-node", "*": "coder"}
+    run_once(LANES, "foreman/coder", _claim_stub({"local": item}), created.append,
+             namespace="llm", gate_profiles=gate_profiles, base_coder_agents=base_coder_agents)
+    assert created[0]["spec"]["coderAgentRef"]["name"] == "coder-node"
+
+
+def test_base_lane_no_gate_profile_falls_back_to_wildcard_coder():
+    created = []
+    item = ClaimedItem(repo="misospace/unmapped", issue_number=3, intent="fix", lane="local")
+    base_coder_agents = {"python": "coder-python", "*": "coder"}
+    run_once(LANES, "foreman/coder", _claim_stub({"local": item}), created.append,
+             namespace="llm", base_coder_agents=base_coder_agents)
+    assert created[0]["spec"]["coderAgentRef"]["name"] == "coder"
+
+
+def test_base_lane_generic_language_falls_back_to_wildcard_coder():
+    created = []
+    item = ClaimedItem(repo="misospace/generic-repo", issue_number=4, intent="fix", lane="local")
+    gate_profiles = {"misospace/generic-repo": {"language": "generic"}}
+    base_coder_agents = {"python": "coder-python", "*": "coder"}
+    run_once(LANES, "foreman/coder", _claim_stub({"local": item}), created.append,
+             namespace="llm", gate_profiles=gate_profiles, base_coder_agents=base_coder_agents)
+    assert created[0]["spec"]["coderAgentRef"]["name"] == "coder"
+
+
+def test_frontier_lane_wins_over_language_routing():
+    created = []
+    item = ClaimedItem(repo="misospace/miso-py", issue_number=5, intent="fix", lane="frontier")
+    gate_profiles = {"misospace/miso-py": {"language": "python"}}
+    lane_coder_agents = {"frontier": "coder-frontier"}
+    base_coder_agents = {"python": "coder-python", "*": "coder"}
+    run_once(LANES, "foreman/coder", _claim_stub({"frontier": item}), created.append,
+             namespace="llm", gate_profiles=gate_profiles,
+             lane_coder_agents=lane_coder_agents, base_coder_agents=base_coder_agents)
+    assert created[0]["spec"]["coderAgentRef"]["name"] == "coder-frontier"
+
+
+def test_empty_base_coder_agents_is_legacy_behavior():
+    created = []
+    item = ClaimedItem(repo="misospace/miso-py", issue_number=6, intent="fix", lane="local")
+    gate_profiles = {"misospace/miso-py": {"language": "python"}}
+    run_once(LANES, "foreman/coder", _claim_stub({"local": item}), created.append,
+             namespace="llm", gate_profiles=gate_profiles)
+    assert created[0]["spec"]["coderAgentRef"]["name"] == "coder"
