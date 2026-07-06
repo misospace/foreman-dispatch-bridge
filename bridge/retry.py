@@ -103,6 +103,7 @@ def reconcile_failures(
     escalate: Optional[Escalate] = None,
     escalation_lane: str = "",
     lane_coder_agents: Optional[dict] = None,
+    base_coder_agents: Optional[dict] = None,
     lookup_issue_id: Optional[LookupIssueId] = None,
     feedback_for: Optional[FeedbackFor] = None,
 ) -> list:
@@ -126,6 +127,7 @@ def reconcile_failures(
     Returns per-Workload outcome strings.
     """
     lane_coder_agents = lane_coder_agents or {}
+    base_coder_agents = base_coder_agents or {}
     results = []
     for wl in list_failed():
         name = ((wl.get("metadata") or {}).get("name")) or "?"
@@ -170,13 +172,14 @@ def reconcile_failures(
         # bad Workload previously crashed the whole bridge run every tick.
         try:
             delete_workload(name)
+            language = gate_profiles.get(item.repo, {}).get("language")
             manifest = build_workload(
                 item,
                 namespace,
                 gate_profile_for(item.repo, gate_profiles),
                 agent_name,
                 attempt + 1,
-                coder_agent_for(item.lane, lane_coder_agents),
+                coder_agent_for(item.lane, language, lane_coder_agents, base_coder_agents),
                 feedback=feedback,
             )
             create_workload(manifest)

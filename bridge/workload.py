@@ -71,11 +71,39 @@ def parse_lane_coder_agents(raw: Optional[str]) -> dict:
     return json.loads(raw)
 
 
-def coder_agent_for(lane: str, lane_coder_agents: dict) -> str:
-    """Resolve a lane's coder Agent: exact match, then "*", else the default coder."""
-    if not lane_coder_agents:
-        return CODER_AGENT
-    return lane_coder_agents.get(lane) or lane_coder_agents.get(LANE_CODER_WILDCARD) or CODER_AGENT
+def parse_base_coder_agents(raw: Optional[str]) -> dict:
+    """Parse the BASE_CODER_AGENTS env var (JSON object: language -> coder Agent name).
+
+    Same shape/parser as LANE_CODER_AGENTS, keyed by the repo's programming
+    language instead of lane. Empty or absent -> {}, so the base lane routes
+    to the default coder Agent (unchanged behavior). Example:
+
+        {"python": "coder-python", "node": "coder-node", "go": "coder-go", "*": "coder"}
+    """
+    return parse_lane_coder_agents(raw)
+
+
+def coder_agent_for(
+    lane: str, language: Optional[str], lane_coder_agents: dict, base_coder_agents: Optional[dict] = None
+) -> str:
+    """Resolve a lane's coder Agent.
+
+    Explicit per-lane mappings (e.g. the frontier escalation lane -> a
+    cloud-proxy coder) are language-agnostic and win outright. Otherwise the
+    base lane routes by the repo's language via base_coder_agents (exact
+    match, then its own "*" wildcard). Falls back to the lane wildcard, then
+    the hardcoded default coder.
+    """
+    lane_coder_agents = lane_coder_agents or {}
+    base_coder_agents = base_coder_agents or {}
+    explicit = lane_coder_agents.get(lane)
+    if explicit:
+        return explicit
+    if base_coder_agents:
+        by_lang = base_coder_agents.get(language) or base_coder_agents.get(LANE_CODER_WILDCARD)
+        if by_lang:
+            return by_lang
+    return lane_coder_agents.get(LANE_CODER_WILDCARD) or CODER_AGENT
 
 
 def revision_coder_agent_for(lane: str, revision_coder_agents: dict) -> str:

@@ -9,6 +9,7 @@ from bridge.workload import (
     gate_profile_for,
     parse_gate_profiles,
     parse_lane_coder_agents,
+    parse_base_coder_agents,
 )
 from bridge.retry import reconcile_failures, feedback_from_tasks, DEFAULT_MAX_ATTEMPTS
 from bridge.prfix import (
@@ -29,6 +30,7 @@ def run_once(
     gate_profiles: Optional[dict] = None,
     lane_coder_agents: Optional[dict] = None,
     revision_coder_agents: Optional[dict] = None,
+    base_coder_agents: Optional[dict] = None,
     in_progress: int = 0,
     max_in_progress: int = 0,
 ) -> list:
@@ -39,8 +41,13 @@ def run_once(
     run their own language gate. None/empty leaves gateProfile off (Go default).
 
     lane_coder_agents maps a lane -> a coder Agent name (with "*" wildcard), so
-    an escalation lane can route to a stronger (e.g. cloud-proxy) coder.
-    None/empty routes every lane to the default coder.
+    an escalation lane can route to a stronger (e.g. cloud-proxy) coder. Those
+    mappings are language-agnostic and win outright.
+
+    base_coder_agents maps a repo's language (via gate_profiles) -> a coder
+    Agent name (with "*" wildcard), so the base lane routes a Python repo to
+    coder-python, a Node repo to coder-node, etc. None/empty routes every lane
+    to the default coder (legacy behavior).
 
     max_in_progress (when > 0) caps how many issues are worked at once: claiming
     stops once in_progress reaches the cap, so the pipeline works a bounded set
@@ -51,6 +58,7 @@ def run_once(
     gate_profiles = gate_profiles or {}
     lane_coder_agents = lane_coder_agents or {}
     revision_coder_agents = revision_coder_agents or {}
+    base_coder_agents = base_coder_agents or {}
     results = []
     for lane in lanes:
         if max_in_progress and in_progress >= max_in_progress:
@@ -60,12 +68,13 @@ def run_once(
         if item is None:
             results.append(f"{lane}:empty")
             continue
+        language = gate_profiles.get(item.repo, {}).get("language")
         manifest = build_workload(
             item,
             namespace,
             gate_profile_for(item.repo, gate_profiles),
             agent_name,
-            coder_agent=coder_agent_for(item.lane, lane_coder_agents),
+            coder_agent=coder_agent_for(item.lane, language, lane_coder_agents, base_coder_agents),
             revision_coder_agent=revision_coder_agent_for(item.lane, revision_coder_agents),
         )
         create_workload(manifest)
@@ -90,6 +99,10 @@ def _real_main() -> None:  # pragma: no cover - thin wiring, exercised in the cl
     lane_coder_agents = parse_lane_coder_agents(os.environ.get("LANE_CODER_AGENTS"))
     # Lane -> revision-tuned coder Agent map (Workload.spec.revisionCoderAgentRef).
     revision_coder_agents = parse_lane_coder_agents(os.environ.get("REVISION_CODER_AGENTS"))
+    # Language -> coder Agent map for the base lane, e.g.
+    # '{"python": "coder-python", "node": "coder-node", "go": "coder-go", "*": "coder"}'.
+    # Explicit lane_coder_agents entries (e.g. frontier) still win outright.
+    base_coder_agents = parse_base_coder_agents(os.environ.get("BASE_CODER_AGENTS"))
     # When set, exhausted Workloads outside this lane escalate into it (re-lane +
     # unclaim) instead of tombstoning. Empty disables escalation.
     escalation_lane = os.environ.get("ESCALATION_LANE", "").strip()
@@ -212,6 +225,7 @@ def _real_main() -> None:  # pragma: no cover - thin wiring, exercised in the cl
         escalate=escalate if escalation_lane else None,
         escalation_lane=escalation_lane,
         lane_coder_agents=lane_coder_agents,
+        base_coder_agents=base_coder_agents,
         lookup_issue_id=lookup_issue_id,
         feedback_for=feedback_for,
     ):
@@ -224,6 +238,7 @@ def _real_main() -> None:  # pragma: no cover - thin wiring, exercised in the cl
     for line in run_once(
         lanes, agent_name, dispatch.claim_one, create_workload, namespace,
         gate_profiles, lane_coder_agents, revision_coder_agents,
+        base_coder_agents=base_coder_agents,
         in_progress=active, max_in_progress=max_in_progress,
     ):
         print(line)

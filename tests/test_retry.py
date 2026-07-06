@@ -154,6 +154,25 @@ def test_reconcile_retry_uses_lane_coder_agent():
     assert r.created[0]["spec"]["coderAgentRef"] == {"name": "coder-frontier"}
 
 
+def test_reconcile_retry_routes_base_lane_by_repo_language():
+    r = _Recorder([_failed_wl("wl-misospace-dispatch-7", attempt=1, lane="local", repo="misospace/dispatch")])
+    gate_profiles = {"misospace/dispatch": {"language": "node"}}
+    reconcile_failures("foreman-coder", r.list_failed, r.create, r.delete,
+                       "llm", gate_profiles, max_attempts=3,
+                       base_coder_agents={"node": "coder-node", "*": "coder"})
+    assert r.created[0]["spec"]["coderAgentRef"] == {"name": "coder-node"}
+
+
+def test_reconcile_retry_frontier_lane_wins_over_language_routing():
+    r = _Recorder([_failed_wl("wl-misospace-dispatch-7", attempt=1, lane="frontier", repo="misospace/dispatch")])
+    gate_profiles = {"misospace/dispatch": {"language": "node"}}
+    reconcile_failures("foreman-coder", r.list_failed, r.create, r.delete,
+                       "llm", gate_profiles, max_attempts=3,
+                       lane_coder_agents={"frontier": "coder-frontier"},
+                       base_coder_agents={"node": "coder-node", "*": "coder"})
+    assert r.created[0]["spec"]["coderAgentRef"] == {"name": "coder-frontier"}
+
+
 def _no_go_review(findings=None, summary=""):
     return {
         "spec": {"kind": "review"},
