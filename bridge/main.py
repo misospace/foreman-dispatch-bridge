@@ -95,6 +95,7 @@ def _real_main() -> None:  # pragma: no cover - thin wiring, exercised in the cl
     escalation_lane = os.environ.get("ESCALATION_LANE", "").strip()
     pr_fix_enabled = os.environ.get("PR_FIX_ENABLED", "").strip().lower() in ("1", "true", "yes")
     pr_fix_max_attempts = int(os.environ.get("PR_FIX_MAX_ATTEMPTS", "3"))
+    github_token = os.environ.get("GITHUB_TOKEN", "")
     _raw_lane_agents = os.environ.get("PR_FIX_LANE_AGENTS", "").strip()
     pr_fix_lane_agents = json.loads(_raw_lane_agents) if _raw_lane_agents else dict(DEFAULT_PRFIX_LANE_AGENTS)
 
@@ -243,9 +244,28 @@ def _real_main() -> None:  # pragma: no cover - thin wiring, exercised in the cl
                 print(f"prfix-mark-failed:{repo}#{pr}:{status}:{e}")
                 return False
 
+        # GitHub's own merge-state, not the fix workload's exit status, is the
+        # source of truth for "did this PR actually become mergeable". Only
+        # DIRTY/CONFLICTING block a FIXED mark; other states (CLEAN, UNSTABLE,
+        # BEHIND, BLOCKED, UNKNOWN, ...) count as mergeable. A lookup failure
+        # is treated as *not* mergeable (conservative): reconcile_pr_fixes
+        # just retries under its attempt cap rather than falsely marking
+        # FIXED off an unverified success, which is the bug this closes.
+        def pr_is_mergeable(repo, pr) -> bool:
+            headers = {"Accept": "application/vnd.github+json"}
+            if github_token:
+                headers["Authorization"] = f"Bearer {github_token}"
+            try:
+                data = http_get(f"https://api.github.com/repos/{repo}/pulls/{pr}", headers)
+            except Exception as e:  # best-effort; retried next tick under the attempt cap
+                print(f"prfix-mergeable-check-failed:{repo}#{pr}:{e}")
+                return False
+            state = str((data or {}).get("mergeable_state") or "").lower()
+            return state not in ("dirty", "conflicting")
+
         for line in reconcile_pr_fixes(
             list_prfix_workloads, delete_workload, create_workload,
-            mark_pr_fix, max_attempts=pr_fix_max_attempts,
+            mark_pr_fix, pr_is_mergeable=pr_is_mergeable, max_attempts=pr_fix_max_attempts,
         ):
             print(line)
 
