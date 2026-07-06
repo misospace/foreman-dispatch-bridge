@@ -243,6 +243,71 @@ def test_reconcile_failed_at_max_marks_blocked():
     assert deleted == []
 
 
+def test_reconcile_succeeded_but_pr_conflicting_retries_instead_of_fixed():
+    """Fix workload succeeded, but the PR is still CONFLICTING/DIRTY on GitHub
+    (the KubeTix#198 case): must not mark FIXED, must retry like a Failed one."""
+    created, deleted = [], []
+    out = reconcile_pr_fixes(
+        list_prfix_workloads=lambda: [_wl(198, "Succeeded", attempt=1)],
+        delete_workload=deleted.append, create_workload=created.append,
+        mark_pr_fix=lambda *a: (_ for _ in ()).throw(AssertionError("must not mark FIXED")),
+        pr_is_mergeable=lambda repo, pr: False,
+        max_attempts=3,
+    )
+    assert deleted == ["prfix-o-r-198"]
+    assert created[0]["metadata"]["annotations"]["foreman.llmkube.dev/attempt"] == "2"
+    assert out == ["prfix-o-r-198:not-mergeable-retry:2/3"]
+
+
+def test_reconcile_succeeded_and_mergeable_marks_fixed():
+    marks, deleted = [], []
+
+    def _mark(repo, pr, status, note):
+        marks.append((repo, pr, status))
+        return True
+
+    out = reconcile_pr_fixes(
+        list_prfix_workloads=lambda: [_wl(5, "Succeeded")],
+        delete_workload=deleted.append,
+        create_workload=lambda m: (_ for _ in ()).throw(AssertionError("no recreate")),
+        mark_pr_fix=_mark,
+        pr_is_mergeable=lambda repo, pr: True,
+    )
+    assert marks == [("o/r", 5, "FIXED")]
+    assert deleted == ["prfix-o-r-5"]
+    assert out == ["prfix-o-r-5:fixed"]
+
+
+def test_reconcile_succeeded_still_conflicting_at_max_marks_blocked_not_fixed():
+    marks, deleted, created = [], [], []
+    out = reconcile_pr_fixes(
+        list_prfix_workloads=lambda: [_wl(198, "Succeeded", attempt=3)],
+        delete_workload=deleted.append, create_workload=created.append,
+        mark_pr_fix=lambda repo, pr, status, note: marks.append((repo, pr, status, note)),
+        pr_is_mergeable=lambda repo, pr: False,
+        max_attempts=3,
+    )
+    assert marks[0][:3] == ("o/r", 198, "BLOCKED")     # not silently dropped, and not FIXED
+    assert "not mergeable" in marks[0][3]
+    assert out == ["prfix-o-r-198:not-mergeable-giveup:3/3"]
+    assert deleted == []                                # tombstone kept, same as the Failed/giveup path
+    assert created == []
+
+
+def test_reconcile_default_pr_is_mergeable_preserves_prior_behavior():
+    """No pr_is_mergeable injected -> defaults to always-mergeable, matching
+    pre-fix behavior for callers that don't check (backward compatible)."""
+    marks, deleted = [], []
+    out = reconcile_pr_fixes(
+        list_prfix_workloads=lambda: [_wl(5, "Succeeded")],
+        delete_workload=deleted.append,
+        create_workload=lambda m: (_ for _ in ()).throw(AssertionError("no recreate")),
+        mark_pr_fix=lambda repo, pr, status, note: marks.append((repo, pr, status)) or True,
+    )
+    assert marks == [("o/r", 5, "FIXED")]
+    assert out == ["prfix-o-r-5:fixed"]
+
+
 def test_reconcile_ignores_nonterminal_and_isolates_errors():
     marks = []
     def delete(n):

@@ -34,6 +34,9 @@ issue per lane.
 | `LANE_CODER_AGENTS` | *(empty)* | JSON `{lane: coderAgentName}` with `"*"` wildcard |
 | `ESCALATION_LANE` | *(empty = off)* | lane exhausted issues re-lane into |
 | `RETRY_MAX_ATTEMPTS` | `3` | attempts before escalate/tombstone |
+| `PR_FIX_ENABLED` | *(off)* | enable the PR-fix drain/reconcile loop |
+| `PR_FIX_MAX_ATTEMPTS` | `3` | pr-fix attempts before BLOCKED/tombstone |
+| `GITHUB_TOKEN` | *(empty)* | used to check a PR's `mergeable_state` before marking a pr-fix FIXED (unauthenticated if unset) |
 
 ## RBAC
 
