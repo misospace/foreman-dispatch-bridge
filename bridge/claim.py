@@ -106,14 +106,23 @@ class DispatchClient:
         return self._post(url, self._headers(), payload) is not None
 
     def unclaim(self, item: ClaimedItem, agent_name: str) -> bool:
-        """Release the bridge's claim so the issue is claimable again."""
+        """Release the bridge's claim so the issue is claimable again.
+
+        Treats 400 as success: the issue may already be unclaimed, closed, or in
+        a terminal state — either way it won't be re-served to the original agent."""
         payload = {
             "issueId": item.issue_id,
             "repoFullName": item.repo,
             "issueNumber": item.issue_number,
             "agentName": agent_name,
         }
-        return self._post(f"{self._base}/api/issues/unclaim", self._headers(), payload) is not None
+        try:
+            return self._post(f"{self._base}/api/issues/unclaim", self._headers(), payload) is not None
+        except Exception as e:
+            status = getattr(e, "response", None)
+            if status and getattr(status, "status_code", None) == 400:
+                return True  # already released / terminal — effectively unclaimed
+            raise
 
     def find_issue_id(self, agent_name: str, lanes: list, repo: str, issue_number: int) -> str:
         """Recover a dispatch issue id by repo+number from the lane queues
@@ -130,11 +139,11 @@ class DispatchClient:
     def escalate(self, item: ClaimedItem, lane: str, reason: str, agent_name: str) -> bool:
         """Move a given-up issue to the escalation lane and release the claim.
 
-        Lane first, then unclaim: if the unclaim fails the issue stays claimed
-        (so nothing re-serves it into a loop) and the caller keeps the Failed
-        Workload tombstone, so the next tick retries the escalation.
+        Unclaim first, then lane: if set_lane fails the issue is at least
+        released (so something else can pick it up). If unclaim fails the
+        issue stays in its original lane — no partial escalation.
         """
-        return self.set_lane(item, lane, reason) and self.unclaim(item, agent_name)
+        return self.unclaim(item, agent_name) and self.set_lane(item, lane, reason)
 
     def list_pr_fix_queued(self, lanes: list) -> list:
         """List QUEUED PR-fix items across the given lanes (one GET per lane,

@@ -131,21 +131,77 @@ def test_unclaim_posts_release():
                        "agentName": "foreman-coder"}
 
 
-def test_escalate_stops_after_failed_lane_move():
+def test_unclaim_treats_400_as_success():
+    """Dispatch returns 400 for closed/done/already-unclaimed issues.
+    Treat this as success — the issue is effectively released either way."""
     from bridge.models import ClaimedItem
-    # First POST (lane) -> None (failure); unclaim must NOT run.
+    import requests as req
+
+    def http_post_400(url, headers, payload):
+        r = req.HTTPError("400 Bad Request")
+        r.response = type("Response", (), {"status_code": 400})()
+        raise r
+
+    c = DispatchClient("http://d", "tok", lambda u, h: [], http_post_400)
+    item = ClaimedItem(repo="a/b", issue_number=7, intent="t", lane="local", issue_id="id-7")
+    assert c.unclaim(item, "foreman-coder") is True
+
+
+def test_unclaim_non_400_error_still_raises():
+    """Non-400 errors (500, network) must propagate — don't swallow real failures."""
+    from bridge.models import ClaimedItem
+    import requests as req
+
+    def http_post_500(url, headers, payload):
+        r = req.HTTPError("500 Server Error")
+        r.response = type("Response", (), {"status_code": 500})()
+        raise r
+
+    c = DispatchClient("http://d", "tok", lambda u, h: [], http_post_500)
+    item = ClaimedItem(repo="a/b", issue_number=7, intent="t", lane="local", issue_id="id-7")
+    try:
+        c.unclaim(item, "foreman-coder")
+        assert False, "should have raised"
+    except req.HTTPError:
+        pass
+
+
+def test_escalate_succeeds_when_unclaim_400():
+    """unclaim 400 + set_lane success -> escalation succeeds (issue is released + re-laned)."""
+    from bridge.models import ClaimedItem
+    import requests as req
+
+    calls = []
+
+    def http_post_mixed(url, headers, payload):
+        calls.append(url)
+        if "unclaim" in url:
+            r = req.HTTPError("400 Bad Request")
+            r.response = type("Response", (), {"status_code": 400})()
+            raise r
+        return {}
+
+    c = DispatchClient("http://d", "tok", lambda u, h: [], http_post_mixed)
+    item = ClaimedItem(repo="a/b", issue_number=7, intent="t", lane="local", issue_id="id-7")
+    assert c.escalate(item, "frontier", "r", "foreman-coder") is True
+    assert calls == ["http://d/api/issues/unclaim", "http://d/api/issues/id-7/lane"]
+
+
+def test_escalate_stops_after_failed_unclaim():
+    from bridge.models import ClaimedItem
+    # First POST (unclaim) -> None (failure); set_lane must NOT run.
     c, posts = _client_recording_posts(responses=[None])
     item = ClaimedItem(repo="a/b", issue_number=7, intent="t", lane="local", issue_id="id-7")
     assert c.escalate(item, "frontier", "r", "foreman-coder") is False
     assert len(posts) == 1
 
 
-def test_escalate_lane_then_unclaim():
+def test_escalate_unclaim_then_lane():
     from bridge.models import ClaimedItem
     c, posts = _client_recording_posts(responses=[{}, {}])
     item = ClaimedItem(repo="a/b", issue_number=7, intent="t", lane="local", issue_id="id-7")
     assert c.escalate(item, "frontier", "r", "foreman-coder") is True
-    assert [u for u, _ in posts] == ["http://d/api/issues/id-7/lane", "http://d/api/issues/unclaim"]
+    assert [u for u, _ in posts] == ["http://d/api/issues/unclaim", "http://d/api/issues/id-7/lane"]
 
 
 def test_find_issue_id_scans_lanes_and_matches_repo_number():
