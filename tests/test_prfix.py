@@ -204,18 +204,6 @@ def test_reconcile_succeeded_marks_fixed_and_deletes():
     assert out == ["prfix-o-r-5:fixed"]
 
 
-def test_reconcile_succeeded_mark_fails_keeps_workload():
-    deleted = []
-    out = reconcile_pr_fixes(
-        list_prfix_workloads=lambda: [_wl(5, "Succeeded")],
-        delete_workload=deleted.append,
-        create_workload=lambda m: (_ for _ in ()).throw(AssertionError("no recreate")),
-        mark_pr_fix=lambda *a: False,
-    )
-    assert deleted == []
-    assert out == ["prfix-o-r-5:fixed-mark-pending"]
-
-
 def test_reconcile_failed_under_max_deletes_and_recreates():
     created, deleted = [], []
     out = reconcile_pr_fixes(
@@ -306,6 +294,46 @@ def test_reconcile_default_pr_is_mergeable_preserves_prior_behavior():
     )
     assert marks == [("o/r", 5, "FIXED")]
     assert out == ["prfix-o-r-5:fixed"]
+
+
+def test_reconcile_succeeded_mark_fails_at_max_gives_up_blocked():
+    """When mark_pr_fix(FIXED) keeps failing at the attempt cap, stop retrying
+    and mark BLOCKED so the PR doesn't sit stuck forever."""
+    marks, deleted, created = [], [], []
+    def _mark(repo, pr, status, note):
+        marks.append((repo, pr, status, note))
+        return False  # mark always fails
+    out = reconcile_pr_fixes(
+        list_prfix_workloads=lambda: [_wl(5, "Succeeded", attempt=3)],
+        delete_workload=deleted.append, create_workload=created.append,
+        mark_pr_fix=_mark,
+        max_attempts=3,
+    )
+    # First call was mark FIXED (failed), second is mark BLOCKED
+    assert marks[0][:3] == ("o/r", 5, "FIXED")
+    assert marks[1][:3] == ("o/r", 5, "BLOCKED")  # gave up, surfaced BLOCKED
+    assert out == ["prfix-o-r-5:giveup:3/3"]
+    assert deleted == []                          # tombstone kept
+
+
+def test_reconcile_succeeded_mark_fails_under_max_retries():
+    """When mark_pr_fix(FIXED) fails but we're under the attempt cap,
+    delete + recreate so the next tick gets a fresh attempt."""
+    marks, deleted, created = [], [], []
+    def _mark(repo, pr, status, note):
+        marks.append((repo, pr, status, note))
+        return False  # mark always fails
+    out = reconcile_pr_fixes(
+        list_prfix_workloads=lambda: [_wl(5, "Succeeded", attempt=1)],
+        delete_workload=deleted.append, create_workload=created.append,
+        mark_pr_fix=_mark,
+        max_attempts=3,
+    )
+    assert deleted == ["prfix-o-r-5"]
+    assert created[0]["metadata"]["annotations"]["foreman.llmkube.dev/attempt"] == "2"
+    assert out == ["prfix-o-r-5:retry:2/3"]
+    # mark FIXED was attempted (and failed), then retry path taken
+    assert marks == [("o/r", 5, "FIXED", "foreman fix Workload prfix-o-r-5 succeeded")]
 
 
 def test_reconcile_ignores_nonterminal_and_isolates_errors():
