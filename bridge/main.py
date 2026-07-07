@@ -49,11 +49,12 @@ def run_once(
     coder-python, a Node repo to coder-node, etc. None/empty routes every lane
     to the default coder (legacy behavior).
 
-    max_in_progress (when > 0) caps how many issues are worked at once: claiming
-    stops once in_progress reaches the cap, so the pipeline works a bounded set
-    instead of the whole backlog. in_progress is the current count of active
-    (non-terminal) bridge Workloads, supplied by the caller. Retries are not
-    gated here (they re-run already-claimed work).
+    max_in_progress (when > 0) caps how many issues are worked at once. Each lane
+    is drained up to the remaining headroom: claiming continues until the lane has
+    no more claimable work or in_progress reaches the cap, so a backlog fills the
+    available capacity in one tick instead of one issue per tick. in_progress is
+    the current count of active (non-terminal) bridge Workloads, supplied by the
+    caller. Retries are not gated here (they re-run already-claimed work).
     """
     gate_profiles = gate_profiles or {}
     lane_coder_agents = lane_coder_agents or {}
@@ -61,25 +62,32 @@ def run_once(
     base_coder_agents = base_coder_agents or {}
     results = []
     for lane in lanes:
-        if max_in_progress and in_progress >= max_in_progress:
-            results.append(f"{lane}:capped:{in_progress}/{max_in_progress}")
-            continue
-        item = claim_one(agent_name, lane)
-        if item is None:
-            results.append(f"{lane}:empty")
-            continue
-        language = gate_profiles.get(item.repo, {}).get("language")
-        manifest = build_workload(
-            item,
-            namespace,
-            gate_profile_for(item.repo, gate_profiles),
-            agent_name,
-            coder_agent=coder_agent_for(item.lane, language, lane_coder_agents, base_coder_agents),
-            revision_coder_agent=revision_coder_agent_for(item.lane, revision_coder_agents),
-        )
-        create_workload(manifest)
-        in_progress += 1
-        results.append(f"{lane}:created:{manifest['metadata']['name']}")
+        created_here = 0
+        while True:
+            if max_in_progress and in_progress >= max_in_progress:
+                # Only flag a lane as capped if it never got to claim anything;
+                # a lane that filled the headroom is recorded by its created lines.
+                if created_here == 0:
+                    results.append(f"{lane}:capped:{in_progress}/{max_in_progress}")
+                break
+            item = claim_one(agent_name, lane)
+            if item is None:
+                if created_here == 0:
+                    results.append(f"{lane}:empty")
+                break
+            language = gate_profiles.get(item.repo, {}).get("language")
+            manifest = build_workload(
+                item,
+                namespace,
+                gate_profile_for(item.repo, gate_profiles),
+                agent_name,
+                coder_agent=coder_agent_for(item.lane, language, lane_coder_agents, base_coder_agents),
+                revision_coder_agent=revision_coder_agent_for(item.lane, revision_coder_agents),
+            )
+            create_workload(manifest)
+            in_progress += 1
+            created_here += 1
+            results.append(f"{lane}:created:{manifest['metadata']['name']}")
     return results
 
 

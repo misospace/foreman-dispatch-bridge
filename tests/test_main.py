@@ -5,8 +5,14 @@ LANES = ["local", "cloud", "frontier"]
 
 
 def _claim_stub(mapping):
-    # mapping: lane -> ClaimedItem | None
+    # mapping: lane -> ClaimedItem | None. Each lane's item is served once, then
+    # None, so run_once's per-lane drain loop terminates.
+    served = set()
+
     def claim_one(agent_name, lane):
+        if lane in served:
+            return None
+        served.add(lane)
         return mapping.get(lane)
     return claim_one
 
@@ -82,6 +88,36 @@ def test_cap_allows_claims_up_to_remaining_headroom():
     assert len(created) == 1
     assert res[0] == "local:created:wl-a-b-3"
     assert res[1].endswith("capped:10/10") and res[2].endswith("capped:10/10")
+
+
+def test_drains_lane_up_to_headroom():
+    # A lane with 3 ready items and headroom for 2 claims both, then stops at cap.
+    created = []
+    items = [ClaimedItem(repo="a/b", issue_number=n, intent="x", lane="local")
+             for n in (1, 2, 3)]
+
+    def claim_one(agent_name, lane):
+        return items.pop(0) if lane == "local" and items else None
+
+    res = run_once(["local"], "foreman/coder", claim_one, created.append,
+                   namespace="llm", in_progress=8, max_in_progress=10)
+    assert len(created) == 2  # only the 2 slots of headroom
+    assert res == ["local:created:wl-a-b-1", "local:created:wl-a-b-2"]
+
+
+def test_drains_whole_lane_when_uncapped():
+    # No cap: a lane with multiple ready items is fully drained in one tick.
+    created = []
+    items = [ClaimedItem(repo="a/b", issue_number=n, intent="x", lane="local")
+             for n in (1, 2, 3)]
+
+    def claim_one(agent_name, lane):
+        return items.pop(0) if lane == "local" and items else None
+
+    res = run_once(["local"], "foreman/coder", claim_one, created.append,
+                   namespace="llm")
+    assert len(created) == 3
+    assert res == ["local:created:wl-a-b-1", "local:created:wl-a-b-2", "local:created:wl-a-b-3"]
 
 
 def test_cap_zero_is_uncapped():
