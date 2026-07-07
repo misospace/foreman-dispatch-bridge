@@ -1,7 +1,7 @@
 import json
 from pathlib import Path
 from bridge.models import ClaimedItem
-from bridge.claim import select_item, to_claimed_item, DispatchClient
+from bridge.claim import select_item, select_candidates, to_claimed_item, DispatchClient
 
 SAMPLE = json.loads(Path("tests/fixtures/dispatch_claim_sample.json").read_text())
 
@@ -67,6 +67,33 @@ def test_claim_one_empty_queue():
                             http_get=lambda u, h: [],
                             http_post=lambda u, h, p: {"ok": True})
     assert client.claim_one("foreman/coder", "local") is None
+
+
+def test_select_candidates_yields_all_ready_claimable_in_order():
+    # SAMPLE: #42 ready+claimable; #7 renovate; #99 backlog → only #42 qualifies.
+    assert [c["number"] for c in select_candidates(SAMPLE, "local")] == [42]
+
+
+def test_claim_one_advances_past_failed_claim():
+    # Two claimable, ready, local items. The head (#1) 409s; claim_one must skip
+    # it and claim the next (#2) instead of starving the lane.
+    queue = [
+        {"number": 1, "repoFullName": "a/b", "issueId": "i1", "lane": "local",
+         "labels": ["status/ready"], "claimable": True, "title": "head"},
+        {"number": 2, "repoFullName": "a/b", "issueId": "i2", "lane": "local",
+         "labels": ["status/ready"], "claimable": True, "title": "next"},
+    ]
+    posted = []
+
+    def fake_post(url, headers, payload):
+        posted.append(payload["issueNumber"])
+        return None if payload["issueNumber"] == 1 else {"ok": True}
+
+    client = DispatchClient("http://d", "tok",
+                            http_get=lambda u, h: queue, http_post=fake_post)
+    item = client.claim_one("foreman-coder", "local")
+    assert item is not None and item.issue_number == 2
+    assert posted == [1, 2]  # tried the head (failed), then advanced to the next
 
 
 def _client_recording_posts(responses=None):

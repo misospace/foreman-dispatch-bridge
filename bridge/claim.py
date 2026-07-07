@@ -26,8 +26,10 @@ def _status(item: dict) -> Optional[str]:
     return item.get("status")
 
 
-def select_item(items: list, lane: str) -> Optional[dict]:
-    """First claimable, ready, lane-matching, non-renovate queue item."""
+def select_candidates(items: list, lane: str):
+    """Yield every claimable, ready, lane-matching, non-renovate queue item, in
+    queue (ranked) order. Callers claim them in turn so one un-claimable head
+    item can't hide the rest of the lane."""
     for item in items:
         if not isinstance(item, dict):
             continue
@@ -39,8 +41,12 @@ def select_item(items: list, lane: str) -> Optional[dict]:
             continue
         if item.get("claimable") is not True and item.get("agentMatch") is not True:
             continue
-        return item
-    return None
+        yield item
+
+
+def select_item(items: list, lane: str) -> Optional[dict]:
+    """First claimable, ready, lane-matching, non-renovate queue item (or None)."""
+    return next(select_candidates(items, lane), None)
 
 
 def to_claimed_item(item: dict, lane: str) -> ClaimedItem:
@@ -81,12 +87,14 @@ class DispatchClient:
         return self._post(f"{self._base}/api/issues/claim", self._headers(), payload) is not None
 
     def claim_one(self, agent_name: str, lane: str) -> Optional[ClaimedItem]:
-        item = select_item(self.queue(agent_name, lane), lane)
-        if item is None:
-            return None
-        if not self.claim(item, agent_name):
-            return None
-        return to_claimed_item(item, lane)
+        """Claim the first queue candidate that can be claimed, skipping any whose
+        claim POST fails (e.g. 409 already-claimed). Returns None only when the
+        queue has no candidate the agent can claim, so a single stuck head-of-queue
+        item no longer starves the lane."""
+        for item in select_candidates(self.queue(agent_name, lane), lane):
+            if self.claim(item, agent_name):
+                return to_claimed_item(item, lane)
+        return None
 
     def set_lane(self, item: ClaimedItem, lane: str, reason: str) -> bool:
         """Record an explicit lane classification for the issue (manual override)."""
