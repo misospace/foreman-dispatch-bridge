@@ -227,15 +227,14 @@ def reconcile_pr_fixes(list_prfix_workloads, delete_workload, create_workload,
                 and repo and pr is not None
                 and not pr_is_mergeable(repo, pr)
             )
+            ok = False
             if phase in ("Succeeded", "Completed") and not still_conflicting:
-                ok = False
                 if repo and pr is not None:
                     ok = mark_pr_fix(repo, pr, "FIXED", f"foreman fix Workload {name} succeeded")
-                if ok:
-                    delete_workload(name)
-                    results.append(f"{name}:fixed")
-                else:
-                    results.append(f"{name}:fixed-mark-pending")
+            if ok:
+                delete_workload(name)
+                results.append(f"{name}:fixed")
+            # Mark failed, still conflicting, or Failed phase -> retry or BLOCKED
             elif attempt < max_attempts:
                 delete_workload(name)
                 create_workload(rebuild_prfix_manifest(wl, attempt + 1))
