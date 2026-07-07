@@ -1,3 +1,4 @@
+import json
 import os
 import time
 from typing import Callable, Optional
@@ -13,10 +14,9 @@ from bridge.workload import (
 )
 from bridge.retry import reconcile_failures, feedback_from_tasks, DEFAULT_MAX_ATTEMPTS
 from bridge.prfix import (
-    reconcile_pr_fixes, drain_pr_fixes, prfix_workload_name,
+    reconcile_pr_fixes, drain_pr_fixes,
     DEFAULT_PRFIX_LANE_AGENTS, ACTIONABLE_LANES, PRFIX_CREATED_BY,
 )
-import json
 
 ClaimOne = Callable[[str, str], Optional[ClaimedItem]]  # (agent_name, lane) -> item | None
 
