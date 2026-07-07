@@ -23,6 +23,16 @@ ISSUE_ID_ANNOTATION = "foreman.llmkube.dev/issue-id"
 AGENT_NAME_ANNOTATION = "foreman.llmkube.dev/agent-name"
 
 
+def _parse_json_map(raw: Optional[str]) -> dict:
+    """Shared parser for the JSON-object env vars (gate profiles, lane/language
+    coder-agent maps): empty/absent -> {}, else json.loads. Values pass through
+    verbatim so the full CRD shape is expressible from config."""
+    raw = (raw or "").strip()
+    if not raw:
+        return {}
+    return json.loads(raw)
+
+
 def parse_gate_profiles(raw: Optional[str]) -> dict:
     """Parse the GATEPROFILE_MAP env var (JSON object: repo -> GateProfile).
 
@@ -43,10 +53,7 @@ def parse_gate_profiles(raw: Optional[str]) -> dict:
     ships no eslint/prettier/test deps -- set commands (install-in-command) or
     a pre-baked image for repos with real toolchains.
     """
-    raw = (raw or "").strip()
-    if not raw:
-        return {}
-    return json.loads(raw)
+    return _parse_json_map(raw)
 
 
 def gate_profile_for(repo: str, gate_profiles: dict) -> Optional[dict]:
@@ -65,10 +72,7 @@ def parse_lane_coder_agents(raw: Optional[str]) -> dict:
 
         {"*": "coder", "frontier": "coder-frontier"}
     """
-    raw = (raw or "").strip()
-    if not raw:
-        return {}
-    return json.loads(raw)
+    return _parse_json_map(raw)
 
 
 def parse_base_coder_agents(raw: Optional[str]) -> dict:

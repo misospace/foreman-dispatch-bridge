@@ -214,12 +214,13 @@ def reconcile_pr_fixes(list_prfix_workloads, delete_workload, create_workload,
     abort the pass or the drain that follows."""
     results = []
     for wl in list_prfix_workloads():
-        name = ((wl.get("metadata") or {}).get("name")) or "?"
-        phase = ((wl.get("status") or {}).get("phase")) or ""
+        meta = wl.get("metadata") or {}
+        name = meta.get("name") or "?"
+        phase = (wl.get("status") or {}).get("phase") or ""
         if phase not in _TERMINAL:
             continue
         repo, pr = _prfix_key(wl)
-        ann = (wl.get("metadata") or {}).get("annotations") or {}
+        ann = meta.get("annotations") or {}
         try:
             attempt = int(ann.get(ATTEMPT_ANNOTATION, "1") or "1")
             still_conflicting = (

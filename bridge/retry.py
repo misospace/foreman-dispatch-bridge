@@ -130,7 +130,7 @@ def reconcile_failures(
     base_coder_agents = base_coder_agents or {}
     results = []
     for wl in list_failed():
-        name = ((wl.get("metadata") or {}).get("name")) or "?"
+        name = (wl.get("metadata") or {}).get("name") or "?"
         attempt = attempt_of(wl)
         if attempt >= max_attempts:
             item = item_from_workload(wl)
