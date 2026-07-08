@@ -151,22 +151,26 @@ def test_drain_isolates_per_item_failure():
     assert any("o/r#5:error:" in line for line in out)
 
 
-from bridge.prfix import reconcile_pr_fixes, rebuild_prfix_manifest, PRFIX_CREATED_BY
+from bridge.prfix import (
+    reconcile_pr_fixes, rebuild_prfix_manifest, PRFIX_CREATED_BY, DEFAULT_PRFIX_LANE_AGENTS,
+)
 
 
-def _wl(pr, phase, attempt=1, name=None):
+def _wl(pr, phase, attempt=1, name=None, lane="NORMAL", coder="coder"):
     name = name or f"prfix-o-r-{pr}"
     return {
         "metadata": {
             "name": name, "namespace": "llm",
-            "labels": {"created-by": PRFIX_CREATED_BY, "lane": "NORMAL"},
+            "labels": {"created-by": PRFIX_CREATED_BY, "lane": lane},
             "annotations": {
                 "foreman.llmkube.dev/attempt": str(attempt),
                 "foreman.llmkube.dev/prfix-repo": "o/r",
                 "foreman.llmkube.dev/prfix-pr": str(pr),
             },
         },
-        "spec": {"repo": "o/r", "pipeline": [{"name": f"fix-{pr}"}]},
+        "spec": {"repo": "o/r", "pipeline": [
+            {"name": f"fix-{pr}", "kind": "issue-fix", "agentRef": {"name": coder}},
+        ]},
         "status": {"phase": phase},
     }
 
@@ -217,18 +221,40 @@ def test_reconcile_failed_under_max_deletes_and_recreates():
     assert out == ["prfix-o-r-5:retry:2/3"]
 
 
-def test_reconcile_failed_at_max_marks_blocked():
-    marks, deleted = [], []
+def test_reconcile_normal_at_max_escalates_to_frontier():
+    # NORMAL tier exhausted -> escalate to ESCALATED (coder-frontier) with a fresh
+    # attempt budget, NOT straight to BLOCKED/needs-human.
+    created, deleted, marks = [], [], []
     out = reconcile_pr_fixes(
-        list_prfix_workloads=lambda: [_wl(5, "Failed", attempt=3)],
-        delete_workload=deleted.append, create_workload=lambda m: None,
-        mark_pr_fix=lambda repo, pr, status, note: marks.append((repo, pr, status, note)),
-        max_attempts=3,
+        list_prfix_workloads=lambda: [_wl(5, "Failed", attempt=3, lane="NORMAL", coder="coder")],
+        delete_workload=deleted.append, create_workload=created.append,
+        mark_pr_fix=lambda *a: marks.append(a),
+        max_attempts=3, lane_agents=DEFAULT_PRFIX_LANE_AGENTS,
     )
+    assert marks == []                       # not blocked
+    assert deleted == ["prfix-o-r-5"]
+    esc = created[0]
+    assert esc["metadata"]["labels"]["lane"] == "ESCALATED"
+    assert esc["metadata"]["annotations"]["foreman.llmkube.dev/attempt"] == "1"  # fresh budget
+    fixstep = next(s for s in esc["spec"]["pipeline"] if s.get("kind") == "issue-fix")
+    assert fixstep["agentRef"]["name"] == "coder-frontier"
+    assert out == ["prfix-o-r-5:escalate:NORMAL->ESCALATED"]
+
+
+def test_reconcile_escalated_at_max_marks_blocked():
+    # Top of the ladder (ESCALATED) exhausted -> genuinely BLOCKED, no further tier.
+    created, marks, deleted = [], [], []
+    out = reconcile_pr_fixes(
+        list_prfix_workloads=lambda: [_wl(5, "Failed", attempt=3, lane="ESCALATED", coder="coder-frontier")],
+        delete_workload=deleted.append, create_workload=created.append,
+        mark_pr_fix=lambda repo, pr, status, note: marks.append((repo, pr, status, note)),
+        max_attempts=3, lane_agents=DEFAULT_PRFIX_LANE_AGENTS,
+    )
+    assert created == []                     # no further escalation
+    assert deleted == []                     # blocked, not recreated
     assert marks[0][:3] == ("o/r", 5, "BLOCKED")
-    assert "3/3" in marks[0][3]                       # note carries attempt count
+    assert "3/3" in marks[0][3]              # note carries attempt count
     assert out == ["prfix-o-r-5:giveup:3/3"]
-    assert deleted == []
 
 
 def test_reconcile_succeeded_but_pr_conflicting_retries_instead_of_fixed():
