@@ -289,6 +289,7 @@ def _real_main() -> None:  # pragma: no cover - thin wiring, exercised in the cl
         for line in reconcile_pr_fixes(
             list_prfix_workloads, delete_workload, create_workload,
             mark_pr_fix, pr_is_mergeable=pr_is_mergeable, max_attempts=pr_fix_max_attempts,
+            lane_agents=pr_fix_lane_agents,
         ):
             print(line)
 

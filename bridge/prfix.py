@@ -200,8 +200,39 @@ def _prfix_key(wl: dict):
     return ann.get(PRFIX_REPO_ANNOTATION), (int(pr) if pr and pr.isdigit() else None)
 
 
+def next_prfix_lane(lane: str) -> Optional[str]:
+    """Next tier up the coder-escalation ladder (ACTIONABLE_LANES order), or
+    None when already at the top. NORMAL -> ESCALATED -> None."""
+    try:
+        idx = ACTIONABLE_LANES.index(lane)
+    except ValueError:
+        return None
+    return ACTIONABLE_LANES[idx + 1] if idx + 1 < len(ACTIONABLE_LANES) else None
+
+
+def _prfix_current_coder(wl: dict) -> Optional[str]:
+    """The coder Agent currently on the fix Workload's issue-fix step."""
+    for step in ((wl.get("spec") or {}).get("pipeline") or []):
+        if step.get("kind") == "issue-fix":
+            return (step.get("agentRef") or {}).get("name")
+    return None
+
+
+def escalate_prfix_manifest(wl: dict, next_lane: str, next_coder: str) -> dict:
+    """Rebuild the fix Workload for the next escalation tier: swap the issue-fix
+    coder, flip the lane label, and reset the attempt to 1 (a fresh budget on the
+    stronger coder)."""
+    m = rebuild_prfix_manifest(wl, attempt=1)
+    m["metadata"].setdefault("labels", {})["lane"] = next_lane
+    for step in (m["spec"].get("pipeline") or []):
+        if step.get("kind") == "issue-fix":
+            step["agentRef"] = {"name": next_coder}
+    return m
+
+
 def reconcile_pr_fixes(list_prfix_workloads, delete_workload, create_workload,
-                       mark_pr_fix, pr_is_mergeable=lambda repo, pr: True, max_attempts=3) -> list:
+                       mark_pr_fix, pr_is_mergeable=lambda repo, pr: True, max_attempts=3,
+                       lane_agents=None) -> list:
     """Settle prior fix Workloads: Succeeded -> verify the PR is actually
     mergeable (pr_is_mergeable) before marking FIXED, delete only if the mark
     succeeded (else leave the tombstone so the next tick retries the mark);
@@ -242,16 +273,30 @@ def reconcile_pr_fixes(list_prfix_workloads, delete_workload, create_workload,
                 tag = "not-mergeable-retry" if still_conflicting else "retry"
                 results.append(f"{name}:{tag}:{attempt + 1}/{max_attempts}")
             else:
-                if repo and pr is not None:
-                    note = (
-                        f"foreman fix Workload {name} succeeded but PR is still not "
-                        f"mergeable after {attempt}/{max_attempts} attempts"
-                        if still_conflicting else
-                        f"foreman fix exhausted {attempt}/{max_attempts} attempts ({name})"
-                    )
-                    mark_pr_fix(repo, pr, "BLOCKED", note)
-                tag = "not-mergeable-giveup" if still_conflicting else "giveup"
-                results.append(f"{name}:{tag}:{attempt}/{max_attempts}")
+                # Tier exhausted at the attempt cap. Before giving up, escalate to
+                # the next coder tier (NORMAL -> ESCALATED) with a fresh attempt
+                # budget, so a fix the base coder can't do gets the stronger coder
+                # rather than dead-ending on a human. Only BLOCK when there is no
+                # higher tier (i.e. the escalated tier is itself exhausted).
+                current_lane = (meta.get("labels") or {}).get("lane", "")
+                nxt = next_prfix_lane(current_lane)
+                next_coder = pr_fix_coder_for(nxt, lane_agents or {}) if nxt else None
+                if nxt and next_coder and next_coder != _prfix_current_coder(wl):
+                    delete_workload(name)
+                    create_workload(escalate_prfix_manifest(wl, nxt, next_coder))
+                    results.append(f"{name}:escalate:{current_lane or 'NORMAL'}->{nxt}")
+                else:
+                    if repo and pr is not None:
+                        note = (
+                            f"foreman fix Workload {name} succeeded but PR is still not "
+                            f"mergeable after {attempt}/{max_attempts} attempts"
+                            if still_conflicting else
+                            f"foreman fix exhausted {attempt}/{max_attempts} attempts on "
+                            f"{current_lane or 'NORMAL'} (all coder tiers exhausted) ({name})"
+                        )
+                        mark_pr_fix(repo, pr, "BLOCKED", note)
+                    tag = "not-mergeable-giveup" if still_conflicting else "giveup"
+                    results.append(f"{name}:{tag}:{attempt}/{max_attempts}")
         except Exception as e:
             results.append(f"{name}:error:{e}")
     return results
