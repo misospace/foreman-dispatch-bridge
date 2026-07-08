@@ -17,6 +17,7 @@ from bridge.prfix import (
     reconcile_pr_fixes, drain_pr_fixes,
     DEFAULT_PRFIX_LANE_AGENTS, ACTIONABLE_LANES, PRFIX_CREATED_BY,
 )
+from bridge.prune import prune_workloads
 
 ClaimOne = Callable[[str, str], Optional[ClaimedItem]]  # (agent_name, lane) -> item | None
 
@@ -119,6 +120,13 @@ def _real_main() -> None:  # pragma: no cover - thin wiring, exercised in the cl
     github_token = os.environ.get("GITHUB_TOKEN", "")
     _raw_lane_agents = os.environ.get("PR_FIX_LANE_AGENTS", "").strip()
     pr_fix_lane_agents = json.loads(_raw_lane_agents) if _raw_lane_agents else dict(DEFAULT_PRFIX_LANE_AGENTS)
+    # Terminal-Workload GC: a Completed Workload has already opened its PR (which
+    # lives on GitHub), and a Failed one still Failed at prune time has been left
+    # by reconcile (retries exhausted). Delete each once past its per-phase TTL so
+    # terminal objects stop accumulating. Failed gets a longer TTL for triage. 0
+    # disables a phase.
+    prune_completed_after_h = int(os.environ.get("PRUNE_COMPLETED_AFTER_HOURS", "6"))
+    prune_failed_after_h = int(os.environ.get("PRUNE_FAILED_AFTER_HOURS", "48"))
 
     def http_get(url, headers):
         r = requests.get(url, headers=headers, timeout=20)
@@ -302,6 +310,27 @@ def _real_main() -> None:  # pragma: no cover - thin wiring, exercised in the cl
             gate_profiles, pr_fix_lane_agents, agent_name, namespace,
         ):
             print(line)
+
+    # Garbage-collect terminal Workloads last, after reconcile has already
+    # retried anything retryable this tick — so a still-terminal Workload past
+    # its TTL is genuinely done. Covers both issue (created-by=dispatch-bridge)
+    # and pr-fix (created-by=dispatch-bridge-prfix) Workloads.
+    def list_terminal_candidates() -> list:
+        out = list(list_bridge_workloads())
+        resp = api.list_namespaced_custom_object(
+            group="foreman.llmkube.dev", version="v1alpha1",
+            namespace=namespace, plural="workloads",
+            label_selector=f"created-by={PRFIX_CREATED_BY}",
+        )
+        out.extend(resp.get("items", []))
+        return out
+
+    for line in prune_workloads(
+        list_terminal_candidates, delete_workload,
+        completed_ttl_seconds=prune_completed_after_h * 3600,
+        failed_ttl_seconds=prune_failed_after_h * 3600,
+    ):
+        print(line)
 
 
 if __name__ == "__main__":
