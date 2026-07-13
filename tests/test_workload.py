@@ -172,6 +172,16 @@ def test_build_workload_retry_sets_allow_overwrite_on_pipeline_code_step():
     assert "allowOverwrite" not in verify[0]["payload"]
 
 
+def test_build_workload_pipeline_review_step_opens_pr():
+    # Explicit pipelines must set openPullRequest per step (the issues path gets
+    # it stamped from spec.openPullRequest). Without it a retried workload
+    # reviews GO but never opens a PR — the reviewed work strands on its branch.
+    wl = build_workload(ITEM, namespace="llm", attempt=2, feedback="reviewer said no")
+    review = [s for s in wl["spec"]["pipeline"] if s["kind"] == "review"]
+    assert len(review) == 1
+    assert review[0]["payload"]["openPullRequest"] is True
+
+
 def test_revision_coder_agent_for_prefers_exact_then_wildcard_then_empty():
     from bridge.workload import revision_coder_agent_for
     agents = {"*": "coder-revision", "frontier": "coder-revision-frontier"}

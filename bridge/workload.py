@@ -161,7 +161,12 @@ def _pipeline_steps(
             "kind": "review",
             "agentRef": {"name": reviewer},
             "dependsOn": [f"verify-{n}"],
-            "payload": dict(payload),
+            # Explicit pipelines set openPullRequest PER STEP — unlike the
+            # issues path, where the operator stamps it from
+            # Workload.spec.openPullRequest (default on). Without it a retried
+            # workload reviews GO and never opens a PR, stranding the reviewed
+            # work on its branch (this path is only taken on retry-with-feedback).
+            "payload": {**payload, "openPullRequest": True},
         })
     return steps
 
