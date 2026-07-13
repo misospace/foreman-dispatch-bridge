@@ -148,9 +148,13 @@ def test_build_workload_uses_explicit_coder_agent():
     assert wl["spec"]["coderAgentRef"] == {"name": "coder-frontier"}
 
 
-def test_build_workload_first_attempt_has_no_allow_overwrite():
+def test_build_workload_first_attempt_sets_allow_overwrite():
+    # allowOverwrite is now always set (not just attempt > 1): branchStrategy=
+    # reset makes the task branch re-derivable, and `attempt` is not a reliable
+    # branch-existence signal — a status-reset re-dispatch resets it to 1 while
+    # the pushed branch persists, which is what wedged retries on PUSH-FAILED.
     wl = build_workload(ITEM, namespace="llm", attempt=1)
-    assert "allowOverwrite" not in wl["spec"]
+    assert wl["spec"]["allowOverwrite"] is True
 
 
 def test_build_workload_retry_sets_allow_overwrite_on_issues_path():

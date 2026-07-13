@@ -176,12 +176,17 @@ def build_workload(
     feedback: str = "",
     revision_coder_agent: str = "",
 ) -> dict:
-    # A retry reuses its predecessor's deterministic branch name; if that
-    # attempt pushed, the retry's push dies non-fast-forward (#1). Foreman's
-    # opt-in spec.allowOverwrite (LLMKube#948) lets the coder replace its own
-    # stale ref via force-with-lease. First attempts must NOT set it: their
-    # branch shouldn't exist, and failing loudly preserves the audit trail.
-    allow_overwrite = attempt > 1
+    # A re-dispatch reuses its predecessor's deterministic branch name; if a
+    # prior attempt pushed, the new push dies non-fast-forward (#1). Foreman's
+    # spec.allowOverwrite (LLMKube#948) lets the coder replace its own stale ref
+    # via force-with-lease. We always set it: on Foreman 0.9.4+ the coder cuts
+    # the branch fresh from the current base (branchStrategy=reset, LLMKube#1042),
+    # so the task branch is re-derivable and safe to overwrite — and `attempt` is
+    # NOT a reliable branch-existence signal, since a status-reset re-dispatch
+    # (unclaim -> ready) or a manual recreate resets it to 1 while the pushed
+    # branch persists, which is exactly what wedged retries on PUSH-FAILED.
+    # force-with-lease still guards against an unexpected concurrent push.
+    allow_overwrite = True
     if feedback:
         # Retry with context: explicit pipeline so payload.prompt can carry the
         # previous attempt's review findings / failure to the coder.
