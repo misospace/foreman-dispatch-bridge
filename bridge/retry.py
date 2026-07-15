@@ -1,6 +1,7 @@
 from dataclasses import replace
 from typing import Callable, Optional
 
+from bridge.claim import redact_bearer
 from bridge.models import ClaimedItem
 from bridge.workload import (
     build_workload,
@@ -154,7 +155,7 @@ def reconcile_failures(
                 if escalated:
                     delete_workload(name)
             except Exception as e:
-                results.append(f"{name}:escalate-error:{e}")
+                results.append(f"{name}:escalate-error:{redact_bearer(str(e))}")
                 continue
             if escalated:
                 results.append(f"{name}:escalated:{item.lane or '?'}->{escalation_lane}")
@@ -184,7 +185,7 @@ def reconcile_failures(
             )
             create_workload(manifest)
         except Exception as e:
-            results.append(f"{name}:retry-error:{e}")
+            results.append(f"{name}:retry-error:{redact_bearer(str(e))}")
             continue
         results.append(f"{name}:retry:{attempt + 1}/{max_attempts}")
     return results

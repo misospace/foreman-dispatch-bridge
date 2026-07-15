@@ -246,3 +246,118 @@ def test_mark_pr_fix_posts_payload():
 def test_mark_pr_fix_false_when_post_returns_none():
     c = DispatchClient("http://d", "t", lambda *a: [], lambda *a: None)
     assert c.mark_pr_fix("o/r", 5, "FIXED") is False
+
+
+# ---------------------------------------------------------------------------
+# Regression tests for #35: DISPATCH_AGENT_TOKEN must never surface through
+# HTTP error messages or tracebacks surfaced from DispatchClient.
+# ---------------------------------------------------------------------------
+
+def test_redact_bearer_replaces_bearer_token():
+    from bridge.claim import redact_bearer
+    secret = "ghp_supersecrettoken123abc"
+    msg = f"GET https://api.example.com failed: 401 Unauthorized: Authorization: Bearer {secret}"
+    redacted = redact_bearer(msg)
+    assert secret not in redacted
+    assert "Bearer ***" in redacted
+
+
+def test_redact_bearer_handles_no_bearer():
+    from bridge.claim import redact_bearer
+    assert redact_bearer("plain text") == "plain text"
+    assert redact_bearer("") == ""
+    assert redact_bearer(None) is None  # type: ignore[arg-type]
+
+
+def test_redact_bearer_matches_typical_token_shapes():
+    """GitHub PATs (ghp_/gho_/ghs_/github_pat_), JWTs, and opaque tokens must
+    all be scrubbed regardless of the surrounding format."""
+    from bridge.claim import redact_bearer
+    for tok in (
+        "ghp_abcDEF123xyz",
+        "github_pat_11ABCDEFG0_" + "x" * 80,
+        "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ0b2tlbiJ9.signature",
+        "abc.def_ghi-jkl",
+    ):
+        msg = f"Authorization: Bearer {tok} remaining"
+        out = redact_bearer(msg)
+        assert tok not in out, f"token {tok!r} leaked in {out!r}"
+        assert "Bearer ***" in out
+
+
+def test_dispatch_client_safe_get_redacts_bearer_in_raised_error():
+    """If the injected http_get raises, DispatchClient must not propagate the
+    raw 'Bearer <token>' substring in str(e)."""
+    import requests as req
+    secret = "tok_super_secret_value_42"
+    def fake_get(url, headers):
+        raise req.HTTPError(f"500 Server Error: Bearer {secret}")
+    c = DispatchClient("http://d", secret, http_get=fake_get, http_post=lambda u, h, p: None)
+    try:
+        c.queue("foreman/coder", "local")
+        raise AssertionError("expected HTTPError to propagate")
+    except req.HTTPError as e:
+        assert secret not in str(e)
+        assert "Bearer ***" in str(e)
+
+
+def test_dispatch_client_safe_post_redacts_bearer_in_raised_error():
+    """Same guarantee for the POST transport used by claim/set_lane/unclaim/..."""
+    import requests as req
+    secret = "tok_post_secret_99"
+    def fake_post(url, headers, payload):
+        raise req.HTTPError(f"401 Unauthorized: Bearer {secret}")
+    c = DispatchClient("http://d", secret, lambda u, h: [], fake_post)
+    item = {
+        "repoFullName": "o/r",
+        "issueNumber": 1,
+        "id": "id-1",
+    }
+    try:
+        c.claim(item, "foreman-coder")
+        raise AssertionError("expected HTTPError to propagate")
+    except req.HTTPError as e:
+        assert secret not in str(e)
+        assert "Bearer ***" in str(e)
+
+
+def test_dispatch_client_safe_post_preserves_response_attr_for_400_logic():
+    """Mutating e.args to scrub the bearer must NOT clobber e.response, since
+    unclaim() reads e.response.status_code to treat 400 as success."""
+    import requests as req
+    from bridge.models import ClaimedItem
+    secret = "tok_attr_secret_7"
+    def fake_post(url, headers, payload):
+        if "unclaim" in url:
+            r = req.HTTPError(f"400 Bad Request: Bearer {secret}")
+            r.response = type("Response", (), {"status_code": 400})()
+            raise r
+        return {"ok": True}
+    c = DispatchClient("http://d", secret, lambda u, h: [], fake_post)
+    item = ClaimedItem(repo="a/b", issue_number=7, intent="t", lane="local", issue_id="id-7")
+    # unclaim returns True when 400 (already-released/terminal) is seen,
+    # demonstrating that e.response survives the redaction wrapper.
+    assert c.unclaim(item, "foreman-coder") is True
+
+
+def test_dispatch_client_non_400_error_still_redacts_and_propagates():
+    """Non-400 errors must still propagate (so a real failure surfaces) AND
+    must have the bearer redacted from str(e)."""
+    import requests as req
+    from bridge.models import ClaimedItem
+    secret = "tok_500_secret_3"
+    def fake_post(url, headers, payload):
+        r = req.HTTPError(f"500 Server Error: Bearer {secret}")
+        r.response = type("Response", (), {"status_code": 500})()
+        raise r
+    c = DispatchClient("http://d", secret, lambda u, h: [], fake_post)
+    item = ClaimedItem(repo="a/b", issue_number=7, intent="t", lane="local", issue_id="id-7")
+    try:
+        c.unclaim(item, "foreman-coder")
+        raise AssertionError("expected HTTPError to propagate")
+    except req.HTTPError as e:
+        assert secret not in str(e)
+        assert "Bearer ***" in str(e)
+        # Response attribute preserved through the wrapper.
+        assert getattr(e, "response", None) is not None
+        assert e.response.status_code == 500

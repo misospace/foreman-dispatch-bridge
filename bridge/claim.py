@@ -9,6 +9,24 @@ HttpPost = Callable[[str, dict, dict], object]
 
 _RENOVATE_RE = re.compile(r"renovate", re.IGNORECASE)
 
+# Match any "Bearer <token>" substring that may surface through an HTTP error
+# message, traceback local-variable dump, or print() output. Both the
+# DISPATCH_AGENT_TOKEN and the GITHUB_TOKEN are carried as Bearer tokens and
+# AGENTS.md says they must never appear in surfaced output. \S+ matches any
+# non-whitespace run; this catches GitHub PAT shapes, JWTs, and arbitrary
+# opaque tokens without needing to enumerate token alphabets.
+_BEARER_RE = re.compile(r"Bearer\s+\S+")
+
+
+def redact_bearer(text: str) -> str:
+    """Replace any 'Bearer <token>' substring with 'Bearer ***' so secrets
+    don't leak through HTTP error messages, tracebacks, or print() output.
+    The DISPATCH_AGENT_TOKEN and GITHUB_TOKEN are both carried as Bearer
+    tokens (AGENTS.md says they must never appear in surfaced output)."""
+    if not text:
+        return text
+    return _BEARER_RE.sub("Bearer ***", text)
+
 
 def _number(item: dict):
     return item.get("number") or item.get("issueNumber")
@@ -71,9 +89,31 @@ class DispatchClient:
     def _headers(self) -> dict:
         return {"Authorization": f"Bearer {self._token}"}
 
+    def _safe_get(self, url: str):
+        """Wrap self._get so any raised exception has its 'Bearer <token>'
+        substring scrubbed before re-raise. The DISPATCH_AGENT_TOKEN lives in
+        self._headers() and can surface through requests' exception message
+        or via traceback local-variable dumps; mutating `e.args` (rather than
+        wrapping in a new exception) preserves the original type and any
+        attributes like `e.response`, so existing downstream error handling
+        (e.g. unclaim's 400-detection on e.response.status_code) keeps working."""
+        try:
+            return self._get(url, self._headers())
+        except Exception as e:
+            e.args = (redact_bearer(str(e)),)
+            raise
+
+    def _safe_post(self, url: str, payload: dict):
+        """Wrap self._post; see _safe_get for rationale."""
+        try:
+            return self._post(url, self._headers(), payload)
+        except Exception as e:
+            e.args = (redact_bearer(str(e)),)
+            raise
+
     def queue(self, agent_name: str, lane: str) -> list:
         url = f"{self._base}/api/agents/{agent_name}/queue?lane={lane}&includeClaimed=true"
-        data = self._get(url, self._headers())
+        data = self._safe_get(url)
         return data if isinstance(data, list) else []
 
     def claim(self, item: dict, agent_name: str) -> bool:
@@ -84,7 +124,7 @@ class DispatchClient:
             "agentName": agent_name,
         }
         # http_post returns None on 409 (already claimed by someone else).
-        return self._post(f"{self._base}/api/issues/claim", self._headers(), payload) is not None
+        return self._safe_post(f"{self._base}/api/issues/claim", payload) is not None
 
     def claim_one(self, agent_name: str, lane: str) -> Optional[ClaimedItem]:
         """Claim the first queue candidate that can be claimed, skipping any whose
@@ -103,7 +143,7 @@ class DispatchClient:
             "classification": {"lane": lane, "confidence": "high", "reason": reason},
         }
         url = f"{self._base}/api/issues/{item.issue_id}/lane"
-        return self._post(url, self._headers(), payload) is not None
+        return self._safe_post(url, payload) is not None
 
     def unclaim(self, item: ClaimedItem, agent_name: str) -> bool:
         """Release the bridge's claim so the issue is claimable again.
@@ -117,7 +157,7 @@ class DispatchClient:
             "agentName": agent_name,
         }
         try:
-            return self._post(f"{self._base}/api/issues/unclaim", self._headers(), payload) is not None
+            return self._safe_post(f"{self._base}/api/issues/unclaim", payload) is not None
         except Exception as e:
             status = getattr(e, "response", None)
             if status and getattr(status, "status_code", None) == 400:
@@ -151,7 +191,7 @@ class DispatchClient:
         items = []
         for lane in lanes:
             url = f"{self._base}/api/pr-fix-queue/queued?lane={lane}"
-            data = self._get(url, self._headers())
+            data = self._safe_get(url)
             if isinstance(data, list):
                 items.extend(data)
         return items
@@ -159,4 +199,4 @@ class DispatchClient:
     def mark_pr_fix(self, repo: str, pr: int, status: str, note: str = "") -> bool:
         """Transition a PR-fix item's status (QUEUED/FIXED/BLOCKED/...)."""
         payload = {"repo": repo, "pr": pr, "status": status, "note": note}
-        return self._post(f"{self._base}/api/pr-fix-queue/mark", self._headers(), payload) is not None
+        return self._safe_post(f"{self._base}/api/pr-fix-queue/mark", payload) is not None

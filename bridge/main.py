@@ -95,7 +95,7 @@ def run_once(
 def _real_main() -> None:  # pragma: no cover - thin wiring, exercised in the cluster
     import requests
     from kubernetes import client, config
-    from bridge.claim import DispatchClient
+    from bridge.claim import DispatchClient, redact_bearer
 
     base_url = os.environ.get("DISPATCH_URL", "http://dispatch.llm:3000")
     token = os.environ["DISPATCH_AGENT_TOKEN"]
@@ -216,14 +216,14 @@ def _real_main() -> None:  # pragma: no cover - thin wiring, exercised in the cl
         try:
             return feedback_from_tasks(list_workload_tasks(workload_name))
         except Exception as e:  # feedback is best-effort; never block a retry on it
-            print(f"{workload_name}:feedback-lookup-failed:{e}")
+            print(f"{workload_name}:feedback-lookup-failed:{redact_bearer(str(e))}")
             return ""
 
     def lookup_issue_id(item: ClaimedItem) -> str:
         try:
             return dispatch.find_issue_id(agent_name, lanes, item.repo, item.issue_number)
         except Exception as e:  # best-effort; missing id just means no escalation
-            print(f"{item.repo}#{item.issue_number}:issue-id-lookup-failed:{e}")
+            print(f"{item.repo}#{item.issue_number}:issue-id-lookup-failed:{redact_bearer(str(e))}")
             return ""
 
     def escalate(item: ClaimedItem) -> bool:
@@ -272,7 +272,7 @@ def _real_main() -> None:  # pragma: no cover - thin wiring, exercised in the cl
             try:
                 return dispatch.mark_pr_fix(repo, pr, status, note)
             except Exception as e:  # best-effort; tombstone remains, next tick retries
-                print(f"prfix-mark-failed:{repo}#{pr}:{status}:{e}")
+                print(f"prfix-mark-failed:{repo}#{pr}:{status}:{redact_bearer(str(e))}")
                 return False
 
         # GitHub's own merge-state, not the fix workload's exit status, is the
@@ -289,7 +289,7 @@ def _real_main() -> None:  # pragma: no cover - thin wiring, exercised in the cl
             try:
                 data = http_get(f"https://api.github.com/repos/{repo}/pulls/{pr}", headers)
             except Exception as e:  # best-effort; retried next tick under the attempt cap
-                print(f"prfix-mergeable-check-failed:{repo}#{pr}:{e}")
+                print(f"prfix-mergeable-check-failed:{repo}#{pr}:{redact_bearer(str(e))}")
                 return False
             state = str((data or {}).get("mergeable_state") or "").lower()
             return state not in ("dirty", "conflicting")
