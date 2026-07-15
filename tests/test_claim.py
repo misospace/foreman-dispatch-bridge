@@ -246,3 +246,85 @@ def test_mark_pr_fix_posts_payload():
 def test_mark_pr_fix_false_when_post_returns_none():
     c = DispatchClient("http://d", "t", lambda *a: [], lambda *a: None)
     assert c.mark_pr_fix("o/r", 5, "FIXED") is False
+
+
+def test_queues_runs_lane_fetches_in_parallel():
+    """Regression for issue #34: lane queue GETs must overlap, not serialize.
+
+    Five lanes should issue five GETs but the total wall-clock should be ~1s,
+    not ~5s. Each GET also sleeps 1s so a serial implementation would block
+    for ~5s and this test would take noticeably longer than the parallel one.
+    """
+    import time
+
+    def http_get(url, headers):
+        lane = url.split("lane=")[1].split("&")[0]
+        time.sleep(1.0)  # simulate the slow Dispatch endpoint
+        return [{"lane": lane, "n": 1}]
+
+    c = DispatchClient("http://d", "tok", http_get, lambda *a: {})
+    start = time.monotonic()
+    out = c.queues("foreman/coder", ["local", "cloud", "frontier", "NORMAL", "ESCALATED"])
+    elapsed = time.monotonic() - start
+
+    assert set(out.keys()) == {"local", "cloud", "frontier", "NORMAL", "ESCALATED"}
+    assert all(out[lane] == [{"lane": lane, "n": 1}] for lane in out)
+    # Serial would take ~5s. Parallel with 5 workers should finish well under 3s
+    # even on a slow CI runner. Be generous so this isn't flaky.
+    assert elapsed < 3.0, f"lane fetches serialized: took {elapsed:.2f}s"
+
+
+def test_queues_empty_and_single_lane_paths():
+    def http_get(url, headers):
+        return [{"lane": "local"}]
+
+    c = DispatchClient("http://d", "tok", http_get, lambda *a: {})
+    # Empty input -> empty output, no HTTP call.
+    assert c.queues("foreman/coder", []) == {}
+    # Single lane -> still works, no thread pool needed.
+    out = c.queues("foreman/coder", ["local"])
+    assert out == {"local": [{"lane": "local"}]}
+
+
+def test_queues_swallows_per_lane_failure():
+    """One lane failing must not abort the whole batch."""
+    def http_get(url, headers):
+        lane = url.split("lane=")[1].split("&")[0]
+        if lane == "cloud":
+            raise RuntimeError("dispatch 502")
+        return [{"lane": lane}]
+
+    c = DispatchClient("http://d", "tok", http_get, lambda *a: {})
+    out = c.queues("foreman/coder", ["local", "cloud", "frontier"])
+    assert out["local"] == [{"lane": "local"}]
+    assert out["cloud"] == []        # failure degraded to empty list
+    assert out["frontier"] == [{"lane": "frontier"}]
+
+
+def test_list_pr_fix_queued_runs_in_parallel():
+    """Regression for issue #34: pr-fix-queue/queued GETs must overlap too."""
+    import time
+
+    def http_get(url, headers):
+        time.sleep(1.0)
+        lane = url.split("lane=")[1].split("&")[0]
+        return [{"lane": lane, "pr": 1}]
+
+    c = DispatchClient("http://d", "tok", http_get, lambda *a: {})
+    start = time.monotonic()
+    items = c.list_pr_fix_queued(["NORMAL", "ESCALATED"])
+    elapsed = time.monotonic() - start
+    assert {i["lane"] for i in items} == {"NORMAL", "ESCALATED"}
+    assert elapsed < 3.0, f"pr-fix fetches serialized: took {elapsed:.2f}s"
+
+
+def test_list_pr_fix_queued_skips_failed_lane():
+    def http_get(url, headers):
+        lane = url.split("lane=")[1].split("&")[0]
+        if lane == "ESCALATED":
+            raise RuntimeError("dispatch 502")
+        return [{"lane": lane, "pr": 1}]
+
+    c = DispatchClient("http://d", "tok", http_get, lambda *a: {})
+    items = c.list_pr_fix_queued(["NORMAL", "ESCALATED"])
+    assert items == [{"lane": "NORMAL", "pr": 1}]

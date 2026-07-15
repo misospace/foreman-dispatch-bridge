@@ -1,6 +1,11 @@
 import re
-from typing import Callable, Optional
+from concurrent.futures import ThreadPoolExecutor
+from typing import Callable, Iterable, Optional
 from bridge.models import ClaimedItem
+
+# Max worker threads for parallel lane queue fetches. Dispatch endpoints
+# are independent so a small pool is enough to overlap their latency.
+_LANE_POOL_MAX_WORKERS = 8
 
 # Injected transports so the client is testable without network.
 # http_get(url, headers) -> parsed JSON ; http_post(url, headers, json) -> parsed JSON | None
@@ -76,6 +81,37 @@ class DispatchClient:
         data = self._get(url, self._headers())
         return data if isinstance(data, list) else []
 
+    def _fetch_one_queue(self, agent_name: str, lane: str) -> list:
+        return self.queue(agent_name, lane)
+
+    def queues(self, agent_name: str, lanes: Iterable[str]) -> dict:
+        """Fetch the queue for each lane in ``lanes`` concurrently and return
+        ``{lane: [items]}``. Independent GETs run in parallel so total wall
+        time approaches the slowest single call instead of the sum of all of
+        them. Order of returned keys matches the input lanes (each value is
+        always a list, even on per-lane transport failure)."""
+        lanes = list(lanes)
+        if not lanes:
+            return {}
+        results: dict = {}
+        if len(lanes) == 1:
+            lane = lanes[0]
+            results[lane] = self._fetch_one_queue(agent_name, lane)
+            return results
+        with ThreadPoolExecutor(max_workers=min(_LANE_POOL_MAX_WORKERS, len(lanes))) as pool:
+            future_to_lane = {
+                pool.submit(self._fetch_one_queue, agent_name, lane): lane
+                for lane in lanes
+            }
+            for future, lane in future_to_lane.items():
+                try:
+                    results[lane] = future.result()
+                except Exception:
+                    # Mirror the single-lane contract: a failed GET yields no
+                    # items, not an exception that aborts the whole batch.
+                    results[lane] = []
+        return results
+
     def claim(self, item: dict, agent_name: str) -> bool:
         payload = {
             "issueId": item.get("issueId") or item.get("id"),
@@ -128,8 +164,8 @@ class DispatchClient:
         """Recover a dispatch issue id by repo+number from the lane queues
         (includeClaimed=true, so claimed items are visible). Used to backfill
         Workloads whose issue-id annotation predates bridge 0.3.0."""
-        for lane in lanes:
-            for item in self.queue(agent_name, lane):
+        for lane, items in self.queues(agent_name, lanes).items():
+            for item in items:
                 if not isinstance(item, dict):
                     continue
                 if item.get("repoFullName") == repo and int(_number(item) or 0) == issue_number:
@@ -145,15 +181,29 @@ class DispatchClient:
         """
         return self.unclaim(item, agent_name) and self.set_lane(item, lane, reason)
 
+    def _fetch_pr_fix_queued(self, lane: str) -> list:
+        url = f"{self._base}/api/pr-fix-queue/queued?lane={lane}"
+        data = self._get(url, self._headers())
+        return data if isinstance(data, list) else []
+
     def list_pr_fix_queued(self, lanes: list) -> list:
         """List QUEUED PR-fix items across the given lanes (one GET per lane,
-        concatenated). A non-list response for a lane contributes nothing."""
-        items = []
-        for lane in lanes:
-            url = f"{self._base}/api/pr-fix-queue/queued?lane={lane}"
-            data = self._get(url, self._headers())
-            if isinstance(data, list):
-                items.extend(data)
+        fetched concurrently and concatenated). A non-list response for a lane
+        contributes nothing, and a per-lane failure is silently skipped so one
+        lane being unavailable can't drop the whole PR-fix batch."""
+        lanes = list(lanes)
+        if not lanes:
+            return []
+        if len(lanes) == 1:
+            return self._fetch_pr_fix_queued(lanes[0])
+        items: list = []
+        with ThreadPoolExecutor(max_workers=min(_LANE_POOL_MAX_WORKERS, len(lanes))) as pool:
+            futures = [pool.submit(self._fetch_pr_fix_queued, lane) for lane in lanes]
+            for future in futures:
+                try:
+                    items.extend(future.result() or [])
+                except Exception:
+                    continue
         return items
 
     def mark_pr_fix(self, repo: str, pr: int, status: str, note: str = "") -> bool:
