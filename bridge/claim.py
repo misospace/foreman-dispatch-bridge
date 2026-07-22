@@ -160,3 +160,40 @@ class DispatchClient:
         """Transition a PR-fix item's status (QUEUED/FIXED/BLOCKED/...)."""
         payload = {"repo": repo, "pr": pr, "status": status, "note": note}
         return self._post(f"{self._base}/api/pr-fix-queue/mark", self._headers(), payload) is not None
+
+    def list_in_progress(self, agent_name: str, lanes: list) -> list:
+        """List issues that are `status/in-progress` AND claimed for this agent.
+
+        Used by the strand-recovery reconcile pass to find issues whose
+        Workload was deleted (GC or manual) without resetting the claim.
+        Returns one entry per claimed in-progress issue with at least
+        ``repoFullName``, ``issueNumber``, and ``issueId``.
+        """
+        out = []
+        for lane in lanes:
+            url = f"{self._base}/api/agents/{agent_name}/in-progress?lane={lane}"
+            data = self._get(url, self._headers())
+            if isinstance(data, list):
+                out.extend(item for item in data if isinstance(item, dict))
+        return out
+
+    def reset_to_ready(self, item: dict) -> bool:
+        """Reset a stranded `status/in-progress` claim back to `status/ready`.
+
+        Best-effort: returns False (without raising) on a 4xx so the reconcile
+        loop can move on to the next issue. 5xx still propagates so a true
+        outage is visible in logs.
+        """
+        payload = {
+            "issueId": item.get("issueId") or item.get("id"),
+            "repoFullName": item.get("repoFullName") or item.get("repo"),
+            "issueNumber": int(item.get("issueNumber") or item.get("number") or 0),
+        }
+        try:
+            return self._post(f"{self._base}/api/issues/reset-ready", self._headers(), payload) is not None
+        except Exception as e:
+            status = getattr(e, "response", None)
+            code = getattr(status, "status_code", None) if status else None
+            if code is not None and 400 <= code < 500:
+                return False
+            raise

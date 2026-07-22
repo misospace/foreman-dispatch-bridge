@@ -18,6 +18,7 @@ from bridge.prfix import (
     DEFAULT_PRFIX_LANE_AGENTS, ACTIONABLE_LANES, PRFIX_CREATED_BY,
 )
 from bridge.prune import prune_workloads
+from bridge.reconcile import reconcile_in_progress_issues
 
 ClaimOne = Callable[[str, str], Optional[ClaimedItem]]  # (agent_name, lane) -> item | None
 
@@ -232,6 +233,46 @@ def _real_main() -> None:  # pragma: no cover - thin wiring, exercised in the cl
             f"'{item.lane or '?'}' for {item.repo}#{item.issue_number}"
         )
         return dispatch.escalate(item, escalation_lane, reason, agent_name)
+
+    def workload_exists(repo: str, issue_number: int) -> bool:
+        """Strand detector: is there a live bridge Workload for this issue?
+
+        Uses the same naming convention as the claim path (issue_path) so the
+        reconcile pass agrees with the Workload it would have re-claimed.
+        """
+        from bridge.workload import issue_workload_name
+        target = issue_workload_name(repo, issue_number)
+        for wl in list_bridge_workloads():
+            if (wl.get("metadata") or {}).get("name") == target:
+                return True
+        return False
+
+    def issue_has_open_pr(item: dict) -> bool:
+        # Conservative default: leave it alone if we can't tell, rather than
+        # trampling on a PR that's already in human review.
+        try:
+            return bool(item.get("openPR") or item.get("hasOpenPR"))
+        except Exception:
+            return False
+
+    # Strand recovery: reset `status/in-progress` issues whose Workload is
+    # gone (GC'd by PRUNE_FAILED_AFTER_HOURS or manually deleted). Runs
+    # *before* claim so a reset issue is claimable on the same tick. Per-issue
+    # isolation: one reset failure must not abort the pass. Also leaves
+    # issues with an open PR alone (those are in-review, not re-runnable).
+    try:
+        for line in reconcile_in_progress_issues(
+            agent_name=agent_name,
+            list_in_progress=lambda: dispatch.list_in_progress(agent_name, list(l["name"] for l in [
+                {"name": l} for l in lanes
+            ])),
+            reset_to_ready=dispatch.reset_to_ready,
+            has_live_workload=workload_exists,
+            has_open_pr=issue_has_open_pr,
+        ):
+            print(f"strand-reconcile:{line}")
+    except Exception as e:
+        print(f"strand-reconcile:failed:{e}")
 
     # Retry failed workloads first (so a re-run this tick uses the current config),
     # then claim new work.
