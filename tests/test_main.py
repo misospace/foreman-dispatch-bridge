@@ -1,5 +1,5 @@
 from bridge.models import ClaimedItem
-from bridge.main import run_once
+from bridge.main import run_once, _parse_bool_env
 
 LANES = ["local", "cloud", "frontier"]
 
@@ -186,3 +186,41 @@ def test_empty_base_coder_agents_is_legacy_behavior():
     run_once(LANES, "foreman/coder", _claim_stub({"local": item}), created.append,
              namespace="llm", gate_profiles=gate_profiles)
     assert created[0]["spec"]["coderAgentRef"]["name"] == "coder"
+
+
+def test_parse_bool_env_true_values():
+    assert _parse_bool_env("true") is True
+    assert _parse_bool_env("TRUE") is True
+    assert _parse_bool_env("1") is True
+    assert _parse_bool_env("yes") is True
+    assert _parse_bool_env("") is True  # empty -> default
+
+
+def test_parse_bool_env_false_values():
+    assert _parse_bool_env("false") is False
+    assert _parse_bool_env("FALSE") is False
+    assert _parse_bool_env("0") is False
+    assert _parse_bool_env("no") is False
+    assert _parse_bool_env("NO") is False
+
+
+def test_parse_bool_env_default_when_empty():
+    assert _parse_bool_env("", default=True) is True
+    assert _parse_bool_env("", default=False) is False
+
+
+def test_verify_enabled_false_omits_verifier():
+    created = []
+    item = ClaimedItem(repo="a/b", issue_number=3, intent="fix", lane="local")
+    run_once(LANES, "foreman/coder", _claim_stub({"local": item}), created.append,
+             namespace="llm", verify_enabled=False)
+    assert "verifierAgentRef" not in created[0]["spec"]
+    assert created[0]["spec"]["coderAgentRef"]["name"] == "coder"
+
+
+def test_verify_enabled_true_keeps_verifier():
+    created = []
+    item = ClaimedItem(repo="a/b", issue_number=3, intent="fix", lane="local")
+    run_once(LANES, "foreman/coder", _claim_stub({"local": item}), created.append,
+             namespace="llm")
+    assert created[0]["spec"]["verifierAgentRef"]["name"] == "gate"

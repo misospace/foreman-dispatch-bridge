@@ -89,11 +89,15 @@ def prfix_workload_name(item: "PrFixItem") -> str:
     return f"prfix-{owner_repo}-{item.pr}"
 
 
-def build_fix_workload(item, namespace, gate_profile, agent_name, coder_agent, attempt=1) -> dict:
+def build_fix_workload(item, namespace, gate_profile, agent_name, coder_agent, attempt=1,
+                       verify_enabled: bool = True) -> dict:
     """Explicit code -> verify pipeline that amends the PR's head branch.
 
     reviseFromBranch makes the executor fetch and check out the PR branch;
-    allowOverwrite lets the push force-with-lease the existing ref."""
+    allowOverwrite lets the push force-with-lease the existing ref.
+
+    When verify_enabled is False, only the issue-fix step is emitted (gateless).
+    gateProfile still propagates: coders use it for self-gates/language routing."""
     n = item.pr
     code_payload = {
         "repo": item.repo,
@@ -104,20 +108,23 @@ def build_fix_workload(item, namespace, gate_profile, agent_name, coder_agent, a
     }
     if item.issue is not None:
         code_payload["issue"] = item.issue
-    verify_payload = {"repo": item.repo, "branch": item.branch}
-    if item.issue is not None:
-        verify_payload["issue"] = item.issue
     spec = {
         "intent": f"fix PR #{n}",
         "repo": item.repo,
         "pipeline": [
             {"name": f"fix-{n}", "kind": "issue-fix",
              "agentRef": {"name": coder_agent}, "payload": code_payload},
-            {"name": f"fixverify-{n}", "kind": "verify",
-             "agentRef": {"name": VERIFIER_AGENT}, "dependsOn": [f"fix-{n}"],
-             "payload": verify_payload},
         ],
     }
+    if verify_enabled:
+        verify_payload = {"repo": item.repo, "branch": item.branch}
+        if item.issue is not None:
+            verify_payload["issue"] = item.issue
+        spec["pipeline"].append({
+            "name": f"fixverify-{n}", "kind": "verify",
+            "agentRef": {"name": VERIFIER_AGENT}, "dependsOn": [f"fix-{n}"],
+            "payload": verify_payload,
+        })
     if gate_profile:
         spec["gateProfile"] = gate_profile
     return {
@@ -138,7 +145,8 @@ def build_fix_workload(item, namespace, gate_profile, agent_name, coder_agent, a
 
 
 def drain_pr_fixes(list_queued, existing_prfix_names, create_workload,
-                   gate_profiles, lane_agents, agent_name, namespace) -> list:
+                   gate_profiles, lane_agents, agent_name, namespace,
+                   verify_enabled: bool = True) -> list:
     """Create a fix Workload per newly-QUEUED item. list_queued returns raw
     dicts already filtered to actionable lanes by the API query. An item is
     skipped when it has no branch (nothing to amend) or already has an
@@ -163,6 +171,7 @@ def drain_pr_fixes(list_queued, existing_prfix_names, create_workload,
             manifest = build_fix_workload(
                 item, namespace, gate_profile_for(item.repo, gate_profiles),
                 agent_name, pr_fix_coder_for(item.lane, lane_agents), attempt=1,
+                verify_enabled=verify_enabled,
             )
             create_workload(manifest)
             results.append(f"{tag}:created:{name}")

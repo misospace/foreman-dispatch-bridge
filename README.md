@@ -7,16 +7,19 @@ lane queues and materializes Foreman `Workload`s for them — then shepherds the
 failures.
 
 ```
-dispatch lanes ──claim──► bridge ──create──► Workload ──► code → verify → review
-                            │
-                            ├─ retry pass: Failed Workloads are deleted and
-                            │  recreated (≤ RETRY_MAX_ATTEMPTS), carrying the
-                            │  reviewer's NO-GO findings into the retry coder's
-                            │  prompt (explicit spec.pipeline + payload.prompt)
-                            └─ escalation: exhausted issues are re-laned to
-                               ESCALATION_LANE + unclaimed; the next tick
-                               claims them there with that lane's coder Agent
+dispatch lanes ──claim──► bridge ──create──► Workload ──► code → [verify] → review
+                              │
+                              ├─ retry pass: Failed Workloads are deleted and
+                              │  recreated (≤ RETRY_MAX_ATTEMPTS), carrying the
+                              │  reviewer's NO-GO findings into the retry coder's
+                              │  prompt (explicit spec.pipeline + payload.prompt)
+                              └─ escalation: exhausted issues are re-laned to
+                                 ESCALATION_LANE + unclaimed; the next tick
+                                 claims them there with that lane's coder Agent
 ```
+
+`[verify]` is optional — controlled by `VERIFY_ENABLED`. When disabled the bridge
+relies on repository CI instead of the Foreman gate. Requires Foreman >= 0.9.9.
 
 Each tick (one CronJob run): reconcile failures first, then claim one ready
 issue per lane.
@@ -38,6 +41,12 @@ issue per lane.
 | `PR_FIX_ENABLED` | *(off)* | enable the PR-fix drain/reconcile loop |
 | `PR_FIX_MAX_ATTEMPTS` | `3` | pr-fix attempts before BLOCKED/tombstone |
 | `GITHUB_TOKEN` | *(empty)* | used to check a PR's `mergeable_state` before marking a pr-fix FIXED (unauthenticated if unset) |
+| `VERIFY_ENABLED` | `true` | set to `false` to omit the verify step and rely on repository CI (requires Foreman >= 0.9.9). Older Foreman versions reject Workloads without the required `verifierAgentRef`. |
+
+PR-fix retries **preserve** the pipeline shape set at creation — `rebuild_prfix_manifest`
+reuses the existing spec, so toggling this env variable after a PR-fix Workload exists
+has no effect on its retries. Issue-path retries always pick up the **current** env value
+each attempt because they rebuild from scratch via `build_workload`.
 
 ## RBAC
 

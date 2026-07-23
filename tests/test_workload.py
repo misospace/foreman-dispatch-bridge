@@ -208,3 +208,45 @@ def test_build_workload_feedback_path_has_no_revision_coder_ref():
     wl = build_workload(ITEM, namespace="llm", feedback="do better", revision_coder_agent="coder-revision")
     assert "pipeline" in wl["spec"]
     assert "revisionCoderAgentRef" not in wl["spec"]
+
+
+# --- Gateless mode (verify_enabled=False) ---
+
+
+def test_build_workload_gateless_omits_verifier_agent_ref():
+    """Issues path: verify_enabled=False must not stamp verifierAgentRef so
+    Foreman 0.9.9+ wires review directly to code."""
+    wl = build_workload(ITEM, namespace="llm", verify_enabled=False)
+    assert "verifierAgentRef" not in wl["spec"]
+    assert wl["spec"]["coderAgentRef"]["name"] == "coder"
+    assert wl["spec"]["reviewerAgentRefs"] == [{"name": "reviewer"}]
+
+
+def test_build_workload_gateless_feedback_pipeline_has_no_verify_step():
+    """Feedback path: verify_enabled=False must produce code → review (no verify),
+    with review steps depending on code instead of verify."""
+    wl = build_workload(ITEM, namespace="llm", attempt=2, feedback="reviewer said no",
+                        verify_enabled=False)
+    steps = wl["spec"]["pipeline"]
+    kinds = [s["kind"] for s in steps]
+    assert "verify" not in kinds
+    assert kinds.count("issue-fix") == 1
+    assert kinds.count("review") == 1
+    review = [s for s in steps if s["kind"] == "review"][0]
+    code = [s for s in steps if s["kind"] == "issue-fix"][0]
+    assert review["dependsOn"] == [code["name"]]
+
+
+def test_build_workload_default_keeps_verifier():
+    """Default verify_enabled=True keeps the verifier (backward compat)."""
+    wl = build_workload(ITEM, namespace="llm")
+    assert wl["spec"]["verifierAgentRef"]["name"] == "gate"
+
+
+def test_build_workload_gateless_preserves_gate_profile():
+    """Gateless issue-path Workloads still carry gateProfile for coder self-gate
+    and language routing."""
+    profile = {"language": "python", "commands": {"test": "pytest -q"}}
+    wl = build_workload(ITEM, namespace="llm", gate_profile=profile, verify_enabled=False)
+    assert wl["spec"]["gateProfile"] == profile
+    assert "verifierAgentRef" not in wl["spec"]

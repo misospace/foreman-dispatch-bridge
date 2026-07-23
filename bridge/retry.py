@@ -106,6 +106,7 @@ def reconcile_failures(
     base_coder_agents: Optional[dict] = None,
     lookup_issue_id: Optional[LookupIssueId] = None,
     feedback_for: Optional[FeedbackFor] = None,
+    verify_enabled: bool = True,
 ) -> list:
     """Retry Failed bridge Workloads, bounded by max_attempts.
 
@@ -181,6 +182,7 @@ def reconcile_failures(
                 attempt + 1,
                 coder_agent_for(item.lane, language, lane_coder_agents, base_coder_agents),
                 feedback=feedback,
+                verify_enabled=verify_enabled,
             )
             create_workload(manifest)
         except Exception as e:
