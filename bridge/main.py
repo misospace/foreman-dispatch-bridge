@@ -22,6 +22,16 @@ from bridge.prune import prune_workloads
 ClaimOne = Callable[[str, str], Optional[ClaimedItem]]  # (agent_name, lane) -> item | None
 
 
+def _parse_bool_env(raw: str, default: bool = True) -> bool:
+    """Parse a boolean env var: false values include 'false', '0', 'no' (case-insensitive)."""
+    stripped = raw.strip()
+    if not stripped:
+        return default
+    if stripped.lower() in ("false", "0", "no"):
+        return False
+    return True
+
+
 def run_once(
     lanes: list,
     agent_name: str,
@@ -34,6 +44,7 @@ def run_once(
     base_coder_agents: Optional[dict] = None,
     in_progress: int = 0,
     max_in_progress: int = 0,
+    verify_enabled: bool = True,
 ) -> list:
     """Claim one ready issue per lane and materialize a Workload for each. Returns per-lane outcomes.
 
@@ -84,6 +95,7 @@ def run_once(
                 agent_name,
                 coder_agent=coder_agent_for(item.lane, language, lane_coder_agents, base_coder_agents),
                 revision_coder_agent=revision_coder_agent_for(item.lane, revision_coder_agents),
+                verify_enabled=verify_enabled,
             )
             create_workload(manifest)
             in_progress += 1
@@ -115,6 +127,7 @@ def _real_main() -> None:  # pragma: no cover - thin wiring, exercised in the cl
     # When set, exhausted Workloads outside this lane escalate into it (re-lane +
     # unclaim) instead of tombstoning. Empty disables escalation.
     escalation_lane = os.environ.get("ESCALATION_LANE", "").strip()
+    verify_enabled = _parse_bool_env(os.environ.get("VERIFY_ENABLED", ""), default=True)
     pr_fix_enabled = os.environ.get("PR_FIX_ENABLED", "").strip().lower() in ("1", "true", "yes")
     pr_fix_max_attempts = int(os.environ.get("PR_FIX_MAX_ATTEMPTS", "3"))
     github_token = os.environ.get("GITHUB_TOKEN", "")
@@ -244,6 +257,7 @@ def _real_main() -> None:  # pragma: no cover - thin wiring, exercised in the cl
         base_coder_agents=base_coder_agents,
         lookup_issue_id=lookup_issue_id,
         feedback_for=feedback_for,
+        verify_enabled=verify_enabled,
     ):
         print(line)
 
@@ -256,6 +270,7 @@ def _real_main() -> None:  # pragma: no cover - thin wiring, exercised in the cl
         gate_profiles, lane_coder_agents, revision_coder_agents,
         base_coder_agents=base_coder_agents,
         in_progress=active, max_in_progress=max_in_progress,
+        verify_enabled=verify_enabled,
     ):
         print(line)
 
@@ -308,6 +323,7 @@ def _real_main() -> None:  # pragma: no cover - thin wiring, exercised in the cl
             lambda: dispatch.list_pr_fix_queued(list(ACTIONABLE_LANES)),
             existing, create_workload,
             gate_profiles, pr_fix_lane_agents, agent_name, namespace,
+            verify_enabled=verify_enabled,
         ):
             print(line)
 

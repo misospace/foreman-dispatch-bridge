@@ -271,3 +271,23 @@ def test_reconcile_isolates_a_wedged_delete():
     assert out[0].startswith("wl-wedged:retry-error:")
     assert out[1] == "wl-fine:retry:2/3"
     assert len(r.created) == 1  # only the healthy one was recreated
+
+
+def test_reconcile_gateless_feedback_retry_builds_code_review_no_verify():
+    """verify_enabled=False feedback retry rebuilds as code→review with no verify,
+    reviewer depending directly on code."""
+    r = _Recorder([_failed_wl("wl-a-b-7", attempt=1)])
+    reconcile_failures("foreman-coder", r.list_failed, r.create, r.delete,
+                       "llm", {}, max_attempts=3,
+                       feedback_for=lambda name: "Reviewer said: add tests",
+                       verify_enabled=False)
+    spec = r.created[0]["spec"]
+    assert "pipeline" in spec and "issues" not in spec
+    steps = spec["pipeline"]
+    kinds = [s["kind"] for s in steps]
+    assert kinds == ["issue-fix", "review"]
+    assert "verify" not in kinds
+    code = steps[0]
+    review = steps[1]
+    assert review["dependsOn"] == [code["name"]]
+    assert code["payload"]["prompt"] == "Reviewer said: add tests"

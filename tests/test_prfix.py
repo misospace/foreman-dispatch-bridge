@@ -103,6 +103,25 @@ def test_build_fix_workload_omits_issue_when_absent():
     assert "gateProfile" not in wl["spec"]
 
 
+def test_build_fix_workload_gateless_emits_issue_fix_only():
+    """Gateless PR fixes rely on repository CI, so no fixverify step is emitted."""
+    wl = build_fix_workload(
+        _item(repo="o/r", pr=9, issue=42, branch="b"),
+        "llm", {"language": "python"}, "a", "coder", verify_enabled=False,
+    )
+    steps = wl["spec"]["pipeline"]
+    assert [s["kind"] for s in steps] == ["issue-fix"]
+    assert steps[0]["name"] == "fix-9"
+    assert wl["spec"]["gateProfile"] == {"language": "python"}
+
+
+def test_build_fix_workload_default_keeps_verify_step():
+    """Default verify_enabled=True preserves the existing code → verify pipeline."""
+    wl = build_fix_workload(_item(repo="o/r", pr=9, branch="b"),
+                            "llm", None, "a", "coder")
+    assert [s["kind"] for s in wl["spec"]["pipeline"]] == ["issue-fix", "verify"]
+
+
 from bridge.prfix import drain_pr_fixes
 
 
@@ -151,6 +170,22 @@ def test_drain_isolates_per_item_failure():
     assert any("o/r#5:error:" in line for line in out)
 
 
+def test_drain_gateless_creates_issue_fix_only_no_verify():
+    """verify_enabled=False drain creates a Workload with issue-fix only, no verify."""
+    created = []
+    out = drain_pr_fixes(
+        list_queued=lambda: [_raw(repo="o/r", pr=5)],
+        existing_prfix_names=set(), create_workload=created.append,
+        gate_profiles={"o/r": {"language": "python"}}, lane_agents={}, agent_name="a", namespace="llm",
+        verify_enabled=False,
+    )
+    assert len(created) == 1
+    steps = created[0]["spec"]["pipeline"]
+    assert [s["kind"] for s in steps] == ["issue-fix"]
+    assert "verify" not in [s["kind"] for s in steps]
+    assert created[0]["spec"]["gateProfile"] == {"language": "python"}
+
+
 from bridge.prfix import (
     reconcile_pr_fixes, rebuild_prfix_manifest, PRFIX_CREATED_BY, DEFAULT_PRFIX_LANE_AGENTS,
 )
@@ -173,6 +208,20 @@ def _wl(pr, phase, attempt=1, name=None, lane="NORMAL", coder="coder"):
         ]},
         "status": {"phase": phase},
     }
+
+
+def test_rebuild_prfix_manifest_preserves_gateless_shape():
+    """Rebuilding a gateless PR-fix Workload preserves the issue-fix-only pipeline
+    and increments the attempt counter — verify_enabled toggles after creation
+    do not affect PR-fix retries because rebuild reuses the existing spec."""
+    wl = _wl(9, "Failed", attempt=1)
+    wl["spec"]["pipeline"] = [
+        {"name": "fix-9", "kind": "issue-fix"},
+    ]
+    fresh = rebuild_prfix_manifest(wl, attempt=2)
+    assert [s["kind"] for s in fresh["spec"]["pipeline"]] == ["issue-fix"]
+    assert len(fresh["spec"]["pipeline"]) == 1
+    assert fresh["metadata"]["annotations"]["foreman.llmkube.dev/attempt"] == "2"
 
 
 def test_rebuild_prfix_manifest_bumps_attempt_and_strips_status():

@@ -125,20 +125,25 @@ def workload_name(item: ClaimedItem) -> str:
 
 
 def _pipeline_steps(
-    item: ClaimedItem, name: str, coder_agent: str, feedback: str, allow_overwrite: bool = False
+    item: ClaimedItem, name: str, coder_agent: str, feedback: str,
+    allow_overwrite: bool = False, verify_enabled: bool = True,
 ) -> list:
     """Explicit spec.pipeline mirroring the operator's issues-path decomposition
     (code -> verify -> review-*), with the retry feedback injected as the code
     step's payload.prompt — the only channel that reaches the coder's user
     prompt ("Issue context"). Branch naming matches the issues path so re-runs
     keep the same branch. gateProfile still propagates: the operator stamps the
-    Workload default onto every rendered step."""
+    Workload default onto every rendered step.
+
+    When verify_enabled is False, the pipeline skips the verify step entirely:
+    code -> review (reviewer dependsOn code). Existing behavior when True."""
     n = item.issue_number
     branch = f"foreman/{name}/issue-{n}"
     payload = {"repo": item.repo, "issue": n, "branch": branch}
+    code_name = f"code-{n}"
     steps = [
         {
-            "name": f"code-{n}",
+            "name": code_name,
             "kind": "issue-fix",
             "agentRef": {"name": coder_agent},
             "payload": (
@@ -147,20 +152,22 @@ def _pipeline_steps(
                 else {**payload, "prompt": feedback}
             ),
         },
-        {
+    ]
+    if verify_enabled:
+        steps.append({
             "name": f"verify-{n}",
             "kind": "verify",
             "agentRef": {"name": VERIFIER_AGENT},
-            "dependsOn": [f"code-{n}"],
+            "dependsOn": [code_name],
             "payload": dict(payload),
-        },
-    ]
+        })
     for i, reviewer in enumerate(REVIEWER_AGENTS):
+        depends = [f"verify-{n}"] if verify_enabled else [code_name]
         steps.append({
             "name": f"review-{n}-{i}",
             "kind": "review",
             "agentRef": {"name": reviewer},
-            "dependsOn": [f"verify-{n}"],
+            "dependsOn": depends,
             # Explicit pipelines set openPullRequest PER STEP — unlike the
             # issues path, where the operator stamps it from
             # Workload.spec.openPullRequest (default on). Without it a retried
@@ -180,6 +187,7 @@ def build_workload(
     coder_agent: str = CODER_AGENT,
     feedback: str = "",
     revision_coder_agent: str = "",
+    verify_enabled: bool = True,
 ) -> dict:
     # A re-dispatch reuses its predecessor's deterministic branch name; if a
     # prior attempt pushed, the new push dies non-fast-forward (#1). Foreman's
@@ -199,7 +207,8 @@ def build_workload(
             "intent": item.intent,
             "repo": item.repo,
             "pipeline": _pipeline_steps(
-                item, workload_name(item), coder_agent, feedback, allow_overwrite
+                item, workload_name(item), coder_agent, feedback, allow_overwrite,
+                verify_enabled=verify_enabled,
             ),
         }
     else:
@@ -208,9 +217,10 @@ def build_workload(
             "repo": item.repo,
             "issues": [item.issue_number],
             "coderAgentRef": {"name": coder_agent},
-            "verifierAgentRef": {"name": VERIFIER_AGENT},
             "reviewerAgentRefs": [{"name": name} for name in REVIEWER_AGENTS],
         }
+        if verify_enabled:
+            spec["verifierAgentRef"] = {"name": VERIFIER_AGENT}
         if revision_coder_agent:
             spec["revisionCoderAgentRef"] = {"name": revision_coder_agent}
     if allow_overwrite:
