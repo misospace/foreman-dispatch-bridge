@@ -1,7 +1,9 @@
 import json
+import logging
 import os
 import time
 from typing import Callable, Optional
+from bridge.logging_setup import configure_logging
 from bridge.models import ClaimedItem
 from bridge.workload import (
     build_workload,
@@ -19,7 +21,60 @@ from bridge.prfix import (
 )
 from bridge.prune import prune_workloads
 
+# Configure logging once at import time. Done here (rather than inside
+# ``run_once``) so the configuration is in place even when ``run_once``
+# is invoked directly from tests or from a REPL.
+configure_logging()
+logger = logging.getLogger("bridge.main")
+
 ClaimOne = Callable[[str, str], Optional[ClaimedItem]]  # (agent_name, lane) -> item | None
+
+
+# Action keywords emitted by ``reconcile_failures`` / ``run_once`` /
+# ``reconcile_pr_fixes`` / ``drain_pr_fixes`` / ``prune_workloads`` that
+# should be logged at ``error`` severity. The matches are substring checks
+# against the second colon-separated segment of a result line.
+_ERROR_ACTIONS = (
+    "error", "claim-failed", "claim-http-error", "delete-failed",
+    "feedback-lookup-failed", "issue-id-lookup-failed",
+    "prfix-mark-failed", "prfix-mergeable-check-failed",
+)
+# Action keywords that warrant ``warning`` (recoverable degradation, not a
+# crash but worth a human glance).
+_WARNING_ACTIONS = (
+    "exhausted", "giveup", "blocked", "unparseable",
+)
+
+
+def _log_line(line: str) -> None:
+    """Emit a per-result log line at the right severity with structured fields.
+
+    The upstream ``reconcile_*`` / ``prune_workloads`` helpers yield strings
+    of the shape ``"{subject}:{action}:{details}"`` (with a leading ``"  "``
+    indent from the per-lane loop). We split the first two segments off so
+    that downstream log queries can filter on ``lane`` / ``action`` without
+    having to grep the message text, and so that a single ``jq`` pipeline
+    can group failures across a tick.
+    """
+    stripped = line.strip()
+    if not stripped:
+        return
+    # ``split(":", 2)`` keeps the rest of the line intact in ``details``.
+    parts = stripped.split(":", 2)
+    subject = parts[0] if len(parts) >= 1 else ""
+    action = parts[1] if len(parts) >= 2 else ""
+    details = parts[2] if len(parts) >= 3 else ""
+    extra = {"subject": subject}
+    if action:
+        extra["action"] = action
+    if details:
+        extra["details"] = details
+    if action in _ERROR_ACTIONS or any(err in action for err in ("error", "failed")):
+        logger.error(stripped, extra=extra)
+    elif action in _WARNING_ACTIONS or any(w in action for w in ("exhausted", "giveup", "blocked")):
+        logger.warning(stripped, extra=extra)
+    else:
+        logger.info(stripped, extra=extra)
 
 
 def _parse_bool_env(raw: str, default: bool = True) -> bool:
@@ -229,14 +284,14 @@ def _real_main() -> None:  # pragma: no cover - thin wiring, exercised in the cl
         try:
             return feedback_from_tasks(list_workload_tasks(workload_name))
         except Exception as e:  # feedback is best-effort; never block a retry on it
-            print(f"{workload_name}:feedback-lookup-failed:{e}")
+            _log_line(f"{workload_name}:feedback-lookup-failed:{e}")
             return ""
 
     def lookup_issue_id(item: ClaimedItem) -> str:
         try:
             return dispatch.find_issue_id(agent_name, lanes, item.repo, item.issue_number)
         except Exception as e:  # best-effort; missing id just means no escalation
-            print(f"{item.repo}#{item.issue_number}:issue-id-lookup-failed:{e}")
+            _log_line(f"{item.repo}#{item.issue_number}:issue-id-lookup-failed:{e}")
             return ""
 
     def escalate(item: ClaimedItem) -> bool:
@@ -259,7 +314,7 @@ def _real_main() -> None:  # pragma: no cover - thin wiring, exercised in the cl
         feedback_for=feedback_for,
         verify_enabled=verify_enabled,
     ):
-        print(line)
+        _log_line(line)
 
     # Cap concurrent in-progress work so the pipeline drains a bounded set
     # instead of claiming the whole backlog at once (0 = uncapped).
@@ -272,7 +327,7 @@ def _real_main() -> None:  # pragma: no cover - thin wiring, exercised in the cl
         in_progress=active, max_in_progress=max_in_progress,
         verify_enabled=verify_enabled,
     ):
-        print(line)
+        _log_line(line)
 
     if pr_fix_enabled:
         def list_prfix_workloads() -> list:
@@ -287,7 +342,7 @@ def _real_main() -> None:  # pragma: no cover - thin wiring, exercised in the cl
             try:
                 return dispatch.mark_pr_fix(repo, pr, status, note)
             except Exception as e:  # best-effort; tombstone remains, next tick retries
-                print(f"prfix-mark-failed:{repo}#{pr}:{status}:{e}")
+                _log_line(f"prfix-mark-failed:{repo}#{pr}:{status}:{e}")
                 return False
 
         # GitHub's own merge-state, not the fix workload's exit status, is the
@@ -304,7 +359,7 @@ def _real_main() -> None:  # pragma: no cover - thin wiring, exercised in the cl
             try:
                 data = http_get(f"https://api.github.com/repos/{repo}/pulls/{pr}", headers)
             except Exception as e:  # best-effort; retried next tick under the attempt cap
-                print(f"prfix-mergeable-check-failed:{repo}#{pr}:{e}")
+                _log_line(f"prfix-mergeable-check-failed:{repo}#{pr}:{e}")
                 return False
             state = str((data or {}).get("mergeable_state") or "").lower()
             return state not in ("dirty", "conflicting")
@@ -314,7 +369,7 @@ def _real_main() -> None:  # pragma: no cover - thin wiring, exercised in the cl
             mark_pr_fix, pr_is_mergeable=pr_is_mergeable, max_attempts=pr_fix_max_attempts,
             lane_agents=pr_fix_lane_agents,
         ):
-            print(line)
+            _log_line(line)
 
         existing = {
             (wl.get("metadata") or {}).get("name") for wl in list_prfix_workloads()
@@ -325,7 +380,7 @@ def _real_main() -> None:  # pragma: no cover - thin wiring, exercised in the cl
             gate_profiles, pr_fix_lane_agents, agent_name, namespace,
             verify_enabled=verify_enabled,
         ):
-            print(line)
+            _log_line(line)
 
     # Garbage-collect terminal Workloads last, after reconcile has already
     # retried anything retryable this tick — so a still-terminal Workload past
@@ -346,7 +401,7 @@ def _real_main() -> None:  # pragma: no cover - thin wiring, exercised in the cl
         completed_ttl_seconds=prune_completed_after_h * 3600,
         failed_ttl_seconds=prune_failed_after_h * 3600,
     ):
-        print(line)
+        _log_line(line)
 
 
 if __name__ == "__main__":
