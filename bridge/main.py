@@ -292,11 +292,76 @@ def _real_main() -> None:  # pragma: no cover - thin wiring, exercised in the cl
 
         # GitHub's own merge-state, not the fix workload's exit status, is the
         # source of truth for "did this PR actually become mergeable". Only
-        # DIRTY/CONFLICTING block a FIXED mark; other states (CLEAN, UNSTABLE,
-        # BEHIND, BLOCKED, UNKNOWN, ...) count as mergeable. A lookup failure
-        # is treated as *not* mergeable (conservative): reconcile_pr_fixes
-        # just retries under its attempt cap rather than falsely marking
-        # FIXED off an unverified success, which is the bug this closes.
+        # DIRTY/CONFLICTING block a FIXED mark via mergeable_state; in
+        # gateless mode (verify_enabled=False) the repo's CI check-runs are
+        # the only signal that the fix actually landed, so any failing or
+        # still-pending check also blocks a FIXED mark. In gated mode the
+        # other mergeable_state values (CLEAN, UNSTABLE, BEHIND, BLOCKED,
+        # UNKNOWN, ...) still count as mergeable — the in-bridge verify step
+        # is the authoritative settlement there. A lookup failure is treated
+        # as *not* mergeable (conservative): reconcile_pr_fixes just retries
+        # under its attempt cap rather than falsely marking FIXED off an
+        # unverified success, which is the bug this closes.
+        def pr_ci_state(repo, pr) -> str:
+            """Inspect a PR's CI status from check-runs.
+
+            Returns one of:
+              "pass"    — every check-run completed with a non-failure
+                          conclusion, or no checks are configured at all.
+              "pending" — at least one check-run is still queued/in-progress
+                          (no conclusion yet).
+              "fail"    — at least one check-run concluded with a failure
+                          (failure/timed_out/cancelled/...).
+              "unknown" — the check-runs query could not be performed; the
+                          caller should treat this as not-yet-mergeable so a
+                          transient GitHub outage does not silently settle
+                          a PR as FIXED.
+            """
+            headers = {"Accept": "application/vnd.github+json"}
+            if github_token:
+                headers["Authorization"] = f"Bearer {github_token}"
+            try:
+                pr_data = http_get(
+                    f"https://api.github.com/repos/{repo}/pulls/{pr}", headers)
+                sha = str((pr_data or {}).get("head", {}).get("sha") or "")
+            except Exception as e:
+                print(f"prfix-ci-check-failed:{repo}#{pr}:{e}")
+                return "unknown"
+            if not sha:
+                return "unknown"
+            try:
+                runs = http_get(
+                    f"https://api.github.com/repos/{repo}/commits/{sha}/check-runs",
+                    headers)
+            except Exception as e:
+                print(f"prfix-checks-fetch-failed:{repo}#{pr}@{sha}:{e}")
+                return "unknown"
+            check_runs = (runs or {}).get("check_runs") or []
+            if not check_runs:
+                # No checks configured on this SHA — don't gate CI on
+                # missing infrastructure.
+                return "pass"
+            pending = False
+            fail = False
+            for run in check_runs:
+                status = str((run or {}).get("status") or "").lower()
+                conclusion = str((run or {}).get("conclusion") or "").lower()
+                if status != "completed":
+                    # queued / in_progress / waiting / requested / pending
+                    pending = True
+                    continue
+                if conclusion in (
+                    "failure", "timed_out", "cancelled",
+                    "startup_failure", "stale", "error", "action_required",
+                ):
+                    fail = True
+                    break
+            if fail:
+                return "fail"
+            if pending:
+                return "pending"
+            return "pass"
+
         def pr_is_mergeable(repo, pr) -> bool:
             headers = {"Accept": "application/vnd.github+json"}
             if github_token:
@@ -307,11 +372,24 @@ def _real_main() -> None:  # pragma: no cover - thin wiring, exercised in the cl
                 print(f"prfix-mergeable-check-failed:{repo}#{pr}:{e}")
                 return False
             state = str((data or {}).get("mergeable_state") or "").lower()
-            return state not in ("dirty", "conflicting")
+            if state in ("dirty", "conflicting"):
+                return False
+            if not verify_enabled:
+                # Gateless: the in-bridge verify step is skipped (PR TBD),
+                # so repo CI is the only authoritative signal for "did the
+                # fix Workload actually land". Block FIXED whenever a
+                # required check is failing, still in flight, or could not
+                # be queried — a transient GitHub outage must not silently
+                # settle a PR as FIXED.
+                ci = pr_ci_state(repo, pr)
+                if ci in ("fail", "pending", "unknown"):
+                    return False
+            return True
 
         for line in reconcile_pr_fixes(
             list_prfix_workloads, delete_workload, create_workload,
-            mark_pr_fix, pr_is_mergeable=pr_is_mergeable, max_attempts=pr_fix_max_attempts,
+            mark_pr_fix, pr_is_mergeable=pr_is_mergeable,
+            pr_ci_state=pr_ci_state, max_attempts=pr_fix_max_attempts,
             lane_agents=pr_fix_lane_agents,
         ):
             print(line)

@@ -240,7 +240,8 @@ def escalate_prfix_manifest(wl: dict, next_lane: str, next_coder: str) -> dict:
 
 
 def reconcile_pr_fixes(list_prfix_workloads, delete_workload, create_workload,
-                       mark_pr_fix, pr_is_mergeable=lambda repo, pr: True, max_attempts=3,
+                       mark_pr_fix, pr_is_mergeable=lambda repo, pr: True,
+                       pr_ci_state=lambda repo, pr: "pass", max_attempts=3,
                        lane_agents=None) -> list:
     """Settle prior fix Workloads: Succeeded -> verify the PR is actually
     mergeable (pr_is_mergeable) before marking FIXED, delete only if the mark
@@ -268,6 +269,19 @@ def reconcile_pr_fixes(list_prfix_workloads, delete_workload, create_workload,
                 and repo and pr is not None
                 and not pr_is_mergeable(repo, pr)
             )
+            # When the mergeable guard says "no, but only because CI is
+            # still in flight", don't burn a retry attempt — the next
+            # reconcile tick will settle once the checks finish. Only
+            # genuine conflicts and failed checks consume the budget.
+            checks_pending = (
+                still_conflicting
+                and repo and pr is not None
+                and pr_ci_state(repo, pr) == "pending"
+            )
+            if checks_pending:
+                results.append(
+                    f"{name}:prfix-ci-pending:{attempt}/{max_attempts}:{repo}#{pr}")
+                continue
             ok = False
             if phase in ("Succeeded", "Completed") and not still_conflicting:
                 if repo and pr is not None:

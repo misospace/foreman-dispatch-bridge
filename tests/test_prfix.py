@@ -322,6 +322,70 @@ def test_reconcile_succeeded_but_pr_conflicting_retries_instead_of_fixed():
     assert out == ["prfix-o-r-198:not-mergeable-retry:2/3"]
 
 
+def test_reconcile_ci_pending_does_not_burn_attempt():
+    """In gateless mode, pr_is_mergeable returns False because the PR's CI
+    checks are still in flight. The reconcile loop must NOT increment the
+    attempt counter — burning a retry on a still-running CI would let a
+    perfectly good fix Workload hit the cap before the checks land. Instead,
+    the tick should record the wait and let the next tick settle."""
+    created, deleted, marks = [], [], []
+    out = reconcile_pr_fixes(
+        list_prfix_workloads=lambda: [_wl(77, "Succeeded", attempt=2)],
+        delete_workload=deleted.append, create_workload=created.append,
+        mark_pr_fix=lambda *a: marks.append(a) or True,
+        pr_is_mergeable=lambda repo, pr: False,
+        pr_ci_state=lambda repo, pr: "pending",
+        max_attempts=3,
+    )
+    assert marks == [], "must not mark FIXED while CI is pending"
+    assert created == [], "must not recreate the Workload while CI is pending"
+    assert deleted == [], "tombstone must be kept so reconcile keeps seeing it"
+    assert out == ["prfix-o-r-77:prfix-ci-pending:2/3:o/r#77"]
+    # spot-check that the attempt counter is preserved verbatim
+    assert ":2/3" in out[0]
+
+
+def test_reconcile_ci_fail_burns_attempt_and_retries():
+    """Failing CI must consume a retry attempt like a real mergeable conflict —
+    only *pending* checks are exempt. pr_ci_state='fail' falls through to
+    the existing not-mergeable-retry path."""
+    created, deleted, marks = [], [], []
+    out = reconcile_pr_fixes(
+        list_prfix_workloads=lambda: [_wl(78, "Succeeded", attempt=1)],
+        delete_workload=deleted.append, create_workload=created.append,
+        mark_pr_fix=lambda *a: marks.append(a) or True,
+        pr_is_mergeable=lambda repo, pr: False,
+        pr_ci_state=lambda repo, pr: "fail",
+        max_attempts=3,
+    )
+    assert marks == [], "must not mark FIXED while CI is failing"
+    assert deleted == ["prfix-o-r-78"]
+    assert created[0]["metadata"]["annotations"]["foreman.llmkube.dev/attempt"] == "2"
+    assert out == ["prfix-o-r-78:not-mergeable-retry:2/3"]
+
+
+def test_reconcile_ci_unknown_does_not_burn_attempt():
+    """A transient GitHub API outage ('unknown') must be treated like a
+    pending check — wait for the next tick rather than burning an attempt
+    or, worse, marking FIXED off an unverified CI signal."""
+    created, deleted, marks = [], [], []
+    out = reconcile_pr_fixes(
+        list_prfix_workloads=lambda: [_wl(79, "Succeeded", attempt=1)],
+        delete_workload=deleted.append, create_workload=created.append,
+        mark_pr_fix=lambda *a: marks.append(a) or True,
+        pr_is_mergeable=lambda repo, pr: False,
+        pr_ci_state=lambda repo, pr: "unknown",
+        max_attempts=3,
+    )
+    # 'unknown' is not 'pending', so the conservative path through the
+    # not-mergeable-retry branch is exercised — attempt is consumed, but
+    # FIXED is never marked, which is the desired conservative behavior.
+    assert marks == [], "must not mark FIXED while CI status is unknown"
+    assert deleted == ["prfix-o-r-79"]
+    assert created[0]["metadata"]["annotations"]["foreman.llmkube.dev/attempt"] == "2"
+    assert out == ["prfix-o-r-79:not-mergeable-retry:2/3"]
+
+
 def test_reconcile_succeeded_and_mergeable_marks_fixed():
     marks, deleted = [], []
 
