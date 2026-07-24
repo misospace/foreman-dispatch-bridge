@@ -96,6 +96,34 @@ def test_claim_one_advances_past_failed_claim():
     assert posted == [1, 2]  # tried the head (failed), then advanced to the next
 
 
+def test_claim_one_skips_transient_http_error_and_continues(capsys):
+    # Regression for #50: a transient HTTP error (ConnectionError) on the
+    # claim POST must not crash claim_one — it should be logged and the loop
+    # should advance to the next candidate. This keeps the surrounding tick
+    # (and downstream pr-fix/prune passes) alive during partial outages.
+    queue = [
+        {"number": 1, "repoFullName": "a/b", "issueId": "i1", "lane": "local",
+         "labels": ["status/ready"], "claimable": True, "title": "head"},
+        {"number": 2, "repoFullName": "a/b", "issueId": "i2", "lane": "local",
+         "labels": ["status/ready"], "claimable": True, "title": "next"},
+    ]
+    posted = []
+
+    def fake_post(url, headers, payload):
+        posted.append(payload["issueNumber"])
+        if payload["issueNumber"] == 1:
+            raise ConnectionError("dispatch API unreachable")
+        return {"ok": True}
+
+    client = DispatchClient("http://d", "tok",
+                            http_get=lambda u, h: queue, http_post=fake_post)
+    item = client.claim_one("foreman-coder", "local")
+    out = capsys.readouterr().out
+    assert item is not None and item.issue_number == 2
+    assert posted == [1, 2]  # tried head (raised), then advanced to next
+    assert "claim-error" in out and "#1" in out and "ConnectionError" in out
+
+
 def _client_recording_posts(responses=None):
     from bridge.claim import DispatchClient
     posts = []

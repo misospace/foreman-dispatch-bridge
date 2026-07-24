@@ -90,9 +90,19 @@ class DispatchClient:
         """Claim the first queue candidate that can be claimed, skipping any whose
         claim POST fails (e.g. 409 already-claimed). Returns None only when the
         queue has no candidate the agent can claim, so a single stuck head-of-queue
-        item no longer starves the lane."""
+        item no longer starves the lane.
+
+        A transient HTTP error (network timeout, DNS failure, 500) on the claim
+        POST is logged and the loop continues to the next candidate rather than
+        propagating up and crashing the surrounding CronJob tick — see #50."""
         for item in select_candidates(self.queue(agent_name, lane), lane):
-            if self.claim(item, agent_name):
+            try:
+                claimed = self.claim(item, agent_name)
+            except Exception as e:
+                print(f"{lane}:claim-error:#{item.get('number')}:{type(e).__name__}:{e}",
+                      flush=True)
+                continue
+            if claimed:
                 return to_claimed_item(item, lane)
         return None
 
