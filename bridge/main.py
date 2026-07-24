@@ -32,6 +32,26 @@ def _parse_bool_env(raw: str, default: bool = True) -> bool:
     return True
 
 
+def _wait_for_workload_deletion(
+    get_workload: Callable[[], None],
+    name: str,
+    timeout_seconds: int,
+    sleep: Callable[[float], None] = time.sleep,
+) -> None:
+    """Poll until a workload is gone, bounded by the configured timeout."""
+    for _ in range(timeout_seconds):
+        try:
+            get_workload()
+        except Exception as e:
+            if getattr(e, "status", None) == 404:
+                return
+            raise
+        sleep(1)
+    raise TimeoutError(
+        f"workload {name} still terminating after {timeout_seconds}s"
+    )
+
+
 def run_once(
     lanes: list,
     agent_name: str,
@@ -140,6 +160,7 @@ def _real_main() -> None:  # pragma: no cover - thin wiring, exercised in the cl
     # disables a phase.
     prune_completed_after_h = int(os.environ.get("PRUNE_COMPLETED_AFTER_HOURS", "6"))
     prune_failed_after_h = int(os.environ.get("PRUNE_FAILED_AFTER_HOURS", "48"))
+    delete_poll_timeout_s = int(os.environ.get("DELETE_POLL_TIMEOUT_SECONDS", "10"))
 
     def http_get(url, headers):
         r = requests.get(url, headers=headers, timeout=20)
@@ -204,18 +225,14 @@ def _real_main() -> None:  # pragma: no cover - thin wiring, exercised in the cl
             if e.status == 404:  # already gone
                 return
             raise
-        for _ in range(60):  # up to ~60s for cascade to complete
-            try:
-                api.get_namespaced_custom_object(
-                    group="foreman.llmkube.dev", version="v1alpha1",
-                    namespace=namespace, plural="workloads", name=name,
-                )
-            except client.exceptions.ApiException as e:
-                if e.status == 404:
-                    return
-                raise
-            time.sleep(1)
-        raise TimeoutError(f"workload {name} still terminating after 60s")
+        _wait_for_workload_deletion(
+            lambda: api.get_namespaced_custom_object(
+                group="foreman.llmkube.dev", version="v1alpha1",
+                namespace=namespace, plural="workloads", name=name,
+            ),
+            name,
+            delete_poll_timeout_s,
+        )
 
     def list_workload_tasks(workload_name: str) -> list:
         resp = api.list_namespaced_custom_object(

@@ -38,6 +38,7 @@ issue per lane.
 | `BASE_CODER_AGENTS` | *(empty)* | JSON `{language: coderAgentName}` with `"*"` wildcard; routes the base lane's coder by the repo's `GATEPROFILE_MAP` language |
 | `ESCALATION_LANE` | *(empty = off)* | lane exhausted issues re-lane into |
 | `RETRY_MAX_ATTEMPTS` | `3` | attempts before escalate/tombstone |
+| `DELETE_POLL_TIMEOUT_SECONDS` | `10` | maximum time to wait for foreground Workload deletion before continuing the tick with an error |
 | `PR_FIX_ENABLED` | *(off)* | enable the PR-fix drain/reconcile loop |
 | `PR_FIX_MAX_ATTEMPTS` | `3` | pr-fix attempts before BLOCKED/tombstone |
 | `GITHUB_TOKEN` | *(empty)* | used to check a PR's `mergeable_state` before marking a pr-fix FIXED (unauthenticated if unset) |

@@ -1,5 +1,5 @@
 from bridge.models import ClaimedItem
-from bridge.main import run_once, _parse_bool_env
+from bridge.main import run_once, _parse_bool_env, _wait_for_workload_deletion
 
 LANES = ["local", "cloud", "frontier"]
 
@@ -216,6 +216,23 @@ def test_verify_enabled_false_omits_verifier():
              namespace="llm", verify_enabled=False)
     assert "verifierAgentRef" not in created[0]["spec"]
     assert created[0]["spec"]["coderAgentRef"]["name"] == "coder"
+
+
+def test_delete_poll_times_out_within_configured_window():
+    polls = []
+    sleeps = []
+
+    def get_workload():
+        polls.append(True)
+
+    try:
+        _wait_for_workload_deletion(get_workload, "stuck", 3, sleeps.append)
+        assert False, "expected deletion timeout"
+    except TimeoutError as exc:
+        assert str(exc) == "workload stuck still terminating after 3s"
+
+    assert len(polls) == 3
+    assert sleeps == [1, 1, 1]
 
 
 def test_verify_enabled_true_keeps_verifier():
