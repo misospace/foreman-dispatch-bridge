@@ -41,8 +41,8 @@ def test_terminal_since_none_when_no_timestamp():
 def test_completed_pruned_past_ttl_but_kept_within():
     old = _wl("wl-old", "Completed", last_transition=_ago(7))
     fresh = _wl("wl-fresh", "Completed", last_transition=_ago(3))
-    names = prunable_workloads([old, fresh], NOW, 6 * 3600, 48 * 3600)
-    assert names == ["wl-old"]
+    results = prunable_workloads([old, fresh], NOW, 6 * 3600, 48 * 3600)
+    assert results == [("wl-old", "Completed")]
 
 
 def test_failed_uses_its_own_longer_ttl():
@@ -51,7 +51,7 @@ def test_failed_uses_its_own_longer_ttl():
     failed = _wl("wl-failed", "Failed", last_transition=_ago(7))
     assert prunable_workloads([failed], NOW, 6 * 3600, 48 * 3600) == []
     old_failed = _wl("wl-failed-old", "Failed", last_transition=_ago(50))
-    assert prunable_workloads([old_failed], NOW, 6 * 3600, 48 * 3600) == ["wl-failed-old"]
+    assert prunable_workloads([old_failed], NOW, 6 * 3600, 48 * 3600) == [("wl-failed-old", "Failed")]
 
 
 def test_non_terminal_never_pruned():
@@ -106,3 +106,84 @@ def test_prune_workloads_noop_when_both_ttls_disabled():
     out = list(prune_workloads(r.list, r.delete, NOW, 0, 0))
     assert out == []
     assert r.deleted == []
+
+
+# ── reset_issue tests ───────────────────────────────────────────────────────
+
+class _RecorderWithReset(_Recorder):
+    def __init__(self, workloads, fail_on=()):
+        super().__init__(workloads, fail_on=fail_on)
+        self.reset_issues = []
+
+    def reset(self, issue_number):
+        self.reset_issues.append(issue_number)
+
+
+def test_prune_resets_issue_for_failed_workload():
+    """A pruned Failed Workload resets its claimed issue to ready."""
+    r = _RecorderWithReset([
+        _wl("issue-42", "Failed", last_transition=_ago(50)),
+    ])
+    out = list(prune_workloads(
+        r.list, r.delete, NOW, 6 * 3600, 48 * 3600,
+        reset_issue=r.reset,
+    ))
+    assert r.deleted == ["issue-42"]
+    assert r.reset_issues == [42]
+    assert "prune:deleted:issue-42" in out
+    assert "prune:reset-issue:42" in out
+
+
+def test_prune_does_not_reset_completed_workload_issue():
+    """A pruned Completed Workload does NOT reset its issue (PR already opened)."""
+    r = _RecorderWithReset([
+        _wl("issue-99", "Completed", last_transition=_ago(7)),
+    ])
+    out = list(prune_workloads(
+        r.list, r.delete, NOW, 6 * 3600, 48 * 3600,
+        reset_issue=r.reset,
+    ))
+    assert r.deleted == ["issue-99"]
+    assert r.reset_issues == []
+    assert "prune:reset-issue" not in " ".join(out)
+
+
+def test_prune_reset_issue_failure_is_logged_not_raised():
+    """A failed reset_issue call is logged but doesn't crash the tick."""
+    r = _RecorderWithReset([
+        _wl("issue-42", "Failed", last_transition=_ago(50)),
+    ])
+
+    def fail_reset(*a, **kw):
+        raise RuntimeError("API down")
+
+    out = list(prune_workloads(
+        r.list, r.delete, NOW, 6 * 3600, 48 * 3600,
+        reset_issue=fail_reset,
+    ))
+    assert r.deleted == ["issue-42"]
+    assert "prune:deleted:issue-42" in out
+    assert any("prune:reset-issue-failed" in line for line in out)
+
+
+def test_prune_no_reset_when_callback_not_provided():
+    """Without reset_issue, prune behaves as before (no reset)."""
+    r = _Recorder([
+        _wl("issue-42", "Failed", last_transition=_ago(50)),
+    ])
+    out = list(prune_workloads(r.list, r.delete, NOW, 6 * 3600, 48 * 3600))
+    assert r.deleted == ["issue-42"]
+    assert "prune:reset-issue" not in " ".join(out)
+
+
+def test_prune_skips_non_issue_workload_names():
+    """Workloads without issue-N naming are not reset."""
+    r = _RecorderWithReset([
+        _wl("prfix-123", "Failed", last_transition=_ago(50)),
+    ])
+    out = list(prune_workloads(
+        r.list, r.delete, NOW, 6 * 3600, 48 * 3600,
+        reset_issue=r.reset,
+    ))
+    assert r.deleted == ["prfix-123"]
+    assert r.reset_issues == []
