@@ -357,9 +357,9 @@ def _real_main() -> None:  # pragma: no cover - thin wiring, exercised in the cl
         out.extend(resp.get("items", []))
         return out
 
-    def _reset_issue(issue_number: int) -> bool:
+    def _reset_issue(issue_number: int) -> None:
         """Reset a claimed issue to ready so it can be re-claimed."""
-        return dispatch.update_status(issue_number, "status/ready")
+        dispatch.update_status(issue_number, "status/ready")
 
     for line in prune_workloads(
         list_terminal_candidates, delete_workload,

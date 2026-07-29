@@ -10,7 +10,7 @@ FAILED_PHASE = "Failed"
 
 ListWorkloads = Callable[[], list]      # () -> list of Workload manifests (dicts)
 DeleteWorkload = Callable[[str], None]  # (name) -> None
-ResetIssue = Callable[[int], bool]      # (issue_number) -> success
+ResetIssue = Callable[[int], None]      # (issue_number) -> None (return ignored)
 
 
 def _parse_ts(ts: Optional[str]) -> Optional[datetime]:
