@@ -240,7 +240,7 @@ def escalate_prfix_manifest(wl: dict, next_lane: str, next_coder: str) -> dict:
 
 
 def reconcile_pr_fixes(list_prfix_workloads, delete_workload, create_workload,
-                       mark_pr_fix, pr_is_mergeable=lambda repo, pr: True, max_attempts=3,
+                       mark_pr_fix, pr_is_mergeable=lambda repo, pr: "ok", max_attempts=3,
                        lane_agents=None) -> list:
     """Settle prior fix Workloads: Succeeded -> verify the PR is actually
     mergeable (pr_is_mergeable) before marking FIXED, delete only if the mark
@@ -263,23 +263,28 @@ def reconcile_pr_fixes(list_prfix_workloads, delete_workload, create_workload,
         ann = meta.get("annotations") or {}
         try:
             attempt = int(ann.get(ATTEMPT_ANNOTATION, "1") or "1")
-            still_conflicting = (
-                phase in ("Succeeded", "Completed")
-                and repo and pr is not None
-                and not pr_is_mergeable(repo, pr)
-            )
+            merge_status = "ok"
+            if phase in ("Succeeded", "Completed") and repo and pr is not None:
+                merge_status = pr_is_mergeable(repo, pr)
+
             ok = False
-            if phase in ("Succeeded", "Completed") and not still_conflicting:
+            if phase in ("Succeeded", "Completed") and merge_status == "ok":
                 if repo and pr is not None:
                     ok = mark_pr_fix(repo, pr, "FIXED", f"foreman fix Workload {name} succeeded")
             if ok:
                 delete_workload(name)
                 results.append(f"{name}:fixed")
+            # checks_pending -> don't burn a retry attempt; leave the workload
+            # for the next reconcile tick to pick up (unless at the cap)
+            elif merge_status == "checks_pending" and attempt < max_attempts:
+                results.append(f"{name}:checks-pending:{attempt}/{max_attempts}")
             # Mark failed, still conflicting, or Failed phase -> retry or BLOCKED
             elif attempt < max_attempts:
                 delete_workload(name)
                 create_workload(rebuild_prfix_manifest(wl, attempt + 1))
-                tag = "not-mergeable-retry" if still_conflicting else "retry"
+                tag = "not-mergeable-retry" if merge_status in (
+                    "dirty", "conflicting", "checks_failed"
+                ) else "retry"
                 results.append(f"{name}:{tag}:{attempt + 1}/{max_attempts}")
             else:
                 # Tier exhausted at the attempt cap. Before giving up, escalate to
@@ -299,12 +304,14 @@ def reconcile_pr_fixes(list_prfix_workloads, delete_workload, create_workload,
                         note = (
                             f"foreman fix Workload {name} succeeded but PR is still not "
                             f"mergeable after {attempt}/{max_attempts} attempts"
-                            if still_conflicting else
+                            if merge_status in ("dirty", "conflicting", "checks_failed") else
                             f"foreman fix exhausted {attempt}/{max_attempts} attempts on "
                             f"{current_lane or 'NORMAL'} (all coder tiers exhausted) ({name})"
                         )
                         mark_pr_fix(repo, pr, "BLOCKED", note)
-                    tag = "not-mergeable-giveup" if still_conflicting else "giveup"
+                    tag = "not-mergeable-giveup" if merge_status in (
+                        "dirty", "conflicting", "checks_failed"
+                    ) else "giveup"
                     results.append(f"{name}:{tag}:{attempt}/{max_attempts}")
         except Exception as e:
             results.append(f"{name}:error:{e}")
