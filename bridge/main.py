@@ -2,6 +2,7 @@ import json
 import os
 import time
 from typing import Callable, Optional
+import requests
 from bridge.models import ClaimedItem
 from bridge.workload import (
     build_workload,
@@ -143,12 +144,14 @@ def _real_main() -> None:  # pragma: no cover - thin wiring, exercised in the cl
     prune_failed_after_h = int(os.environ.get("PRUNE_FAILED_AFTER_HOURS", "48"))
 
     def http_get(url, headers):
-        r = requests.get(url, headers=headers, timeout=20)
+        from bridge.http_retry import http_get as _http_get
+        r = _http_get(url, headers=headers)
         r.raise_for_status()
         return r.json()
 
     def http_post(url, headers, payload):
-        r = requests.post(url, headers=headers, json=payload, timeout=30)
+        from bridge.http_retry import http_post as _http_post
+        r = _http_post(url, headers=headers, json=payload)
         if r.status_code == 409:  # already claimed by another agent
             return None
         r.raise_for_status()
