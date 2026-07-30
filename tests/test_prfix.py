@@ -314,7 +314,7 @@ def test_reconcile_succeeded_but_pr_conflicting_retries_instead_of_fixed():
         list_prfix_workloads=lambda: [_wl(198, "Succeeded", attempt=1)],
         delete_workload=deleted.append, create_workload=created.append,
         mark_pr_fix=lambda *a: (_ for _ in ()).throw(AssertionError("must not mark FIXED")),
-        pr_is_mergeable=lambda repo, pr: False,
+        pr_is_mergeable=lambda repo, pr: "conflicting",
         max_attempts=3,
     )
     assert deleted == ["prfix-o-r-198"]
@@ -334,7 +334,7 @@ def test_reconcile_succeeded_and_mergeable_marks_fixed():
         delete_workload=deleted.append,
         create_workload=lambda m: (_ for _ in ()).throw(AssertionError("no recreate")),
         mark_pr_fix=_mark,
-        pr_is_mergeable=lambda repo, pr: True,
+        pr_is_mergeable=lambda repo, pr: "ok",
     )
     assert marks == [("o/r", 5, "FIXED")]
     assert deleted == ["prfix-o-r-5"]
@@ -347,7 +347,7 @@ def test_reconcile_succeeded_still_conflicting_at_max_marks_blocked_not_fixed():
         list_prfix_workloads=lambda: [_wl(198, "Succeeded", attempt=3)],
         delete_workload=deleted.append, create_workload=created.append,
         mark_pr_fix=lambda repo, pr, status, note: marks.append((repo, pr, status, note)),
-        pr_is_mergeable=lambda repo, pr: False,
+        pr_is_mergeable=lambda repo, pr: "conflicting",
         max_attempts=3,
     )
     assert marks[0][:3] == ("o/r", 198, "BLOCKED")     # not silently dropped, and not FIXED
@@ -422,3 +422,96 @@ def test_reconcile_ignores_nonterminal_and_isolates_errors():
     )
     assert not any("prfix-o-r-5" in line for line in out)     # Running: untouched
     assert any("prfix-o-r-6:error:" in line for line in out)  # delete raised, isolated
+
+
+def test_reconcile_checks_pending_does_not_burn_retry():
+    """When CI checks are still pending, the workload is left alone and no
+    retry attempt is consumed — the next reconcile tick will pick it up."""
+    marks, deleted, created = [], [], []
+
+    def _mark(repo, pr, status, note):
+        marks.append((repo, pr, status))
+        return True
+
+    out = reconcile_pr_fixes(
+        list_prfix_workloads=lambda: [_wl(5, "Succeeded", attempt=1)],
+        delete_workload=deleted.append,
+        create_workload=created.append,
+        mark_pr_fix=_mark,
+        pr_is_mergeable=lambda repo, pr: "checks_pending",
+        max_attempts=3,
+    )
+    # Workload is NOT deleted or recreated — checks_pending is non-terminal
+    assert deleted == []
+    assert created == []
+    # mark FIXED was NOT attempted
+    assert marks == []
+    assert out == ["prfix-o-r-5:checks-pending:1/3"]
+
+
+def test_reconcile_checks_failed_retries_under_cap():
+    """When CI checks have failed, the workload is retried (delete + recreate)
+    under the attempt cap."""
+    marks, deleted, created = [], [], []
+
+    def _mark(repo, pr, status, note):
+        marks.append((repo, pr, status))
+        return True
+
+    out = reconcile_pr_fixes(
+        list_prfix_workloads=lambda: [_wl(5, "Succeeded", attempt=1)],
+        delete_workload=deleted.append,
+        create_workload=created.append,
+        mark_pr_fix=_mark,
+        pr_is_mergeable=lambda repo, pr: "checks_failed",
+        max_attempts=3,
+    )
+    assert deleted == ["prfix-o-r-5"]
+    assert created[0]["metadata"]["annotations"]["foreman.llmkube.dev/attempt"] == "2"
+    assert marks == []
+    assert out == ["prfix-o-r-5:not-mergeable-retry:2/3"]
+
+
+def test_reconcile_dirty_status_retries():
+    """When mergeable_state is dirty (new commits pushed), the workload is
+    retried under the attempt cap."""
+    marks, deleted, created = [], [], []
+
+    def _mark(repo, pr, status, note):
+        marks.append((repo, pr, status))
+        return True
+
+    out = reconcile_pr_fixes(
+        list_prfix_workloads=lambda: [_wl(5, "Succeeded", attempt=1)],
+        delete_workload=deleted.append,
+        create_workload=created.append,
+        mark_pr_fix=_mark,
+        pr_is_mergeable=lambda repo, pr: "dirty",
+        max_attempts=3,
+    )
+    assert deleted == ["prfix-o-r-5"]
+    assert created[0]["metadata"]["annotations"]["foreman.llmkube.dev/attempt"] == "2"
+    assert marks == []
+    assert out == ["prfix-o-r-5:not-mergeable-retry:2/3"]
+
+
+def test_reconcile_checks_pending_at_cap_blocks():
+    """Even at the attempt cap, checks_pending should not burn a retry —
+    but since we're at the cap, it falls through to BLOCKED."""
+    marks, deleted = [], []
+
+    def _mark(repo, pr, status, note):
+        marks.append((repo, pr, status))
+        return True
+
+    out = reconcile_pr_fixes(
+        list_prfix_workloads=lambda: [_wl(5, "Succeeded", attempt=3)],
+        delete_workload=deleted.append,
+        create_workload=lambda m: (_ for _ in ()).throw(AssertionError("no recreate")),
+        mark_pr_fix=_mark,
+        pr_is_mergeable=lambda repo, pr: "checks_pending",
+        max_attempts=3,
+    )
+    # At the cap with checks_pending -> BLOCKED (not FIXED)
+    assert marks[0][:3] == ("o/r", 5, "BLOCKED")
+    assert deleted == []

@@ -306,17 +306,76 @@ def _real_main() -> None:  # pragma: no cover - thin wiring, exercised in the cl
         # is treated as *not* mergeable (conservative): reconcile_pr_fixes
         # just retries under its attempt cap rather than falsely marking
         # FIXED off an unverified success, which is the bug this closes.
-        def pr_is_mergeable(repo, pr) -> bool:
+        def pr_is_mergeable(repo, pr) -> str:
+            """Return a mergeability status string.
+
+            Returns one of:
+                "ok"             – PR is mergeable
+                "dirty"          – new commits pushed
+                "conflicting"    – merge conflicts
+                "checks_failed"  – required checks failed / timed out / cancelled
+                "checks_pending" – checks still queued or in progress
+            """
             headers = {"Accept": "application/vnd.github+json"}
             if github_token:
                 headers["Authorization"] = f"Bearer {github_token}"
+
+            # Fetch PR data for mergeable_state and head SHA
             try:
                 data = http_get(f"https://api.github.com/repos/{repo}/pulls/{pr}", headers)
-            except Exception as e:  # best-effort; retried next tick under the attempt cap
+            except Exception as e:
                 print(f"prfix-mergeable-check-failed:{repo}#{pr}:{e}")
-                return False
+                return "checks_pending"
+
             state = str((data or {}).get("mergeable_state") or "").lower()
-            return state not in ("dirty", "conflicting")
+
+            # Existing guards for dirty/conflicting
+            if state == "dirty":
+                return "dirty"
+            if state == "conflicting":
+                return "conflicting"
+
+            # Treat unstable (required checks failed) as checks_failed
+            if state == "unstable":
+                return "checks_failed"
+            # blocked means required statuses are pending or other blockers
+            if state == "blocked":
+                return "checks_pending"
+
+            # Additionally verify check-runs on the head commit
+            try:
+                head_sha = (data or {}).get("head", {}).get("sha")
+                if head_sha:
+                    check_runs_url = (
+                        f"https://api.github.com/repos/{repo}/commits/"
+                        f"{head_sha}/check-runs"
+                    )
+                    cr_data = http_get(check_runs_url, headers)
+                    check_runs = (cr_data or {}).get("check_runs", [])
+
+                    has_failed = False
+                    has_pending = False
+
+                    for cr in check_runs:
+                        conclusion = str(cr.get("conclusion") or "").lower()
+                        status = str(cr.get("status") or "").lower()
+
+                        if conclusion in ("failed", "timed_out", "cancelled"):
+                            has_failed = True
+                        elif status in ("queued", "in_progress"):
+                            has_pending = True
+
+                    if has_failed:
+                        return "checks_failed"
+                    if has_pending:
+                        return "checks_pending"
+            except Exception as exc:
+                print(
+                    f"prfix-check-runs-error:{repo}#{pr}:{exc}"
+                )
+                # If we can't reach the API, fall through to "ok" (optimistic)
+
+            return "ok"
 
         for line in reconcile_pr_fixes(
             list_prfix_workloads, delete_workload, create_workload,
