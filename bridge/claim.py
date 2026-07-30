@@ -160,3 +160,20 @@ class DispatchClient:
         """Transition a PR-fix item's status (QUEUED/FIXED/BLOCKED/...)."""
         payload = {"repo": repo, "pr": pr, "status": status, "note": note}
         return self._post(f"{self._base}/api/pr-fix-queue/mark", self._headers(), payload) is not None
+
+    def list_claimed(self, agent_name: str) -> list:
+        """List all issues currently claimed by *agent_name* (across all lanes)."""
+        url = f"{self._base}/api/issues/claimed?agentName={agent_name}"
+        data = self._get(url, self._headers())
+        return data if isinstance(data, list) else []
+
+    def update_status(self, issue_number: int, status: str) -> bool:
+        """Update the status label of an issue (e.g. ``status/ready``)."""
+        payload = {"issueNumber": issue_number, "status": status}
+        return self._post(f"{self._base}/api/issues/status", self._headers(), payload) is not None
+
+    def has_open_pr(self, issue_number: int) -> bool:
+        """Return True if *issue_number* has an open PR associated with it."""
+        url = f"{self._base}/api/issues/{issue_number}/has-open-pr"
+        data = self._get(url, self._headers())
+        return bool(data)

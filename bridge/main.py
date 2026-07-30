@@ -18,6 +18,7 @@ from bridge.prfix import (
     DEFAULT_PRFIX_LANE_AGENTS, ACTIONABLE_LANES, PRFIX_CREATED_BY,
 )
 from bridge.prune import prune_workloads
+from bridge.reconcile import reconcile_stranded_issues
 
 ClaimOne = Callable[[str, str], Optional[ClaimedItem]]  # (agent_name, lane) -> item | None
 
@@ -327,6 +328,21 @@ def _real_main() -> None:  # pragma: no cover - thin wiring, exercised in the cl
         ):
             print(line)
 
+    # Reconcile stranded in-progress issues whose Workload no longer exists
+    # (e.g. after terminal-workload GC or manual deletion). Runs before prune
+    # so that any issues reset to ready can be re-claimed on the next tick.
+    def _check_open_pr(issue_number: int) -> bool:
+        """Return True if *issue_number* has an open PR."""
+        return dispatch.has_open_pr(issue_number)
+
+    bridge_wl_names = {
+        (wl.get("metadata") or {}).get("name") for wl in list_bridge_workloads()
+    }
+    for line in reconcile_stranded_issues(
+        dispatch, agent_name, bridge_wl_names, _check_open_pr,
+    ):
+        print(line)
+
     # Garbage-collect terminal Workloads last, after reconcile has already
     # retried anything retryable this tick — so a still-terminal Workload past
     # its TTL is genuinely done. Covers both issue (created-by=dispatch-bridge)
@@ -341,10 +357,15 @@ def _real_main() -> None:  # pragma: no cover - thin wiring, exercised in the cl
         out.extend(resp.get("items", []))
         return out
 
+    def _reset_issue(issue_number: int) -> None:
+        """Reset a claimed issue to ready so it can be re-claimed."""
+        dispatch.update_status(issue_number, "status/ready")
+
     for line in prune_workloads(
         list_terminal_candidates, delete_workload,
         completed_ttl_seconds=prune_completed_after_h * 3600,
         failed_ttl_seconds=prune_failed_after_h * 3600,
+        reset_issue=_reset_issue,
     ):
         print(line)
 
