@@ -1,5 +1,6 @@
 from bridge.models import ClaimedItem
 from bridge.main import run_once, _parse_bool_env
+from bridge.workload import _parse_json_map
 
 LANES = ["local", "cloud", "frontier"]
 
@@ -224,3 +225,15 @@ def test_verify_enabled_true_keeps_verifier():
     run_once(LANES, "foreman/coder", _claim_stub({"local": item}), created.append,
              namespace="llm")
     assert created[0]["spec"]["verifierAgentRef"]["name"] == "gate"
+
+
+def test_parse_json_map_invalid_pr_fix_lane_agents_raises_value_error():
+    """Invalid JSON in PR_FIX_LANE_AGENTS must raise ValueError with context."""
+    bad = "{'lane': 'local'}"  # single quotes are not valid JSON
+    try:
+        _parse_json_map(bad, "PR_FIX_LANE_AGENTS")
+        assert False, "expected ValueError"
+    except ValueError as exc:
+        msg = str(exc)
+        assert "PR_FIX_LANE_AGENTS" in msg
+        assert bad[:80] in msg

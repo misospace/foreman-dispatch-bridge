@@ -5,6 +5,7 @@ from typing import Callable, Optional
 import requests
 from bridge.models import ClaimedItem
 from bridge.workload import (
+    _parse_json_map,
     build_workload,
     coder_agent_for,
     revision_coder_agent_for,
@@ -134,7 +135,11 @@ def _real_main() -> None:  # pragma: no cover - thin wiring, exercised in the cl
     pr_fix_max_attempts = int(os.environ.get("PR_FIX_MAX_ATTEMPTS", "3"))
     github_token = os.environ.get("GITHUB_TOKEN", "")
     _raw_lane_agents = os.environ.get("PR_FIX_LANE_AGENTS", "").strip()
-    pr_fix_lane_agents = json.loads(_raw_lane_agents) if _raw_lane_agents else dict(DEFAULT_PRFIX_LANE_AGENTS)
+    pr_fix_lane_agents = (
+        _parse_json_map(_raw_lane_agents, "PR_FIX_LANE_AGENTS")
+        if _raw_lane_agents
+        else dict(DEFAULT_PRFIX_LANE_AGENTS)
+    )
     # Terminal-Workload GC: a Completed Workload has already opened its PR (which
     # lives on GitHub), and a Failed one still Failed at prune time has been left
     # by reconcile (retries exhausted). Delete each once past its per-phase TTL so
