@@ -1,5 +1,6 @@
 from bridge.models import ClaimedItem
 from bridge.workload import (
+    _parse_json_map,
     workload_name,
     build_workload,
     parse_gate_profiles,
@@ -250,3 +251,25 @@ def test_build_workload_gateless_preserves_gate_profile():
     wl = build_workload(ITEM, namespace="llm", gate_profile=profile, verify_enabled=False)
     assert wl["spec"]["gateProfile"] == profile
     assert "verifierAgentRef" not in wl["spec"]
+
+
+def test_parse_json_map_empty_and_none():
+    assert _parse_json_map(None) == {}
+    assert _parse_json_map("") == {}
+    assert _parse_json_map("  ") == {}
+
+
+def test_parse_json_map_valid():
+    assert _parse_json_map('{"a": 1}') == {"a": 1}
+
+
+def test_parse_json_map_invalid_json_raises_value_error_with_context():
+    """Invalid JSON must raise ValueError with the config name and raw prefix."""
+    bad = "{'language': 'python'}"  # single quotes are not valid JSON
+    try:
+        _parse_json_map(bad, "GATEPROFILE_MAP")
+        assert False, "expected ValueError"
+    except ValueError as exc:
+        msg = str(exc)
+        assert "GATEPROFILE_MAP" in msg
+        assert bad[:80] in msg

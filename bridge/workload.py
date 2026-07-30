@@ -23,14 +23,23 @@ ISSUE_ID_ANNOTATION = "foreman.llmkube.dev/issue-id"
 AGENT_NAME_ANNOTATION = "foreman.llmkube.dev/agent-name"
 
 
-def _parse_json_map(raw: Optional[str]) -> dict:
+def _parse_json_map(raw: Optional[str], name: str = "config") -> dict:
     """Shared parser for the JSON-object env vars (gate profiles, lane/language
     coder-agent maps): empty/absent -> {}, else json.loads. Values pass through
-    verbatim so the full CRD shape is expressible from config."""
+    verbatim so the full CRD shape is expressible from config.
+
+    On invalid JSON, raises ValueError with context about which config source
+    failed and a prefix of the offending value.
+    """
     raw = (raw or "").strip()
     if not raw:
         return {}
-    return json.loads(raw)
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ValueError(
+            f"Invalid JSON in {name}: {exc} — got: {raw[:80]!r}"
+        ) from exc
 
 
 def parse_gate_profiles(raw: Optional[str]) -> dict:
@@ -53,7 +62,7 @@ def parse_gate_profiles(raw: Optional[str]) -> dict:
     ships no eslint/prettier/test deps -- set commands (install-in-command) or
     a pre-baked image for repos with real toolchains.
     """
-    return _parse_json_map(raw)
+    return _parse_json_map(raw, "GATEPROFILE_MAP")
 
 
 def gate_profile_for(repo: str, gate_profiles: dict) -> Optional[dict]:
@@ -72,7 +81,7 @@ def parse_lane_coder_agents(raw: Optional[str]) -> dict:
 
         {"*": "coder", "frontier": "coder-frontier"}
     """
-    return _parse_json_map(raw)
+    return _parse_json_map(raw, "LANE_CODER_AGENTS")
 
 
 def parse_base_coder_agents(raw: Optional[str]) -> dict:
@@ -84,7 +93,7 @@ def parse_base_coder_agents(raw: Optional[str]) -> dict:
 
         {"python": "coder-python", "node": "coder-node", "go": "coder-go", "*": "coder"}
     """
-    return parse_lane_coder_agents(raw)
+    return _parse_json_map(raw, "BASE_CODER_AGENTS")
 
 
 def coder_agent_for(
