@@ -7,6 +7,7 @@ from kubernetes import client
 from bridge.models import ClaimedItem
 from bridge.workload import (
     _parse_json_map,
+    ISSUE_ID_ANNOTATION,
     build_workload,
     coder_agent_for,
     revision_coder_agent_for,
@@ -442,15 +443,11 @@ def _real_main() -> None:  # pragma: no cover - thin wiring, exercised in the cl
     # Reconcile stranded in-progress issues whose Workload no longer exists
     # (e.g. after terminal-workload GC or manual deletion). Runs before prune
     # so that any issues reset to ready can be re-claimed on the next tick.
-    def _check_open_pr(issue_number: int) -> bool:
-        """Return True if *issue_number* has an open PR."""
-        return dispatch.has_open_pr(issue_number)
-
     bridge_wl_names = {
         (wl.get("metadata") or {}).get("name") for wl in list_bridge_workloads()
     }
     for line in reconcile_stranded_issues(
-        dispatch, agent_name, bridge_wl_names, _check_open_pr,
+        dispatch, agent_name, bridge_wl_names,
     ):
         print(line)
 
@@ -468,9 +465,20 @@ def _real_main() -> None:  # pragma: no cover - thin wiring, exercised in the cl
         out.extend(resp.get("items", []))
         return out
 
-    def _reset_issue(issue_number: int) -> None:
-        """Reset a claimed issue to ready so it can be re-claimed."""
-        dispatch.update_status(issue_number, "status/ready")
+    def _reset_issue(wl: dict) -> None:
+        """Reset a claimed issue to ready so it can be re-claimed.
+
+        Extracts full identity from the Workload manifest annotations + spec.
+        """
+        spec = wl.get("spec") or {}
+        ann = (wl.get("metadata") or {}).get("annotations") or {}
+        issues = spec.get("issues") or [0]
+        item = {
+            "issueId": ann.get(ISSUE_ID_ANNOTATION, ""),
+            "repoFullName": spec.get("repo", ""),
+            "number": int(issues[0]),
+        }
+        dispatch.update_status(item, "ready", agent_name)
 
     for line in prune_workloads(
         list_terminal_candidates, delete_workload,

@@ -10,7 +10,7 @@ FAILED_PHASE = "Failed"
 
 ListWorkloads = Callable[[], list]      # () -> list of Workload manifests (dicts)
 DeleteWorkload = Callable[[str], None]  # (name) -> None
-ResetIssue = Callable[[int], None]      # (issue_number) -> None (return ignored)
+ResetIssue = Callable[[dict], None]     # (workload_manifest) -> None (return ignored)
 
 
 def _parse_ts(ts: Optional[str]) -> Optional[datetime]:
@@ -65,14 +65,23 @@ def prunable_workloads(
     return results
 
 
-def _extract_issue_number(workload_name: str) -> Optional[int]:
-    """Extract the issue number from a Workload name like ``issue-42``."""
-    if workload_name.startswith("issue-"):
-        try:
-            return int(workload_name[len("issue-"):])
-        except ValueError:
-            return None
-    return None
+ISSUE_CREATED_BY = "dispatch-bridge"
+
+
+def _is_issue_workload(wl: dict) -> bool:
+    """Return True if this is an issue Workload (created-by=dispatch-bridge).
+
+    PR-fix Workloads (created-by=dispatch-bridge-prfix) must not have their
+    issues callback invoked even if their spec someday carries repo/issues.
+    """
+    labels = (wl.get("metadata") or {}).get("labels") or {}
+    return labels.get("created-by") == ISSUE_CREATED_BY
+
+
+def _has_identity(wl: dict) -> bool:
+    """Return True if the workload manifest carries enough identity to reset."""
+    spec = wl.get("spec") or {}
+    return bool(spec.get("repo")) and bool(spec.get("issues"))
 
 
 def prune_workloads(
@@ -89,15 +98,18 @@ def prune_workloads(
     genuinely done. Each delete is best-effort: a failure is logged and the
     next tick retries it.
 
-    When *reset_issue* is provided and a Failed Workload is pruned, the claimed
-    issue is reset to ``status/ready`` so it can be re-claimed on the next tick.
+    When *reset_issue* is provided and a Failed Workload is pruned, the full
+    workload manifest is passed to the callback so it can extract identity
+    (issueId, repo, issueNumber, agentName) from annotations and spec.
     Completed Workloads are NOT reset (their PR already exists).
     """
     if completed_ttl_seconds <= 0 and failed_ttl_seconds <= 0:
         return
     now = now or datetime.now(timezone.utc)
+    workloads = list_workloads()
+    wl_by_name = {(wl.get("metadata") or {}).get("name"): wl for wl in workloads}
     for name, phase in prunable_workloads(
-        list_workloads(), now, completed_ttl_seconds, failed_ttl_seconds
+        workloads, now, completed_ttl_seconds, failed_ttl_seconds
     ):
         try:
             delete_workload(name)
@@ -105,13 +117,16 @@ def prune_workloads(
         except Exception as e:  # best-effort GC; never break the tick on a delete
             yield f"prune:delete-failed:{name}:{e}"
 
-        # Reset the claimed issue to ready so it can be re-claimed.
-        # Only for Failed workloads — Completed ones already have their PR open.
         if reset_issue is not None and phase == FAILED_PHASE:
-            issue_number = _extract_issue_number(name)
-            if issue_number is not None:
-                try:
-                    reset_issue(issue_number)
-                    yield f"prune:reset-issue:{issue_number}"
-                except Exception as e:  # best-effort; next tick reconcile catches it
-                    yield f"prune:reset-issue-failed:{issue_number}:{e}"
+            wl = wl_by_name.get(name) or {}
+            if not _is_issue_workload(wl):
+                yield f"prune:reset-issue-skipped:{name}"
+                continue
+            if not _has_identity(wl):
+                yield f"prune:reset-issue-skipped:{name}"
+                continue
+            try:
+                reset_issue(wl)
+                yield f"prune:reset-issue:{name}"
+            except Exception as e:  # best-effort; next tick reconcile catches it
+                yield f"prune:reset-issue-failed:{name}:{e}"

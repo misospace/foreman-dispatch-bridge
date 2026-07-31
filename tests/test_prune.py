@@ -1,5 +1,7 @@
 from datetime import datetime, timedelta, timezone
 
+import pytest
+
 from bridge.prune import prunable_workloads, prune_workloads, terminal_since
 
 NOW = datetime(2026, 7, 8, 20, 0, 0, tzinfo=timezone.utc)
@@ -108,82 +110,113 @@ def test_prune_workloads_noop_when_both_ttls_disabled():
     assert r.deleted == []
 
 
-# ── reset_issue tests ───────────────────────────────────────────────────────
+# ── reset_issue tests (callback receives workload manifest) ─────────────────
+
+
+def _wl_with_identity(name, phase, *, repo="a/b", issues=None, issue_id="iss_1",
+                       agent_name="foreman-coder", last_transition=None, created=None,
+                       created_by="dispatch-bridge"):
+    """Workload manifest with spec identity fields for prune reset."""
+    base = _wl(name, phase, last_transition=last_transition, created=created)
+    base["spec"] = {"repo": repo, "issues": issues or [42]}
+    labels = base["metadata"].setdefault("labels", {})
+    labels["created-by"] = created_by
+    ann = base["metadata"].setdefault("annotations", {})
+    ann["foreman.llmkube.dev/issue-id"] = issue_id
+    ann["foreman.llmkube.dev/agent-name"] = agent_name
+    return base
+
 
 class _RecorderWithReset(_Recorder):
     def __init__(self, workloads, fail_on=()):
         super().__init__(workloads, fail_on=fail_on)
-        self.reset_issues = []
+        self.reset_calls = []
 
-    def reset(self, issue_number):
-        self.reset_issues.append(issue_number)
+    def reset(self, wl):
+        self.reset_calls.append(wl)
 
 
-def test_prune_resets_issue_for_failed_workload():
-    """A pruned Failed Workload resets its claimed issue to ready."""
-    r = _RecorderWithReset([
-        _wl("issue-42", "Failed", last_transition=_ago(50)),
-    ])
+def test_prune_resets_failed_workload_passes_manifest():
+    """A pruned Failed Workload passes the full manifest to reset_issue."""
+    wl = _wl_with_identity("wl-a-b-42", "Failed", last_transition=_ago(50),
+                           repo="a/b", issues=[42], issue_id="iss_42")
+    r = _RecorderWithReset([wl])
     out = list(prune_workloads(
         r.list, r.delete, NOW, 6 * 3600, 48 * 3600,
         reset_issue=r.reset,
     ))
-    assert r.deleted == ["issue-42"]
-    assert r.reset_issues == [42]
-    assert "prune:deleted:issue-42" in out
-    assert "prune:reset-issue:42" in out
+    assert r.deleted == ["wl-a-b-42"]
+    assert len(r.reset_calls) == 1
+    passed_wl = r.reset_calls[0]
+    assert passed_wl["spec"]["repo"] == "a/b"
+    assert passed_wl["spec"]["issues"] == [42]
+    assert passed_wl["metadata"]["annotations"]["foreman.llmkube.dev/issue-id"] == "iss_42"
+    assert "prune:deleted:wl-a-b-42" in out
+    assert "prune:reset-issue:wl-a-b-42" in out
 
 
-def test_prune_does_not_reset_completed_workload_issue():
-    """A pruned Completed Workload does NOT reset its issue (PR already opened)."""
-    r = _RecorderWithReset([
-        _wl("issue-99", "Completed", last_transition=_ago(7)),
-    ])
+def test_prune_does_not_reset_completed_workload():
+    """A pruned Completed Workload does NOT call reset_issue (PR already opened)."""
+    wl = _wl_with_identity("wl-a-b-99", "Completed", last_transition=_ago(7))
+    r = _RecorderWithReset([wl])
     out = list(prune_workloads(
         r.list, r.delete, NOW, 6 * 3600, 48 * 3600,
         reset_issue=r.reset,
     ))
-    assert r.deleted == ["issue-99"]
-    assert r.reset_issues == []
+    assert r.deleted == ["wl-a-b-99"]
+    assert r.reset_calls == []
     assert "prune:reset-issue" not in " ".join(out)
 
 
-def test_prune_reset_issue_failure_is_logged_not_raised():
+def test_prune_reset_failure_is_logged_not_raised():
     """A failed reset_issue call is logged but doesn't crash the tick."""
-    r = _RecorderWithReset([
-        _wl("issue-42", "Failed", last_transition=_ago(50)),
-    ])
+    wl = _wl_with_identity("wl-a-b-42", "Failed", last_transition=_ago(50))
 
-    def fail_reset(*a, **kw):
+    def fail_reset(wl):
         raise RuntimeError("API down")
 
     out = list(prune_workloads(
-        r.list, r.delete, NOW, 6 * 3600, 48 * 3600,
+        lambda: [wl], lambda name: None, NOW, 6 * 3600, 48 * 3600,
         reset_issue=fail_reset,
     ))
-    assert r.deleted == ["issue-42"]
-    assert "prune:deleted:issue-42" in out
     assert any("prune:reset-issue-failed" in line for line in out)
 
 
 def test_prune_no_reset_when_callback_not_provided():
     """Without reset_issue, prune behaves as before (no reset)."""
     r = _Recorder([
-        _wl("issue-42", "Failed", last_transition=_ago(50)),
+        _wl_with_identity("wl-a-b-42", "Failed", last_transition=_ago(50)),
     ])
     out = list(prune_workloads(r.list, r.delete, NOW, 6 * 3600, 48 * 3600))
-    assert r.deleted == ["issue-42"]
+    assert r.deleted == ["wl-a-b-42"]
     assert "prune:reset-issue" not in " ".join(out)
 
 
-def test_prune_skips_non_issue_workload_names():
-    """Workloads without issue-N naming are not reset."""
-    r = _RecorderWithReset([
-        _wl("prfix-123", "Failed", last_transition=_ago(50)),
-    ])
+def test_prune_reset_skips_workloads_without_identity():
+    """Workloads missing spec.repo or spec.issues are not reset (can't derive identity)."""
+    wl = _wl("wl-no-identity", "Failed", last_transition=_ago(50))
+    wl["spec"] = {}
+    r = _RecorderWithReset([wl])
     out = list(prune_workloads(
         r.list, r.delete, NOW, 6 * 3600, 48 * 3600,
         reset_issue=r.reset,
     ))
-    assert r.deleted == ["prfix-123"]
-    assert r.reset_issues == []
+    assert r.deleted == ["wl-no-identity"]
+    assert r.reset_calls == []
+    assert any("prune:reset-issue-skipped" in line for line in out)
+
+
+def test_prune_reset_skips_prfix_workload():
+    """PR-fix Workloads are deleted but NOT reset even with repo/issues identity."""
+    wl = _wl_with_identity(
+        "wl-prfix-42", "Failed", last_transition=_ago(50),
+        repo="a/b", issues=[42], created_by="dispatch-bridge-prfix",
+    )
+    r = _RecorderWithReset([wl])
+    out = list(prune_workloads(
+        r.list, r.delete, NOW, 6 * 3600, 48 * 3600,
+        reset_issue=r.reset,
+    ))
+    assert r.deleted == ["wl-prfix-42"]
+    assert r.reset_calls == []
+    assert any("prune:reset-issue-skipped" in line for line in out)
