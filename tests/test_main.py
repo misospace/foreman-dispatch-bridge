@@ -1,3 +1,4 @@
+import pytest
 from bridge.models import ClaimedItem
 from bridge.main import run_once, _parse_bool_env
 from bridge.workload import _parse_json_map
@@ -237,3 +238,52 @@ def test_parse_json_map_invalid_pr_fix_lane_agents_raises_value_error():
         msg = str(exc)
         assert "PR_FIX_LANE_AGENTS" in msg
         assert bad[:80] in msg
+
+
+def test_delete_workload_respects_timeout():
+    """Assert delete_workload exits within the configured timeout window."""
+    from unittest.mock import MagicMock
+    from kubernetes import client
+
+    import bridge.main
+
+    mock_api = MagicMock()
+    call_count = 0
+
+    def fake_get(*args, **kwargs):
+        nonlocal call_count
+        call_count += 1
+        raise client.exceptions.ApiException(status=404)
+
+    mock_api.get_namespaced_custom_object.side_effect = fake_get
+
+    # Use a small timeout so the test runs quickly
+    bridge.main.delete_workload(mock_api, "default", "test-wl", timeout=3)
+
+    # Should have polled at most 3 times (timeout value) before getting 404
+    assert call_count <= 3
+
+
+def test_delete_workload_raises_timeout():
+    """Assert delete_workload raises TimeoutError when poll exhausts the window."""
+    from unittest.mock import MagicMock
+    from kubernetes import client
+
+    import bridge.main
+
+    mock_api = MagicMock()
+    call_count = 0
+
+    def fake_get(*args, **kwargs):
+        nonlocal call_count
+        call_count += 1
+        return {"metadata": {"name": "test-wl"}}
+
+    mock_api.get_namespaced_custom_object.side_effect = fake_get
+
+    timeout = 2
+    with pytest.raises(TimeoutError) as exc_info:
+        bridge.main.delete_workload(mock_api, "default", "test-wl", timeout=timeout)
+
+    assert call_count == timeout
+    assert str(timeout) in str(exc_info.value)
