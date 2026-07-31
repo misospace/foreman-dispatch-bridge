@@ -3,6 +3,7 @@ import os
 import time
 from typing import Callable, Optional
 import requests
+from kubernetes import client
 from bridge.models import ClaimedItem
 from bridge.workload import (
     _parse_json_map,
@@ -22,7 +23,50 @@ from bridge.prfix import (
 from bridge.prune import prune_workloads
 from bridge.reconcile import reconcile_stranded_issues
 
-ClaimOne = Callable[[str, str], Optional[ClaimedItem]]  # (agent_name, lane) -> item | None
+ClaimOne = Callable[[str, str], Optional[ClaimedItem]]  # (agent_name, lane) -\u003e item | None
+
+DELETE_WORKLOAD_TIMEOUT_S = int(os.environ.get("DELETE_WORKLOAD_TIMEOUT_S", "60"))
+
+
+def delete_workload(
+    api: client.CustomObjectsApi,
+    namespace: str,
+    name: str,
+    *,
+    timeout: int = DELETE_WORKLOAD_TIMEOUT_S,
+) -> None:
+    """Delete a Workload CR and poll until it disappears.
+
+    Raises ``TimeoutError`` if the resource is still present after *timeout* seconds.
+    """
+    try:
+        api.delete_namespaced_custom_object(
+            group="foreman.llmkube.dev",
+            version="v1alpha1",
+            namespace=namespace,
+            plural="workloads",
+            name=name,
+            body=client.V1DeleteOptions(propagation_policy="Foreground"),
+        )
+    except client.exceptions.ApiException as exc:
+        if exc.status == 404:  # already gone
+            return
+        raise
+    for _ in range(timeout):
+        try:
+            api.get_namespaced_custom_object(
+                group="foreman.llmkube.dev",
+                version="v1alpha1",
+                namespace=namespace,
+                plural="workloads",
+                name=name,
+            )
+        except client.exceptions.ApiException as exc:
+            if exc.status == 404:
+                return
+            raise
+        time.sleep(1)
+    raise TimeoutError(f"workload {name} still terminating after {timeout}s")
 
 
 def _parse_bool_env(raw: str, default: bool = True) -> bool:
@@ -213,7 +257,7 @@ def _real_main() -> None:  # pragma: no cover - thin wiring, exercised in the cl
             if e.status == 404:  # already gone
                 return
             raise
-        for _ in range(60):  # up to ~60s for cascade to complete
+        for _ in range(DELETE_WORKLOAD_TIMEOUT_S):
             try:
                 api.get_namespaced_custom_object(
                     group="foreman.llmkube.dev", version="v1alpha1",
@@ -224,7 +268,7 @@ def _real_main() -> None:  # pragma: no cover - thin wiring, exercised in the cl
                     return
                 raise
             time.sleep(1)
-        raise TimeoutError(f"workload {name} still terminating after 60s")
+        raise TimeoutError(f"workload {name} still terminating after {DELETE_WORKLOAD_TIMEOUT_S}s")
 
     def list_workload_tasks(workload_name: str) -> list:
         resp = api.list_namespaced_custom_object(
