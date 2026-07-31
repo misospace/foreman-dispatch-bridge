@@ -246,3 +246,90 @@ def test_mark_pr_fix_posts_payload():
 def test_mark_pr_fix_false_when_post_returns_none():
     c = DispatchClient("http://d", "t", lambda *a: [], lambda *a: None)
     assert c.mark_pr_fix("o/r", 5, "FIXED") is False
+
+
+# ── update_status contract ──────────────────────────────────────────────────
+
+
+def test_update_status_posts_full_identity_payload():
+    """update_status must POST {issueId, repoFullName, issueNumber, status, agentName}."""
+    posts = []
+
+    def http_post(url, headers, payload):
+        posts.append((url, payload))
+        return {"ok": True}
+
+    c = DispatchClient("http://d", "tok", lambda u, h: [], http_post)
+    item = {"issueId": "iss_abc", "repoFullName": "a/b", "number": 42}
+    assert c.update_status(item, "ready", "foreman-coder") is True
+    url, payload = posts[0]
+    assert url == "http://d/api/issues/status"
+    assert payload == {
+        "issueId": "iss_abc",
+        "repoFullName": "a/b",
+        "issueNumber": 42,
+        "status": "ready",
+        "agentName": "foreman-coder",
+    }
+
+
+def test_update_status_strips_status_prefix():
+    """A 'status/ready' input is normalized to bare 'ready'."""
+    posts = []
+
+    def http_post(url, headers, payload):
+        posts.append(payload)
+        return {"ok": True}
+
+    c = DispatchClient("http://d", "tok", lambda u, h: [], http_post)
+    item = {"issueId": "iss_1", "repoFullName": "a/b", "number": 7}
+    c.update_status(item, "status/ready", "agent")
+    assert posts[0]["status"] == "ready"
+
+
+def test_update_status_accepts_current_lane_key():
+    """Items from list_claimed use 'currentLane'; update_status must not require it."""
+    posts = []
+
+    def http_post(url, headers, payload):
+        posts.append(payload)
+        return {"ok": True}
+
+    c = DispatchClient("http://d", "tok", lambda u, h: [], http_post)
+    item = {"issueId": "iss_x", "repoFullName": "o/r", "number": 99, "currentLane": "local"}
+    c.update_status(item, "ready", "agent")
+    assert posts[0]["issueNumber"] == 99
+
+
+def test_update_status_false_when_post_returns_none():
+    c = DispatchClient("http://d", "t", lambda u, h: [], lambda u, h, p: None)
+    item = {"issueId": "iss_1", "repoFullName": "a/b", "number": 1}
+    assert c.update_status(item, "ready", "agent") is False
+
+
+def test_has_open_pr_removed():
+    """has_open_pr must not exist on DispatchClient (replaced by hasOpenPr field)."""
+    c = DispatchClient("http://d", "t", lambda u, h: [], lambda u, h, p: {})
+    assert not hasattr(c, "has_open_pr")
+
+
+# ── list_claimed contract ───────────────────────────────────────────────────
+
+
+def test_list_claimed_returns_items_with_has_open_pr():
+    """list_claimed returns raw dicts from the endpoint; items carry hasOpenPr."""
+    claimed_response = [
+        {"issueId": "iss_1", "number": 42, "repoFullName": "a/b",
+         "currentLane": "local", "labels": ["status/in-progress"], "hasOpenPr": False},
+        {"issueId": "iss_2", "number": 99, "repoFullName": "a/b",
+         "currentLane": "cloud", "labels": ["status/in-progress"], "hasOpenPr": True},
+    ]
+
+    def http_get(url, headers):
+        return claimed_response
+
+    c = DispatchClient("http://d", "tok", http_get, lambda u, h, p: {})
+    result = c.list_claimed("foreman-coder")
+    assert len(result) == 2
+    assert result[0]["hasOpenPr"] is False
+    assert result[1]["hasOpenPr"] is True

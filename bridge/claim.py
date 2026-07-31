@@ -167,13 +167,21 @@ class DispatchClient:
         data = self._get(url, self._headers())
         return data if isinstance(data, list) else []
 
-    def update_status(self, issue_number: int, status: str) -> bool:
-        """Update the status label of an issue (e.g. ``status/ready``)."""
-        payload = {"issueNumber": issue_number, "status": status}
-        return self._post(f"{self._base}/api/issues/status", self._headers(), payload) is not None
+    def update_status(self, item: dict, status: str, agent_name: str) -> bool:
+        """Update the status label of an issue with full identity.
 
-    def has_open_pr(self, issue_number: int) -> bool:
-        """Return True if *issue_number* has an open PR associated with it."""
-        url = f"{self._base}/api/issues/{issue_number}/has-open-pr"
-        data = self._get(url, self._headers())
-        return bool(data)
+        *item* is a claimed-item dict (from ``list_claimed``) carrying at least
+        ``issueId``, ``repoFullName``, and ``number``. *status* is the bare
+        label value (e.g. ``"ready"``); a ``status/`` prefix is stripped
+        defensively.
+        """
+        if status.startswith("status/"):
+            status = status[len("status/"):]
+        payload = {
+            "issueId": item.get("issueId") or item.get("id") or "",
+            "repoFullName": item.get("repoFullName"),
+            "issueNumber": int(item.get("number") or item.get("issueNumber") or 0),
+            "status": status,
+            "agentName": agent_name,
+        }
+        return self._post(f"{self._base}/api/issues/status", self._headers(), payload) is not None
