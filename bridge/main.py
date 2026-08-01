@@ -3,7 +3,7 @@ import os
 import time
 from typing import Callable, Optional
 import requests
-from kubernetes import client
+from kubernetes import client, config
 from bridge.models import ClaimedItem
 from bridge.workload import (
     _parse_json_map,
@@ -153,8 +153,6 @@ def run_once(
 
 
 def _real_main() -> None:  # pragma: no cover - thin wiring, exercised in the cluster
-    import requests
-    from kubernetes import client, config
     from bridge.claim import DispatchClient
 
     base_url = os.environ.get("DISPATCH_URL", "http://dispatch.llm:3000")
@@ -209,7 +207,11 @@ def _real_main() -> None:  # pragma: no cover - thin wiring, exercised in the cl
 
     dispatch = DispatchClient(base_url, token, http_get, http_post)
 
-    config.load_incluster_config()
+    try:
+        config.load_incluster_config()
+    except Exception as e:
+        raise SystemExit(f"Failed to load Kubernetes in-cluster config: {e}") from e
+
     api = client.CustomObjectsApi()
 
     def create_workload(manifest: dict) -> None:
