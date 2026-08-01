@@ -92,8 +92,12 @@ class DispatchClient:
         queue has no candidate the agent can claim, so a single stuck head-of-queue
         item no longer starves the lane."""
         for item in select_candidates(self.queue(agent_name, lane), lane):
-            if self.claim(item, agent_name):
-                return to_claimed_item(item, lane)
+            try:
+                if self.claim(item, agent_name):
+                    return to_claimed_item(item, lane)
+            except Exception as e:
+                print(f"[claim] claim failed for {item.get('number')}: {e}")
+                continue
         return None
 
     def set_lane(self, item: ClaimedItem, lane: str, reason: str) -> bool:
