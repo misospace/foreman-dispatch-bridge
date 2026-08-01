@@ -96,6 +96,31 @@ def test_claim_one_advances_past_failed_claim():
     assert posted == [1, 2]  # tried the head (failed), then advanced to the next
 
 
+def test_claim_one_survives_transient_http_error():
+    """A transient HTTP error (e.g. ConnectionError) on the first candidate must
+    be caught, logged, and skipped so claim_one continues to the next candidate
+    instead of crashing the entire tick."""
+    queue = [
+        {"number": 1, "repoFullName": "a/b", "issueId": "i1", "lane": "local",
+         "labels": ["status/ready"], "claimable": True, "title": "head"},
+        {"number": 2, "repoFullName": "a/b", "issueId": "i2", "lane": "local",
+         "labels": ["status/ready"], "claimable": True, "title": "next"},
+    ]
+    call_count = [0]
+
+    def flaky_post(url, headers, payload):
+        call_count[0] += 1
+        if call_count[0] == 1:
+            raise ConnectionError("DNS resolution failed")
+        return {"ok": True}
+
+    client = DispatchClient("http://d", "tok",
+                            http_get=lambda u, h: queue, http_post=flaky_post)
+    item = client.claim_one("foreman-coder", "local")
+    assert item is not None and item.issue_number == 2
+    assert call_count[0] == 2  # first call raised, second succeeded
+
+
 def _client_recording_posts(responses=None):
     from bridge.claim import DispatchClient
     posts = []
