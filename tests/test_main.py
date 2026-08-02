@@ -287,3 +287,29 @@ def test_delete_workload_raises_timeout():
 
     assert call_count == timeout
     assert str(timeout) in str(exc_info.value)
+
+
+class TestDispatchUrlWarning:
+    """Tests for cleartext HTTP warning on DISPATCH_URL (issue #54)."""
+
+    def test_warning_emitted_for_http_url(self, caplog):
+        import logging
+
+        import bridge.main
+
+        with caplog.at_level(logging.WARNING):
+            bridge.main._check_dispatch_url("http://dispatch.llm:3000")
+        assert any(
+            "cleartext HTTP" in record.message for record in caplog.records
+        )
+
+    def test_no_warning_for_https_url(self, caplog):
+        import logging
+
+        import bridge.main
+
+        with caplog.at_level(logging.WARNING):
+            bridge.main._check_dispatch_url("https://dispatch.llm:3000")
+        assert not any(
+            "cleartext HTTP" in record.message for record in caplog.records
+        )
