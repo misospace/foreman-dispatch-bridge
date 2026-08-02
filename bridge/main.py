@@ -1,4 +1,5 @@
 import json
+import logging
 import os
 import time
 from typing import Callable, Optional
@@ -152,10 +153,21 @@ def run_once(
     return results
 
 
+def _check_dispatch_url(base_url: str) -> None:
+    """Warn if DISPATCH_URL uses cleartext HTTP (issue #54)."""
+    if base_url.startswith("http://"):
+        logging.warning(
+            "DISPATCH_URL uses cleartext HTTP (%s); Bearer tokens are sent unencrypted. "
+            "Use https:// or restrict access with network policies.",
+            base_url,
+        )
+
+
 def _real_main() -> None:  # pragma: no cover - thin wiring, exercised in the cluster
     from bridge.claim import DispatchClient
 
     base_url = os.environ.get("DISPATCH_URL", "http://dispatch.llm:3000")
+    _check_dispatch_url(base_url)
     token = os.environ["DISPATCH_AGENT_TOKEN"]
     agent_name = os.environ.get("DISPATCH_AGENT_NAME", "foreman/coder")
     lanes = [l.strip() for l in os.environ.get("DISPATCH_LANES", "local,cloud,frontier").split(",") if l.strip()]
