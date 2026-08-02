@@ -2,7 +2,8 @@ from dataclasses import dataclass
 from typing import Optional
 
 from bridge.workload import (
-    CODER_AGENT, VERIFIER_AGENT, ATTEMPT_ANNOTATION, gate_profile_for,
+    CODER_AGENT, VERIFIER_AGENT, ATTEMPT_ANNOTATION, LANE_CODER_WILDCARD,
+    gate_profile_for,
 )
 
 # Lane values dispatch assigns to a PR-fix item. NEEDS_HUMAN is never actioned
@@ -48,7 +49,6 @@ def parse_pr_fix_item(raw) -> Optional[PrFixItem]:
     )
 
 
-PRFIX_CODER_WILDCARD = "*"
 DEFAULT_PRFIX_LANE_AGENTS = {"NORMAL": "coder", "ESCALATED": "coder-frontier"}
 
 _TYPE_HEADERS = {
@@ -62,7 +62,7 @@ def pr_fix_coder_for(lane: str, lane_agents: dict) -> str:
     """Resolve a PrFixLane to a coder Agent name: exact, then "*", else "coder"."""
     if not lane_agents:
         return CODER_AGENT
-    return lane_agents.get(lane) or lane_agents.get(PRFIX_CODER_WILDCARD) or CODER_AGENT
+    return lane_agents.get(lane) or lane_agents.get(LANE_CODER_WILDCARD) or CODER_AGENT
 
 
 def assemble_fix_prompt(item: "PrFixItem") -> str:
