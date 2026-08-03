@@ -190,7 +190,7 @@ def _pipeline_steps(
 def build_workload(
     item: ClaimedItem,
     namespace: str,
-    gate_profile: Optional[dict] = None,
+    gate_profile: dict | None = None,
     agent_name: str = "",
     attempt: int = 1,
     coder_agent: str = CODER_AGENT,
@@ -212,7 +212,7 @@ def build_workload(
     if feedback:
         # Retry with context: explicit pipeline so payload.prompt can carry the
         # previous attempt's review findings / failure to the coder.
-        spec = {
+        spec: dict[str, object] = {
             "intent": item.intent,
             "repo": item.repo,
             "pipeline": _pipeline_steps(

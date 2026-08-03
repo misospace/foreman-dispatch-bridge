@@ -32,9 +32,9 @@ def terminal_since(wl: dict) -> Optional[datetime]:
     """
     st = wl.get("status") or {}
     stamps = [_parse_ts(c.get("lastTransitionTime")) for c in (st.get("conditions") or [])]
-    stamps = [s for s in stamps if s]
+    stamps = [s for s in stamps if s is not None]
     if stamps:
-        return max(stamps)
+        return max(stamps)  # type: ignore[type-var]  # mypy cannot narrow filtered list[datetime | None] to list[datetime]
     return _parse_ts((wl.get("metadata") or {}).get("creationTimestamp"))
 
 

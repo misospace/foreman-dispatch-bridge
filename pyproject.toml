@@ -4,6 +4,14 @@ version = "0.1.0"
 description = "Foreman dispatch bridge — claims issues from the Dispatch API and materialises Kubernetes Workloads for coder agents."
 requires-python = ">=3.13"
 
+[tool.ruff]
+target-version = "py314"
+line-length = 120
+
+[tool.ruff.lint]
+select = ["E", "F"]
+ignore = ["E501"]
+
 [tool.pytest.ini_options]
 pythonpath = ["."]
 testpaths = ["tests"]

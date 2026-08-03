@@ -260,7 +260,8 @@ def test_list_pr_fix_queued_queries_each_lane():
 def test_mark_pr_fix_posts_payload():
     seen = {}
     def http_post(url, headers, payload):
-        seen["url"] = url; seen["payload"] = payload
+        seen["url"] = url
+        seen["payload"] = payload
         return {"ok": True}
     c = DispatchClient("http://d", "t", lambda *a: [], http_post)
     assert c.mark_pr_fix("o/r", 5, "FIXED", "done") is True

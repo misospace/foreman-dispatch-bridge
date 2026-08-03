@@ -267,7 +267,6 @@ def test_delete_workload_respects_timeout():
 def test_delete_workload_raises_timeout():
     """Assert delete_workload raises TimeoutError when poll exhausts the window."""
     from unittest.mock import MagicMock
-    from kubernetes import client
 
     import bridge.main
 

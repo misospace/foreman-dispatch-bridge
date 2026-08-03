@@ -1,4 +1,18 @@
-from bridge.prfix import PrFixItem, parse_pr_fix_item, assemble_fix_prompt, pr_fix_coder_for, DEFAULT_PRFIX_LANE_AGENTS
+from bridge.prfix import (
+    DEFAULT_PRFIX_LANE_AGENTS,
+    PRFIX_CREATED_BY,
+    PRFIX_PR_ANNOTATION,
+    PRFIX_REPO_ANNOTATION,
+    PrFixItem,
+    assemble_fix_prompt,
+    build_fix_workload,
+    drain_pr_fixes,
+    parse_pr_fix_item,
+    pr_fix_coder_for,
+    prfix_workload_name,
+    rebuild_prfix_manifest,
+    reconcile_pr_fixes,
+)
 
 
 def _item(**kw):
@@ -60,12 +74,6 @@ def test_parse_pr_fix_item_unusable_returns_none():
     assert parse_pr_fix_item("not a dict") is None
 
 
-from bridge.prfix import (
-    prfix_workload_name, build_fix_workload,
-    PRFIX_REPO_ANNOTATION, PRFIX_PR_ANNOTATION, PRFIX_CREATED_BY,
-)
-
-
 def test_prfix_workload_name_deterministic_sanitized():
     assert prfix_workload_name(_item(repo="misospace/miso-gallery", pr=295)) == "prfix-misospace-miso-gallery-295"
 
@@ -122,9 +130,6 @@ def test_build_fix_workload_default_keeps_verify_step():
     assert [s["kind"] for s in wl["spec"]["pipeline"]] == ["issue-fix", "verify"]
 
 
-from bridge.prfix import drain_pr_fixes
-
-
 def _raw(repo="o/r", pr=1, lane="NORMAL", branch="b", **kw):
     d = {"repo": repo, "pr": pr, "lane": lane, "branch": branch, "type": "OTHER", "reason": "x"}
     d.update(kw)
@@ -173,7 +178,7 @@ def test_drain_isolates_per_item_failure():
 def test_drain_gateless_creates_issue_fix_only_no_verify():
     """verify_enabled=False drain creates a Workload with issue-fix only, no verify."""
     created = []
-    out = drain_pr_fixes(
+    drain_pr_fixes(
         list_queued=lambda: [_raw(repo="o/r", pr=5)],
         existing_prfix_names=set(), create_workload=created.append,
         gate_profiles={"o/r": {"language": "python"}}, lane_agents={}, agent_name="a", namespace="llm",
@@ -184,11 +189,6 @@ def test_drain_gateless_creates_issue_fix_only_no_verify():
     assert [s["kind"] for s in steps] == ["issue-fix"]
     assert "verify" not in [s["kind"] for s in steps]
     assert created[0]["spec"]["gateProfile"] == {"language": "python"}
-
-
-from bridge.prfix import (
-    reconcile_pr_fixes, rebuild_prfix_manifest, PRFIX_CREATED_BY, DEFAULT_PRFIX_LANE_AGENTS,
-)
 
 
 def _wl(pr, phase, attempt=1, name=None, lane="NORMAL", coder="coder"):
@@ -504,7 +504,7 @@ def test_reconcile_checks_pending_at_cap_blocks():
         marks.append((repo, pr, status))
         return True
 
-    out = reconcile_pr_fixes(
+    reconcile_pr_fixes(
         list_prfix_workloads=lambda: [_wl(5, "Succeeded", attempt=3)],
         delete_workload=deleted.append,
         create_workload=lambda m: (_ for _ in ()).throw(AssertionError("no recreate")),

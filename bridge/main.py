@@ -1,9 +1,7 @@
-import json
 import logging
 import os
 import time
 from typing import Callable, Optional
-import requests
 from kubernetes import client, config
 from bridge.models import ClaimedItem
 from bridge.workload import (
@@ -170,7 +168,7 @@ def _real_main() -> None:  # pragma: no cover - thin wiring, exercised in the cl
     _check_dispatch_url(base_url)
     token = os.environ["DISPATCH_AGENT_TOKEN"]
     agent_name = os.environ.get("DISPATCH_AGENT_NAME", "foreman/coder")
-    lanes = [l.strip() for l in os.environ.get("DISPATCH_LANES", "local,cloud,frontier").split(",") if l.strip()]
+    lanes = [part.strip() for part in os.environ.get("DISPATCH_LANES", "local,cloud,frontier").split(",") if part.strip()]
     namespace = os.environ.get("FOREMAN_NAMESPACE", "llm")
     gate_profiles = parse_gate_profiles(os.environ.get("GATEPROFILE_MAP"))
     max_attempts = int(os.environ.get("RETRY_MAX_ATTEMPTS", str(DEFAULT_MAX_ATTEMPTS)))
@@ -458,7 +456,8 @@ def _real_main() -> None:  # pragma: no cover - thin wiring, exercised in the cl
     # (e.g. after terminal-workload GC or manual deletion). Runs before prune
     # so that any issues reset to ready can be re-claimed on the next tick.
     bridge_wl_names = {
-        (wl.get("metadata") or {}).get("name") for wl in list_bridge_workloads()
+        name for wl in list_bridge_workloads()
+        if (name := (wl.get("metadata") or {}).get("name")) is not None
     }
     for line in reconcile_stranded_issues(
         dispatch, agent_name, bridge_wl_names,
