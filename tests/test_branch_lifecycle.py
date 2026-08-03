@@ -2,7 +2,6 @@
 
 from datetime import datetime, timedelta, timezone
 
-import pytest
 
 from bridge.branch_lifecycle import (
     DEFAULT_STALE_DAYS,

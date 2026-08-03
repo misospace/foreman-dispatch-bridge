@@ -1,6 +1,5 @@
 from datetime import datetime, timedelta, timezone
 
-import pytest
 
 from bridge.prune import prunable_workloads, prune_workloads, terminal_since
 

@@ -151,7 +151,7 @@ def reconcile_failures(
             # and the downstream claim/pr-fix passes. Treat a raise like a False
             # return: keep the tombstone, the next tick retries the escalation.
             try:
-                escalated = bool(can_escalate and escalate(item))
+                escalated = bool(can_escalate and escalate is not None and escalate(item))
                 if escalated:
                     delete_workload(name)
             except Exception as e:

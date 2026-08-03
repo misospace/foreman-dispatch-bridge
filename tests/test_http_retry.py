@@ -1,6 +1,5 @@
 """Tests for bridge.http_retry — retry wrapper for Dispatch / GitHub HTTP calls."""
 
-import time
 from unittest.mock import patch, MagicMock
 
 import pytest
