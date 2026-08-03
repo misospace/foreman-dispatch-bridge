@@ -20,6 +20,7 @@ from bridge.prfix import (
     reconcile_pr_fixes, drain_pr_fixes,
     DEFAULT_PRFIX_LANE_AGENTS, ACTIONABLE_LANES, PRFIX_CREATED_BY,
 )
+from bridge.env import validate_env
 from bridge.prune import prune_workloads
 from bridge.reconcile import reconcile_stranded_issues
 
@@ -164,6 +165,7 @@ def _check_dispatch_url(base_url: str) -> None:
 def _real_main() -> None:  # pragma: no cover - thin wiring, exercised in the cluster
     from bridge.claim import DispatchClient
 
+    validate_env()
     base_url = os.environ.get("DISPATCH_URL", "http://dispatch.llm:3000")
     _check_dispatch_url(base_url)
     token = os.environ["DISPATCH_AGENT_TOKEN"]
