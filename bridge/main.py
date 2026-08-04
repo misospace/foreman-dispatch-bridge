@@ -1,12 +1,9 @@
 import logging
-
-from bridge.logging_setup import configure as configure_logging
-
-logger = logging.getLogger("bridge.main")
 import os
 import time
 from typing import Callable, Optional
 from kubernetes import client, config
+from bridge.logging_setup import configure as configure_logging
 from bridge.models import ClaimedItem
 from bridge.workload import (
     _parse_json_map,
@@ -27,6 +24,8 @@ from bridge.prfix import (
 from bridge.prune import prune_workloads
 from bridge.reconcile import reconcile_stranded_issues
 from bridge.review_transition import transition_to_in_review
+
+logger = logging.getLogger("bridge.main")
 
 ClaimOne = Callable[[str, str], Optional[ClaimedItem]]  # (agent_name, lane) -\u003e item | None
 

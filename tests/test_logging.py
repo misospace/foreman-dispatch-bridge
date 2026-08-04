@@ -6,7 +6,6 @@ import io
 import json
 import logging
 import subprocess
-import sys
 
 import pytest
 
@@ -124,14 +123,19 @@ def test_jq_can_parse_emit(captured_logs):
     assert parsed["claimed"] == 1
 
     # On a runner with jq available, prove the round-trip explicitly. This
-    # is the acceptance criterion from issue #51.
-    jq = subprocess.run(
-        ["jq", "-r", ".msg"],
-        input=raw,
-        capture_output=True,
-        text=True,
-    )
-    if jq.returncode == 0:
+    # is the acceptance criterion from issue #51. If jq is not installed
+    # (e.g. minimal CI images), fall back to the Python-side JSON check
+    # above, which is the structural requirement.
+    try:
+        jq = subprocess.run(
+            ["jq", "-r", ".msg"],
+            input=raw,
+            capture_output=True,
+            text=True,
+        )
+    except FileNotFoundError:
+        jq = None
+    if jq is not None and jq.returncode == 0:
         assert jq.stdout.strip() == "tick-complete"
 
 
