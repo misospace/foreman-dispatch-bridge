@@ -22,6 +22,7 @@ from bridge.prfix import (
 )
 from bridge.prune import prune_workloads
 from bridge.reconcile import reconcile_stranded_issues
+from bridge.review_transition import transition_to_in_review
 
 ClaimOne = Callable[[str, str], Optional[ClaimedItem]]  # (agent_name, lane) -\u003e item | None
 
@@ -451,6 +452,19 @@ def _real_main() -> None:  # pragma: no cover - thin wiring, exercised in the cl
             verify_enabled=verify_enabled,
         ):
             print(line)
+
+    # Transition completed Workloads with an open PR to status/in-review.
+    # Runs after claim/retry/pr-fix drains and before reconcile/prune so the
+    # stranded-issue reconcile sees the updated label: a completed Workload
+    # whose issue just moved to in-review is no longer "stranded in-progress"
+    # and won't be reset to ready.
+    for line in transition_to_in_review(
+        list_bridge_workloads,
+        lambda name: list_workload_tasks(name),
+        lambda item, status, agent: dispatch.update_status(item, status, agent),
+        agent_name,
+    ):
+        print(line)
 
     # Reconcile stranded in-progress issues whose Workload no longer exists
     # (e.g. after terminal-workload GC or manual deletion). Runs before prune
