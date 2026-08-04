@@ -1,4 +1,8 @@
 import logging
+
+from bridge.logging_setup import configure as configure_logging
+
+logger = logging.getLogger("bridge.main")
 import os
 import time
 from typing import Callable, Optional
@@ -165,6 +169,8 @@ def _check_dispatch_url(base_url: str) -> None:
 def _real_main() -> None:  # pragma: no cover - thin wiring, exercised in the cluster
     from bridge.claim import DispatchClient
 
+    configure_logging()
+
     base_url = os.environ.get("DISPATCH_URL", "http://dispatch.llm:3000")
     _check_dispatch_url(base_url)
     token = os.environ["DISPATCH_AGENT_TOKEN"]
@@ -296,14 +302,24 @@ def _real_main() -> None:  # pragma: no cover - thin wiring, exercised in the cl
         try:
             return feedback_from_tasks(list_workload_tasks(workload_name))
         except Exception as e:  # feedback is best-effort; never block a retry on it
-            print(f"{workload_name}:feedback-lookup-failed:{e}")
+            logger.warning(
+                "feedback-lookup-failed",
+                extra={"workload": workload_name, "error": repr(e)},
+            )
             return ""
 
     def lookup_issue_id(item: ClaimedItem) -> str:
         try:
             return dispatch.find_issue_id(agent_name, lanes, item.repo, item.issue_number)
         except Exception as e:  # best-effort; missing id just means no escalation
-            print(f"{item.repo}#{item.issue_number}:issue-id-lookup-failed:{e}")
+            logger.warning(
+                "issue-id-lookup-failed",
+                extra={
+                    "repo": item.repo,
+                    "issue_number": item.issue_number,
+                    "error": repr(e),
+                },
+            )
             return ""
 
     def escalate(item: ClaimedItem) -> bool:
@@ -326,7 +342,7 @@ def _real_main() -> None:  # pragma: no cover - thin wiring, exercised in the cl
         feedback_for=feedback_for,
         verify_enabled=verify_enabled,
     ):
-        print(line)
+        logger.info(line)
 
     # Cap concurrent in-progress work so the pipeline drains a bounded set
     # instead of claiming the whole backlog at once (0 = uncapped).
@@ -339,7 +355,7 @@ def _real_main() -> None:  # pragma: no cover - thin wiring, exercised in the cl
         in_progress=active, max_in_progress=max_in_progress,
         verify_enabled=verify_enabled,
     ):
-        print(line)
+        logger.info(line)
 
     if pr_fix_enabled:
         def list_prfix_workloads() -> list:
@@ -354,7 +370,15 @@ def _real_main() -> None:  # pragma: no cover - thin wiring, exercised in the cl
             try:
                 return dispatch.mark_pr_fix(repo, pr, status, note)
             except Exception as e:  # best-effort; tombstone remains, next tick retries
-                print(f"prfix-mark-failed:{repo}#{pr}:{status}:{e}")
+                logger.warning(
+                    "prfix-mark-failed",
+                    extra={
+                        "repo": repo,
+                        "pr": pr,
+                        "status": status,
+                        "error": repr(e),
+                    },
+                )
                 return False
 
         # GitHub's own merge-state, not the fix workload's exit status, is the
@@ -382,7 +406,10 @@ def _real_main() -> None:  # pragma: no cover - thin wiring, exercised in the cl
             try:
                 data = http_get(f"https://api.github.com/repos/{repo}/pulls/{pr}", headers)
             except Exception as e:
-                print(f"prfix-mergeable-check-failed:{repo}#{pr}:{e}")
+                logger.warning(
+                    "prfix-mergeable-check-failed",
+                    extra={"repo": repo, "pr": pr, "error": repr(e)},
+                )
                 return "checks_pending"
 
             state = str((data or {}).get("mergeable_state") or "").lower()
@@ -428,8 +455,9 @@ def _real_main() -> None:  # pragma: no cover - thin wiring, exercised in the cl
                     if has_pending:
                         return "checks_pending"
             except Exception as exc:
-                print(
-                    f"prfix-check-runs-error:{repo}#{pr}:{exc}"
+                logger.error(
+                    "prfix-check-runs-error",
+                    extra={"repo": repo, "pr": pr, "error": repr(exc)},
                 )
                 # If we can't reach the API, fall through to "ok" (optimistic)
 
@@ -440,7 +468,7 @@ def _real_main() -> None:  # pragma: no cover - thin wiring, exercised in the cl
             mark_pr_fix, pr_is_mergeable=pr_is_mergeable, max_attempts=pr_fix_max_attempts,
             lane_agents=pr_fix_lane_agents,
         ):
-            print(line)
+            logger.info(line)
 
         existing = {
             (wl.get("metadata") or {}).get("name") for wl in list_prfix_workloads()
@@ -451,7 +479,7 @@ def _real_main() -> None:  # pragma: no cover - thin wiring, exercised in the cl
             gate_profiles, pr_fix_lane_agents, agent_name, namespace,
             verify_enabled=verify_enabled,
         ):
-            print(line)
+            logger.info(line)
 
     # Transition completed Workloads with an open PR to status/in-review.
     # Runs after claim/retry/pr-fix drains and before reconcile/prune so the
@@ -464,7 +492,7 @@ def _real_main() -> None:  # pragma: no cover - thin wiring, exercised in the cl
         lambda item, status, agent: dispatch.update_status(item, status, agent),
         agent_name,
     ):
-        print(line)
+        logger.info(line)
 
     # Reconcile stranded in-progress issues whose Workload no longer exists
     # (e.g. after terminal-workload GC or manual deletion). Runs before prune
@@ -476,7 +504,7 @@ def _real_main() -> None:  # pragma: no cover - thin wiring, exercised in the cl
     for line in reconcile_stranded_issues(
         dispatch, agent_name, bridge_wl_names,
     ):
-        print(line)
+        logger.info(line)
 
     # Garbage-collect terminal Workloads last, after reconcile has already
     # retried anything retryable this tick — so a still-terminal Workload past
@@ -513,7 +541,7 @@ def _real_main() -> None:  # pragma: no cover - thin wiring, exercised in the cl
         failed_ttl_seconds=prune_failed_after_h * 3600,
         reset_issue=_reset_issue,
     ):
-        print(line)
+        logger.info(line)
 
 
 if __name__ == "__main__":
