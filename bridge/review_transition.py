@@ -25,7 +25,7 @@ ISSUE_ID_ANNOTATION = "foreman.llmkube.dev/issue-id"
 
 ListWorkloads = Callable[[], list]                       # () -> Workload manifests
 ListWorkloadTasks = Callable[[str], list]                # (wl name) -> AgenticTask manifests
-UpdateStatus = Callable[[dict, str, str], None]          # (item, status, agent) -> None
+UpdateStatus = Callable[[dict, str, str], bool]          # (item, status, agent) -> success
 
 
 def _workload_is_completed(wl: dict) -> bool:
