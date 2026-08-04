@@ -143,7 +143,7 @@ class TestTransitionToInReview:
         """Some pipelines (ad-hoc dispatch) are code-only with no review step.
         The PR URL can also appear on the code task's result.extra.pullRequestURL."""
         updated = []
-        out = transition_to_in_review(
+        transition_to_in_review(
             list_workloads=lambda: [_wl("wl-a-b-42")],
             list_workload_tasks=lambda name: [_task("issue-fix", pr_url="https://github.com/a/b/pull/42")],
             update_status=lambda item, status, agent: updated.append((item, status, agent)),
