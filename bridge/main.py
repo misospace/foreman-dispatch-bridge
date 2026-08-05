@@ -3,6 +3,7 @@ import os
 import time
 from typing import Callable, Optional
 from kubernetes import client, config
+from bridge.env import validate_env
 from bridge.logging_setup import configure as configure_logging
 from bridge.models import ClaimedItem
 from bridge.workload import (
@@ -171,6 +172,7 @@ def _check_dispatch_url(base_url: str) -> None:
 def _real_main() -> None:  # pragma: no cover - thin wiring, exercised in the cluster
     from bridge.claim import DispatchClient
 
+    validate_env()
     configure_logging()
 
     base_url = os.environ.get("DISPATCH_URL", "http://dispatch.llm:3000")
