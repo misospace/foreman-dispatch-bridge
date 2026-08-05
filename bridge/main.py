@@ -13,6 +13,7 @@ from bridge.workload import (
     revision_coder_agent_for,
     gate_profile_for,
     parse_gate_profiles,
+    parse_self_go,
     parse_lane_coder_agents,
     parse_base_coder_agents,
 )
@@ -96,6 +97,7 @@ def run_once(
     in_progress: int = 0,
     max_in_progress: int = 0,
     verify_enabled: bool = True,
+    self_go: list[str] | None = None,
 ) -> list:
     """Claim one ready issue per lane and materialize a Workload for each. Returns per-lane outcomes.
 
@@ -147,6 +149,7 @@ def run_once(
                 coder_agent=coder_agent_for(item.lane, language, lane_coder_agents, base_coder_agents),
                 revision_coder_agent=revision_coder_agent_for(item.lane, revision_coder_agents),
                 verify_enabled=verify_enabled,
+                self_go=self_go,
             )
             create_workload(manifest)
             in_progress += 1
@@ -190,6 +193,7 @@ def _real_main() -> None:  # pragma: no cover - thin wiring, exercised in the cl
     # unclaim) instead of tombstoning. Empty disables escalation.
     escalation_lane = os.environ.get("ESCALATION_LANE", "").strip()
     verify_enabled = _parse_bool_env(os.environ.get("VERIFY_ENABLED", ""), default=True)
+    self_go = parse_self_go(os.environ.get("VERDICT_SELF_GO"))
     pr_fix_enabled = os.environ.get("PR_FIX_ENABLED", "").strip().lower() in ("1", "true", "yes")
     pr_fix_max_attempts = int(os.environ.get("PR_FIX_MAX_ATTEMPTS", "3"))
     github_token = os.environ.get("GITHUB_TOKEN", "")
@@ -340,6 +344,7 @@ def _real_main() -> None:  # pragma: no cover - thin wiring, exercised in the cl
         lookup_issue_id=lookup_issue_id,
         feedback_for=feedback_for,
         verify_enabled=verify_enabled,
+        self_go=self_go,
     ):
         logger.info(line)
 
@@ -353,6 +358,7 @@ def _real_main() -> None:  # pragma: no cover - thin wiring, exercised in the cl
         base_coder_agents=base_coder_agents,
         in_progress=active, max_in_progress=max_in_progress,
         verify_enabled=verify_enabled,
+        self_go=self_go,
     ):
         logger.info(line)
 
@@ -477,6 +483,7 @@ def _real_main() -> None:  # pragma: no cover - thin wiring, exercised in the cl
             existing, create_workload,
             gate_profiles, pr_fix_lane_agents, agent_name, namespace,
             verify_enabled=verify_enabled,
+            self_go=self_go,
         ):
             logger.info(line)
 

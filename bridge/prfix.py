@@ -90,7 +90,7 @@ def prfix_workload_name(item: "PrFixItem") -> str:
 
 
 def build_fix_workload(item, namespace, gate_profile, agent_name, coder_agent, attempt=1,
-                       verify_enabled: bool = True) -> dict:
+                       verify_enabled: bool = True, self_go: list[str] | None = None) -> dict:
     """Explicit code -> verify pipeline that amends the PR's head branch.
 
     reviseFromBranch makes the executor fetch and check out the PR branch;
@@ -125,6 +125,8 @@ def build_fix_workload(item, namespace, gate_profile, agent_name, coder_agent, a
             "agentRef": {"name": VERIFIER_AGENT}, "dependsOn": [f"fix-{n}"],
             "payload": verify_payload,
         })
+    if self_go:
+        spec["verdictPolicy"] = {"selfGO": list(self_go)}
     if gate_profile:
         spec["gateProfile"] = gate_profile
     return {
@@ -146,7 +148,7 @@ def build_fix_workload(item, namespace, gate_profile, agent_name, coder_agent, a
 
 def drain_pr_fixes(list_queued, existing_prfix_names, create_workload,
                    gate_profiles, lane_agents, agent_name, namespace,
-                   verify_enabled: bool = True) -> list:
+                   verify_enabled: bool = True, self_go: list[str] | None = None) -> list:
     """Create a fix Workload per newly-QUEUED item. list_queued returns raw
     dicts already filtered to actionable lanes by the API query. An item is
     skipped when it has no branch (nothing to amend) or already has an
@@ -172,6 +174,7 @@ def drain_pr_fixes(list_queued, existing_prfix_names, create_workload,
                 item, namespace, gate_profile_for(item.repo, gate_profiles),
                 agent_name, pr_fix_coder_for(item.lane, lane_agents), attempt=1,
                 verify_enabled=verify_enabled,
+                self_go=self_go,
             )
             create_workload(manifest)
             results.append(f"{tag}:created:{name}")

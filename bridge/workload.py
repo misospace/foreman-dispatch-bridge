@@ -65,6 +65,22 @@ def parse_gate_profiles(raw: Optional[str]) -> dict:
     return _parse_json_map(raw, "GATEPROFILE_MAP")
 
 
+# Work classes a coder's own GO may self-certify (LLMKube proposal #1075).
+# Foreman's default is [code-fix, docs, packaging, config]: ci-policy and
+# release-policy are excluded because the in-workspace gate can tell a
+# workflow still parses but not whether its logic is correct. That default
+# makes every CI/workflow chore terminal here — the coder does the work,
+# pushes a correct branch, then the policy demotes its GO to
+# NO-GO/NEEDS-VERIFICATION and reviewers cascade to INCOMPLETE, discarding
+# the work. Fleets whose PRs run the changed workflow, get an AI review, and
+# are merged by hand can widen the list; empty/unset keeps Foreman's default.
+def parse_self_go(raw: str | None) -> list[str]:
+    """Parse VERDICT_SELF_GO (comma-separated work classes) into a list."""
+    if not raw:
+        return []
+    return [part.strip() for part in raw.split(",") if part.strip()]
+
+
 def gate_profile_for(repo: str, gate_profiles: dict) -> Optional[dict]:
     """Resolve a repo's gate profile: exact match, then the "*" wildcard, else None."""
     if not gate_profiles:
@@ -197,6 +213,7 @@ def build_workload(
     feedback: str = "",
     revision_coder_agent: str = "",
     verify_enabled: bool = True,
+    self_go: list[str] | None = None,
 ) -> dict:
     # A re-dispatch reuses its predecessor's deterministic branch name; if a
     # prior attempt pushed, the new push dies non-fast-forward (#1). Foreman's
@@ -238,6 +255,10 @@ def build_workload(
         # pre-#948 CRDs (extra-field pruning), so this is inert until foreman
         # ships it.
         spec["allowOverwrite"] = True
+    if self_go:
+        # Passed through verbatim; the operator stamps it onto every decomposed
+        # AgenticTask. Unset leaves Foreman's default policy untouched.
+        spec["verdictPolicy"] = {"selfGO": list(self_go)}
     if gate_profile:
         # Passed through verbatim. Foreman >= 0.8.23 copies Workload.spec.gateProfile
         # onto every decomposed AgenticTask (the coder self-gate + verify Job), so a

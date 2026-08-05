@@ -5,6 +5,7 @@ from bridge.workload import (
     build_workload,
     parse_gate_profiles,
     gate_profile_for,
+    parse_self_go,
 )
 
 ITEM = ClaimedItem(repo="joryirving/home-ops", issue_number=42,
@@ -273,3 +274,42 @@ def test_parse_json_map_invalid_json_raises_value_error_with_context():
         msg = str(exc)
         assert "GATEPROFILE_MAP" in msg
         assert bad[:80] in msg
+
+
+# ── verdictPolicy.selfGO (LLMKube #1075) ──────────────────────────────────
+
+
+def test_parse_self_go_handles_absent_empty_and_whitespace():
+    assert parse_self_go(None) == []
+    assert parse_self_go("") == []
+    assert parse_self_go("   ") == []
+    assert parse_self_go("code-fix, docs ,packaging") == ["code-fix", "docs", "packaging"]
+
+
+def test_build_workload_omits_verdict_policy_by_default():
+    """Unset must leave Foreman's own default policy untouched."""
+    wl = build_workload(ITEM, namespace="llm")
+    assert "verdictPolicy" not in wl["spec"]
+    wl = build_workload(ITEM, namespace="llm", self_go=[])
+    assert "verdictPolicy" not in wl["spec"]
+
+
+def test_build_workload_stamps_verdict_policy_when_set():
+    classes = ["code-fix", "docs", "packaging", "config", "ci-policy"]
+    wl = build_workload(ITEM, namespace="llm", self_go=classes)
+    assert wl["spec"]["verdictPolicy"] == {"selfGO": classes}
+
+
+def test_build_workload_stamps_verdict_policy_on_the_retry_pipeline_path():
+    """The feedback path builds an explicit pipeline; policy must ride along."""
+    wl = build_workload(ITEM, namespace="llm", feedback="reviewer said X",
+                        self_go=["code-fix", "ci-policy"])
+    assert wl["spec"]["verdictPolicy"] == {"selfGO": ["code-fix", "ci-policy"]}
+    assert "pipeline" in wl["spec"]
+
+
+def test_build_workload_verdict_policy_is_copied_not_aliased():
+    classes = ["code-fix"]
+    wl = build_workload(ITEM, namespace="llm", self_go=classes)
+    classes.append("ci-policy")
+    assert wl["spec"]["verdictPolicy"]["selfGO"] == ["code-fix"]

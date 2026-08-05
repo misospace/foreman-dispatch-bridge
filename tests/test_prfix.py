@@ -515,3 +515,14 @@ def test_reconcile_checks_pending_at_cap_blocks():
     # At the cap with checks_pending -> BLOCKED (not FIXED)
     assert marks[0][:3] == ("o/r", 5, "BLOCKED")
     assert deleted == []
+
+
+def test_build_fix_workload_stamps_verdict_policy():
+    from bridge.prfix import build_fix_workload, parse_pr_fix_item
+    item = parse_pr_fix_item({"repo": "o/r", "pr": 7, "branch": "foreman/x",
+                              "lane": "NORMAL", "reason": "r", "feedback": ["f"]})
+    wl = build_fix_workload(item, "llm", None, "agent", "coder",
+                            self_go=["code-fix", "ci-policy"])
+    assert wl["spec"]["verdictPolicy"] == {"selfGO": ["code-fix", "ci-policy"]}
+    wl = build_fix_workload(item, "llm", None, "agent", "coder")
+    assert "verdictPolicy" not in wl["spec"]
