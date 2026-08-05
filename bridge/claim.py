@@ -1,6 +1,9 @@
+import logging
 import re
 from typing import Callable, Optional
 from bridge.models import ClaimedItem
+
+logger = logging.getLogger("bridge.claim")
 
 # Injected transports so the client is testable without network.
 # http_get(url, headers) -> parsed JSON ; http_post(url, headers, json) -> parsed JSON | None
@@ -96,7 +99,10 @@ class DispatchClient:
                 if self.claim(item, agent_name):
                     return to_claimed_item(item, lane)
             except Exception as e:
-                print(f"[claim] claim failed for {item.get('number')}: {e}")
+                logger.warning(
+                    "claim-failed",
+                    extra={"number": item.get("number"), "error": repr(e)},
+                )
                 continue
         return None
 
