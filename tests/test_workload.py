@@ -1,5 +1,6 @@
 from bridge.models import ClaimedItem
 from bridge.workload import (
+    _branch_name,
     _parse_json_map,
     workload_name,
     build_workload,
@@ -150,24 +151,26 @@ def test_build_workload_uses_explicit_coder_agent():
     assert wl["spec"]["coderAgentRef"] == {"name": "coder-frontier"}
 
 
-def test_build_workload_first_attempt_sets_allow_overwrite():
-    # allowOverwrite is now always set (not just attempt > 1): branchStrategy=
-    # reset makes the task branch re-derivable, and `attempt` is not a reliable
-    # branch-existence signal — a status-reset re-dispatch resets it to 1 while
-    # the pushed branch persists, which is what wedged retries on PUSH-FAILED.
+def test_build_workload_first_attempt_omits_allow_overwrite():
+    # First attempt must NOT set allowOverwrite: bare allowOverwrite without
+    # reviseFromBranch force-pushes base over any existing work — silent data
+    # loss when the re-run produces an empty diff (issue #101).
     wl = build_workload(ITEM, namespace="llm", attempt=1)
-    assert wl["spec"]["allowOverwrite"] is True
+    assert "allowOverwrite" not in wl["spec"]
+    assert "reviseFromBranch" not in wl["spec"]
 
 
 def test_build_workload_retry_sets_allow_overwrite_on_issues_path():
     wl = build_workload(ITEM, namespace="llm", attempt=2)
     assert wl["spec"]["allowOverwrite"] is True
+    assert wl["spec"]["reviseFromBranch"] == "foreman/wl-joryirving-home-ops-42/issue-42"
     assert "pipeline" not in wl["spec"]
 
 
 def test_build_workload_retry_sets_allow_overwrite_on_pipeline_code_step():
     wl = build_workload(ITEM, namespace="llm", attempt=2, feedback="reviewer said no")
     assert wl["spec"]["allowOverwrite"] is True
+    assert wl["spec"]["reviseFromBranch"] == "foreman/wl-joryirving-home-ops-42/issue-42"
     code = [s for s in wl["spec"]["pipeline"] if s["kind"] == "issue-fix"]
     assert len(code) == 1 and code[0]["payload"]["allowOverwrite"] is True
     verify = [s for s in wl["spec"]["pipeline"] if s["kind"] == "verify"]
@@ -313,3 +316,19 @@ def test_build_workload_verdict_policy_is_copied_not_aliased():
     wl = build_workload(ITEM, namespace="llm", self_go=classes)
     classes.append("ci-policy")
     assert wl["spec"]["verdictPolicy"]["selfGO"] == ["code-fix"]
+
+
+def test_branch_name_deterministic():
+    item = ClaimedItem(
+        repo="misospace/dispatch", issue_number=42, intent="fix bug",
+        lane="base", issue_id="1001",
+    )
+    assert _branch_name(item) == "foreman/wl-misospace-dispatch-42/issue-42"
+
+
+def test_branch_name_special_chars():
+    item = ClaimedItem(
+        repo="Foo/Bar-Baz", issue_number=99, intent="fix",
+        lane="base", issue_id="1002",
+    )
+    assert _branch_name(item) == "foreman/wl-foo-bar-baz-99/issue-99"

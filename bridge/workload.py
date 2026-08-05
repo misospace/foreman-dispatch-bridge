@@ -149,6 +149,11 @@ def workload_name(item: ClaimedItem) -> str:
     return f"wl-{owner_repo}-{item.issue_number}"
 
 
+def _branch_name(item: ClaimedItem) -> str:
+    """Deterministic task branch name matching Foreman's issues-path convention."""
+    return f"foreman/{workload_name(item)}/issue-{item.issue_number}"
+
+
 def _pipeline_steps(
     item: ClaimedItem, name: str, coder_agent: str, feedback: str,
     allow_overwrite: bool = False, verify_enabled: bool = True,
@@ -215,17 +220,13 @@ def build_workload(
     verify_enabled: bool = True,
     self_go: list[str] | None = None,
 ) -> dict:
-    # A re-dispatch reuses its predecessor's deterministic branch name; if a
-    # prior attempt pushed, the new push dies non-fast-forward (#1). Foreman's
-    # spec.allowOverwrite (LLMKube#948) lets the coder replace its own stale ref
-    # via force-with-lease. We always set it: on Foreman 0.9.4+ the coder cuts
-    # the branch fresh from the current base (branchStrategy=reset, LLMKube#1042),
-    # so the task branch is re-derivable and safe to overwrite — and `attempt` is
-    # NOT a reliable branch-existence signal, since a status-reset re-dispatch
-    # (unclaim -> ready) or a manual recreate resets it to 1 while the pushed
-    # branch persists, which is exactly what wedged retries on PUSH-FAILED.
-    # force-with-lease still guards against an unexpected concurrent push.
-    allow_overwrite = True
+    # On retry (attempt > 1), pair allowOverwrite with reviseFromBranch so the
+    # executor checks out the prior attempt's branch instead of cutting fresh from
+    # base. A bare allowOverwrite without reviseFromBranch force-pushes base over
+    # any existing work — silent data loss when the re-run produces an empty diff.
+    # PUSH-FAILED is a strictly better outcome than silent data loss: a wedged
+    # retry is recoverable, an overwritten commit is not.
+    allow_overwrite = attempt > 1
     if feedback:
         # Retry with context: explicit pipeline so payload.prompt can carry the
         # previous attempt's review findings / failure to the coder.
@@ -250,10 +251,12 @@ def build_workload(
         if revision_coder_agent:
             spec["revisionCoderAgentRef"] = {"name": revision_coder_agent}
     if allow_overwrite:
-        # Top-level as well: the operator stamps it onto issue-path payloads
-        # (LLMKube#948); harmless duplication on the pipeline path. Ignored by
-        # pre-#948 CRDs (extra-field pruning), so this is inert until foreman
-        # ships it.
+        # On retry, pair allowOverwrite with reviseFromBranch so the executor
+        # checks out the prior attempt's branch instead of cutting fresh from
+        # base. Without reviseFromBranch, allowOverwrite force-pushes base over
+        # any existing work — silent data loss when the re-run produces an empty
+        # diff (issue #101).
+        spec["reviseFromBranch"] = _branch_name(item)
         spec["allowOverwrite"] = True
     if self_go:
         # Passed through verbatim; the operator stamps it onto every decomposed
