@@ -171,9 +171,17 @@ class DispatchClient:
         payload = {"repo": repo, "pr": pr, "status": status, "note": note}
         return self._post(f"{self._base}/api/pr-fix-queue/mark", self._headers(), payload) is not None
 
-    def list_claimed(self, agent_name: str) -> list:
-        """List all issues currently claimed by *agent_name* (across all lanes)."""
+    def list_claimed(self, agent_name: str, status: str = "") -> list:
+        """List issues currently claimed by *agent_name* (across all lanes).
+
+        *status* selects which claimed status to list; the dispatch default is
+        in-progress. Pass "ready" to find stuck claims: issues still holding this
+        agent's label while back at status/ready, which no reaper could see while
+        the endpoint only returned in-progress. Older dispatch versions ignore the
+        parameter and return in-progress, which is a harmless no-op here."""
         url = f"{self._base}/api/issues/claimed?agentName={agent_name}"
+        if status:
+            url += f"&status={status}"
         data = self._get(url, self._headers())
         return data if isinstance(data, list) else []
 
