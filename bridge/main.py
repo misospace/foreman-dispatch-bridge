@@ -18,7 +18,13 @@ from bridge.workload import (
     parse_lane_coder_agents,
     parse_base_coder_agents,
 )
-from bridge.retry import reconcile_failures, feedback_from_tasks, branch_pushed, DEFAULT_MAX_ATTEMPTS
+from bridge.retry import (
+    reconcile_failures,
+    feedback_from_tasks,
+    branch_pushed,
+    declared_escalation,
+    DEFAULT_MAX_ATTEMPTS,
+)
 from bridge.prfix import (
     reconcile_pr_fixes, drain_pr_fixes,
     DEFAULT_PRFIX_LANE_AGENTS, ACTIONABLE_LANES, PRFIX_CREATED_BY,
@@ -303,6 +309,45 @@ def _real_main() -> None:  # pragma: no cover - thin wiring, exercised in the cl
         )
         return resp.get("items", [])
 
+    def declared_escalation_for(workload_name: str) -> "str | None":
+        """The escalation reason the coder declared, if any. Best-effort: a lookup
+        failure reports None, which leaves the normal retry path untouched."""
+        try:
+            return declared_escalation(list_workload_tasks(workload_name))
+        except Exception as e:
+            logger.warning(
+                "declared-escalation-read-failed",
+                extra={"workload": workload_name, "error": repr(e)},
+            )
+            return None
+
+    def park_for_human(item: ClaimedItem, reason: str) -> bool:
+        """Move a declared-escalation issue to status/backlog so the loop stops
+        serving it and a human sees it in triage.
+
+        backlog is the right resting place: the agent queue treats it as
+        triage-only, so the issue is neither re-claimed nor invisible. Returns
+        False on failure so the caller can fall through to a normal retry rather
+        than dropping the work."""
+        if not item.issue_id:
+            logger.warning(
+                "park-for-human-skipped-no-issue-id",
+                extra={"repo": item.repo, "number": item.issue_number, "reason": reason},
+            )
+            return False
+        payload = {
+            "issueId": item.issue_id,
+            "repoFullName": item.repo,
+            "number": item.issue_number,
+        }
+        ok = dispatch.update_status(payload, "backlog", agent_name)
+        if ok:
+            logger.info(
+                "parked-for-human",
+                extra={"repo": item.repo, "number": item.issue_number, "reason": reason},
+            )
+        return bool(ok)
+
     def issue_state_for(item: ClaimedItem) -> "str | None":
         """Cached state of the workload's issue, or None when unknown.
 
@@ -371,6 +416,8 @@ def _real_main() -> None:  # pragma: no cover - thin wiring, exercised in the cl
         self_go=self_go,
         branch_pushed_for=branch_pushed_for,
         issue_state_for=issue_state_for,
+        declared_escalation_for=declared_escalation_for,
+        park_for_human=park_for_human,
     ):
         logger.info(line)
 
