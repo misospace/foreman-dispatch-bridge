@@ -6,6 +6,7 @@ from bridge.workload import (
     build_workload,
     coder_agent_for,
     gate_profile_for,
+    _branch_name,
     ATTEMPT_ANNOTATION,
     ISSUE_ID_ANNOTATION,
 )
@@ -19,6 +20,7 @@ DeleteWorkload = Callable[[str], None]  # (name) -> None; blocks until the objec
 Escalate = Callable[[ClaimedItem], bool]  # (item) -> True when re-laned + unclaimed
 LookupIssueId = Callable[[ClaimedItem], str]   # (item) -> dispatch issue id, "" if not found
 FeedbackFor = Callable[[str], str]             # (workload name) -> retry feedback text, "" if none
+BranchPushedFor = Callable[[str], bool]        # (workload name) -> did its task branch reach the remote
 
 
 # Bounds the feedback block injected into a retry's coder prompt.
@@ -66,6 +68,43 @@ def feedback_from_tasks(tasks: list) -> str:
     return text[:FEEDBACK_MAX_CHARS]
 
 
+def branch_pushed(tasks: list) -> bool:
+    """True when a failed Workload's tasks prove its task branch reached the remote.
+
+    The bridge has no GitHub credential (only DISPATCH_AGENT_TOKEN), so it cannot
+    ask the remote whether the branch exists. The Workload's own tasks carry the
+    answer, and ``retry`` already fetches them for feedback.
+
+    Evidence, any one of which is sufficient:
+      - ``pullRequestURL`` on any task: a PR exists, so the branch was pushed.
+      - a review task ran: the reviewer fetches and checks out the branch, so it
+        could not have produced a verdict without one.
+      - a coder task returned GO: the coder pushes before reporting GO.
+      - a PUSH-FAILED outcome: the push was rejected non-fast-forward, which
+        means a branch is already there. This is what makes a wedge self-heal —
+        the failure itself becomes the evidence the next retry needs.
+
+    Absent evidence, return False: the caller then sets neither reviseFromBranch
+    (which would hard-fail on a branch that was never pushed, LLMKube#1365) nor
+    allowOverwrite (which would force-push base over real work, #101).
+    """
+    for t in tasks or []:
+        spec = t.get("spec") or {}
+        st = t.get("status") or {}
+        ex = (st.get("result") or {}).get("extra") or {}
+        if ex.get("pullRequestURL"):
+            return True
+        if spec.get("kind") == "review" and st.get("verdict"):
+            return True
+        if spec.get("kind") in ("issue-fix", "code") and st.get("verdict") == "GO":
+            return True
+        outcome = str(ex.get("outcome") or "")
+        error = str(ex.get("error") or "")
+        if "PUSH-FAILED" in outcome or "non-fast-forward" in error:
+            return True
+    return False
+
+
 def attempt_of(wl: dict) -> int:
     """Read the attempt counter off a Workload; absent/garbage -> 1."""
     ann = (wl.get("metadata") or {}).get("annotations") or {}
@@ -108,6 +147,7 @@ def reconcile_failures(
     feedback_for: Optional[FeedbackFor] = None,
     verify_enabled: bool = True,
     self_go: list[str] | None = None,
+    branch_pushed_for: Optional[BranchPushedFor] = None,
 ) -> list:
     """Retry Failed bridge Workloads, bounded by max_attempts.
 
@@ -168,6 +208,11 @@ def reconcile_failures(
         # delete (the tasks go with the Workload). A retry that knows why it
         # was rejected beats a blind identical re-run.
         feedback = feedback_for(name) if feedback_for else ""
+        # Same reason as feedback: the tasks are deleted with the Workload, so the
+        # branch evidence has to be read BEFORE the delete below.
+        revise_from = (
+            _branch_name(item) if branch_pushed_for and branch_pushed_for(name) else ""
+        )
         # Per-workload isolation: a delete that wedges (e.g. a Workload whose
         # deletion never completes, LLMKube#949) or a create that races must
         # not abort the rest of the reconcile pass and the claim pass — one
@@ -185,6 +230,7 @@ def reconcile_failures(
                 feedback=feedback,
                 verify_enabled=verify_enabled,
                 self_go=self_go,
+                revise_from_branch=revise_from,
             )
             create_workload(manifest)
         except Exception as e:

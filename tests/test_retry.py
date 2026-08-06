@@ -291,3 +291,37 @@ def test_reconcile_gateless_feedback_retry_builds_code_review_no_verify():
     review = steps[1]
     assert review["dependsOn"] == [code["name"]]
     assert code["payload"]["prompt"] == "Reviewer said: add tests"
+
+
+def _task(kind="issue-fix", verdict=None, extra=None):
+    return {"spec": {"kind": kind}, "status": {"verdict": verdict, "result": {"extra": extra or {}}}}
+
+
+def test_branch_pushed_false_without_evidence():
+    from bridge.retry import branch_pushed
+    assert branch_pushed([]) is False
+    assert branch_pushed([_task(verdict="NO-GO", extra={"error": "model timeout"})]) is False
+
+
+def test_branch_pushed_on_pull_request_url():
+    from bridge.retry import branch_pushed
+    assert branch_pushed([_task(extra={"pullRequestURL": "https://github.com/o/r/pull/1"})]) is True
+
+
+def test_branch_pushed_when_a_review_ran():
+    from bridge.retry import branch_pushed
+    # A reviewer cannot produce a verdict without checking out the branch.
+    assert branch_pushed([_task(kind="review", verdict="NO-GO")]) is True
+
+
+def test_branch_pushed_on_coder_go():
+    from bridge.retry import branch_pushed
+    assert branch_pushed([_task(kind="issue-fix", verdict="GO")]) is True
+
+
+def test_branch_pushed_on_push_failed_so_the_wedge_self_heals():
+    from bridge.retry import branch_pushed
+    # PUSH-FAILED means a ref is already there; the next retry revises from it
+    # instead of wedging again.
+    assert branch_pushed([_task(verdict="NO-GO", extra={"outcome": "PUSH-FAILED"})]) is True
+    assert branch_pushed([_task(verdict="NO-GO", extra={"error": "non-fast-forward"})]) is True

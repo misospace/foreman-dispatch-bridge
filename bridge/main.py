@@ -18,7 +18,7 @@ from bridge.workload import (
     parse_lane_coder_agents,
     parse_base_coder_agents,
 )
-from bridge.retry import reconcile_failures, feedback_from_tasks, DEFAULT_MAX_ATTEMPTS
+from bridge.retry import reconcile_failures, feedback_from_tasks, branch_pushed, DEFAULT_MAX_ATTEMPTS
 from bridge.prfix import (
     reconcile_pr_fixes, drain_pr_fixes,
     DEFAULT_PRFIX_LANE_AGENTS, ACTIONABLE_LANES, PRFIX_CREATED_BY,
@@ -303,6 +303,20 @@ def _real_main() -> None:  # pragma: no cover - thin wiring, exercised in the cl
         )
         return resp.get("items", [])
 
+    def branch_pushed_for(workload_name: str) -> bool:
+        """Did this Workload's task branch reach the remote? Drives whether the
+        retry may overwrite it. Best-effort: on lookup failure report False, which
+        makes the retry cut a fresh branch and (if a stale ref exists) fail loudly
+        with PUSH-FAILED rather than force-push over work it cannot see."""
+        try:
+            return branch_pushed(list_workload_tasks(workload_name))
+        except Exception as e:
+            logger.warning(
+                "branch-evidence-lookup-failed",
+                extra={"workload": workload_name, "error": repr(e)},
+            )
+            return False
+
     def feedback_for(workload_name: str) -> str:
         try:
             return feedback_from_tasks(list_workload_tasks(workload_name))
@@ -347,6 +361,7 @@ def _real_main() -> None:  # pragma: no cover - thin wiring, exercised in the cl
         feedback_for=feedback_for,
         verify_enabled=verify_enabled,
         self_go=self_go,
+        branch_pushed_for=branch_pushed_for,
     ):
         logger.info(line)
 
