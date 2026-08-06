@@ -104,11 +104,13 @@ def release_stuck_claims(
         # handle — unclaiming them here would be an unintended, untested change on
         # live data. Checking the labels makes this correct on either version.
         labels = item.get("labels")
-        if labels is None:
-            # No labels field at all means the API contract changed underneath us.
-            # Skipping silently would disable this reaper with no signal — which is
-            # the same silent-skip shape that hid two p0s for 20 days. Count it and
-            # warn once per run rather than per item.
+        if not labels:
+            # Absent OR empty. An item this endpoint returns always carries at
+            # least its status and agent labels, so an empty list is as suspicious
+            # as a missing key: both mean we cannot confirm status/ready. Skipping
+            # silently would disable this reaper with no signal — the same
+            # silent-skip shape that hid two p0s for 20 days. Count and warn once
+            # per sweep rather than per item.
             missing_labels += 1
             continue
         if "status/ready" not in labels:
@@ -138,7 +140,7 @@ def release_stuck_claims(
 
     if missing_labels:
         logger.warning(
-            "stuck-claim sweep: %d claimed item(s) carried no labels field; "
+            "stuck-claim sweep: %d claimed item(s) carried no usable labels; "
             "cannot confirm status/ready, so they were skipped. The reaper is "
             "effectively disabled for those items — check the dispatch "
             "/api/issues/claimed response shape.",

@@ -231,16 +231,21 @@ def test_release_stuck_claims_ignores_items_that_are_not_ready():
     assert d.unclaimed == []
 
 
-def test_release_stuck_claims_warns_when_labels_are_absent(caplog):
-    """A missing labels field means the API contract moved. Skipping silently would
-    disable the reaper with no signal — the same shape that hid two p0s."""
+@pytest.mark.parametrize("labels", [None, []], ids=["absent", "empty"])
+def test_release_stuck_claims_warns_when_labels_are_unusable(caplog, labels):
+    """Absent or empty labels both mean the status cannot be confirmed. Skipping
+    silently would disable the reaper with no signal — the same shape that hid two
+    p0s. An item from this endpoint always carries at least status + agent."""
     from bridge.reconcile import release_stuck_claims
 
     item = _ready_item(42)
-    del item["labels"]
+    if labels is None:
+        del item["labels"]
+    else:
+        item["labels"] = labels
     d = _StuckDispatch([item])
 
     with caplog.at_level("WARNING"):
         assert release_stuck_claims(d, "foreman-coder", set()) == []
     assert d.unclaimed == []
-    assert "no labels field" in caplog.text
+    assert "no usable labels" in caplog.text
