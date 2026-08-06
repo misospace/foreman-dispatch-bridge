@@ -219,14 +219,28 @@ def build_workload(
     revision_coder_agent: str = "",
     verify_enabled: bool = True,
     self_go: list[str] | None = None,
+    revise_from_branch: str = "",
 ) -> dict:
-    # On retry (attempt > 1), pair allowOverwrite with reviseFromBranch so the
-    # executor checks out the prior attempt's branch instead of cutting fresh from
-    # base. A bare allowOverwrite without reviseFromBranch force-pushes base over
-    # any existing work — silent data loss when the re-run produces an empty diff.
-    # PUSH-FAILED is a strictly better outcome than silent data loss: a wedged
-    # retry is recoverable, an overwritten commit is not.
-    allow_overwrite = attempt > 1
+    # Overwriting a task branch is gated on EVIDENCE that prior work exists, not
+    # on the attempt counter. Callers pass revise_from_branch only when the failed
+    # Workload's own tasks prove a branch was pushed (see retry.branch_pushed).
+    #
+    # Two failure modes this avoids, both real:
+    #   - Bare allowOverwrite (no reviseFromBranch) tells Foreman to cut the
+    #     branch fresh from base and force-push over whatever is there. When the
+    #     re-run produces an empty diff, that destroys the prior commit and
+    #     autocloses the PR (#101).
+    #   - reviseFromBranch pointing at a branch that was never pushed makes
+    #     Foreman 0.9.14+ hard-fail the task ("revision restore failed:
+    #     reviseFromBranch not found on push remote", LLMKube#1365). An attempt
+    #     counter cannot tell these apart: attempt 1 can fail before it ever
+    #     pushes, and an unclaim -> ready re-dispatch resets the counter to 1
+    #     while the pushed branch survives.
+    #
+    # With no evidence we set neither field. If a stale branch does exist, the
+    # push fails non-fast-forward — loud, recoverable, and PUSH-FAILED is itself
+    # evidence that the NEXT retry uses to revise from the branch instead.
+    allow_overwrite = bool(revise_from_branch)
     if feedback:
         # Retry with context: explicit pipeline so payload.prompt can carry the
         # previous attempt's review findings / failure to the coder.
@@ -251,12 +265,10 @@ def build_workload(
         if revision_coder_agent:
             spec["revisionCoderAgentRef"] = {"name": revision_coder_agent}
     if allow_overwrite:
-        # On retry, pair allowOverwrite with reviseFromBranch so the executor
-        # checks out the prior attempt's branch instead of cutting fresh from
-        # base. Without reviseFromBranch, allowOverwrite force-pushes base over
-        # any existing work — silent data loss when the re-run produces an empty
-        # diff (issue #101).
-        spec["reviseFromBranch"] = _branch_name(item)
+        # Always paired: reviseFromBranch makes the executor check out the prior
+        # attempt's branch, and allowOverwrite lets the push force-with-lease that
+        # ref. Setting the second without the first is the #101 data-loss bug.
+        spec["reviseFromBranch"] = revise_from_branch
         spec["allowOverwrite"] = True
     if self_go:
         # Passed through verbatim; the operator stamps it onto every decomposed

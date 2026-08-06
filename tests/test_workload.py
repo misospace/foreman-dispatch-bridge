@@ -160,17 +160,24 @@ def test_build_workload_first_attempt_omits_allow_overwrite():
     assert "reviseFromBranch" not in wl["spec"]
 
 
+BRANCH = "foreman/wl-joryirving-home-ops-42/issue-42"
+
+
 def test_build_workload_retry_sets_allow_overwrite_on_issues_path():
-    wl = build_workload(ITEM, namespace="llm", attempt=2)
+    # Overwrite is gated on branch evidence, not on attempt: the caller passes the
+    # branch only when the failed Workload's tasks prove it was pushed.
+    wl = build_workload(ITEM, namespace="llm", attempt=2, revise_from_branch=BRANCH)
     assert wl["spec"]["allowOverwrite"] is True
-    assert wl["spec"]["reviseFromBranch"] == "foreman/wl-joryirving-home-ops-42/issue-42"
+    assert wl["spec"]["reviseFromBranch"] == BRANCH
     assert "pipeline" not in wl["spec"]
 
 
 def test_build_workload_retry_sets_allow_overwrite_on_pipeline_code_step():
-    wl = build_workload(ITEM, namespace="llm", attempt=2, feedback="reviewer said no")
+    wl = build_workload(
+        ITEM, namespace="llm", attempt=2, feedback="reviewer said no", revise_from_branch=BRANCH
+    )
     assert wl["spec"]["allowOverwrite"] is True
-    assert wl["spec"]["reviseFromBranch"] == "foreman/wl-joryirving-home-ops-42/issue-42"
+    assert wl["spec"]["reviseFromBranch"] == BRANCH
     code = [s for s in wl["spec"]["pipeline"] if s["kind"] == "issue-fix"]
     assert len(code) == 1 and code[0]["payload"]["allowOverwrite"] is True
     verify = [s for s in wl["spec"]["pipeline"] if s["kind"] == "verify"]
@@ -332,3 +339,31 @@ def test_branch_name_special_chars():
         lane="base", issue_id="1002",
     )
     assert _branch_name(item) == "foreman/wl-foo-bar-baz-99/issue-99"
+
+
+# --- #101 follow-up: overwrite is gated on branch EVIDENCE, not the attempt counter.
+# The first fix keyed on `attempt > 1`, which cannot distinguish "attempt 1 failed
+# before it pushed" (reviseFromBranch would hard-fail per LLMKube#1365) from
+# "unclaim -> ready reset the counter while the branch survived" (a bare push wedges).
+
+def test_build_workload_omits_overwrite_fields_without_branch_evidence():
+    item = ClaimedItem(repo="o/r", issue_number=7, intent="t", lane="local", issue_id="i")
+    spec = build_workload(item, "llm")["spec"]
+    assert "allowOverwrite" not in spec
+    assert "reviseFromBranch" not in spec
+
+
+def test_build_workload_pairs_overwrite_with_revise_branch():
+    item = ClaimedItem(repo="o/r", issue_number=7, intent="t", lane="local", issue_id="i")
+    branch = "foreman/wl-o-r-7/issue-7"
+    spec = build_workload(item, "llm", revise_from_branch=branch)["spec"]
+    assert spec["allowOverwrite"] is True
+    assert spec["reviseFromBranch"] == branch
+
+
+def test_build_workload_attempt_alone_never_sets_overwrite():
+    """A high attempt counter is not evidence; only a branch name is."""
+    item = ClaimedItem(repo="o/r", issue_number=7, intent="t", lane="local", issue_id="i")
+    spec = build_workload(item, "llm", attempt=5)["spec"]
+    assert "allowOverwrite" not in spec
+    assert "reviseFromBranch" not in spec
