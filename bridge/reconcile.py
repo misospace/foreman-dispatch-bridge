@@ -91,10 +91,29 @@ def release_stuck_claims(
     Returns human-readable log lines describing each release.
     """
     results: list[str] = []
+    missing_labels = 0
 
     for item in dispatch.list_claimed(agent_name, status="ready") or []:
         issue_number = item.get("number")
         if issue_number is None:
+            continue
+
+        # Verify the status from the item's own labels rather than trusting the
+        # server-side filter. A dispatch without the `status` parameter ignores it
+        # and returns in-progress issues, which are the stranded-reconcile's to
+        # handle — unclaiming them here would be an unintended, untested change on
+        # live data. Checking the labels makes this correct on either version.
+        labels = item.get("labels")
+        if not labels:
+            # Absent OR empty. An item this endpoint returns always carries at
+            # least its status and agent labels, so an empty list is as suspicious
+            # as a missing key: both mean we cannot confirm status/ready. Skipping
+            # silently would disable this reaper with no signal — the same
+            # silent-skip shape that hid two p0s for 20 days. Count and warn once
+            # per sweep rather than per item.
+            missing_labels += 1
+            continue
+        if "status/ready" not in labels:
             continue
 
         ci = ClaimedItem(
@@ -118,5 +137,14 @@ def release_stuck_claims(
             results.append(msg)
         except Exception:
             logger.exception("issue %d: failed to release stuck claim", issue_number)
+
+    if missing_labels:
+        logger.warning(
+            "stuck-claim sweep: %d claimed item(s) carried no usable labels; "
+            "cannot confirm status/ready, so they were skipped. The reaper is "
+            "effectively disabled for those items — check the dispatch "
+            "/api/issues/claimed response shape.",
+            missing_labels,
+        )
 
     return results
