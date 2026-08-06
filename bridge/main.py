@@ -24,7 +24,7 @@ from bridge.prfix import (
     DEFAULT_PRFIX_LANE_AGENTS, ACTIONABLE_LANES, PRFIX_CREATED_BY,
 )
 from bridge.prune import prune_workloads
-from bridge.reconcile import reconcile_stranded_issues
+from bridge.reconcile import reconcile_stranded_issues, release_stuck_claims
 from bridge.review_transition import transition_to_in_review
 
 logger = logging.getLogger("bridge.main")
@@ -525,6 +525,16 @@ def _real_main() -> None:  # pragma: no cover - thin wiring, exercised in the cl
         if (name := (wl.get("metadata") or {}).get("name")) is not None
     }
     for line in reconcile_stranded_issues(
+        dispatch, agent_name, bridge_wl_names,
+    ):
+        logger.info(line)
+
+    # Release claims stuck at status/ready with no Workload behind them. Such an
+    # issue is served at the head of the queue and refused on every claim, and
+    # claim_one skips it rather than starving the lane — so it is invisible while
+    # being permanently unreachable. Runs alongside the stranded reconcile and
+    # before prune, so a released issue is claimable on the next tick.
+    for line in release_stuck_claims(
         dispatch, agent_name, bridge_wl_names,
     ):
         logger.info(line)

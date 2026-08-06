@@ -149,3 +149,54 @@ class TestReconcileStrandedIssues:
         sig = inspect.signature(reconcile_stranded_issues)
         params = list(sig.parameters.keys())
         assert params == ["dispatch", "agent_name", "workload_names"]
+
+
+# --- stuck claims: status/ready while still holding this agent's label.
+# Served at the head of the queue, refused on every claim (a conflict with
+# itself), and skipped by claim_one so the lane never starves — permanently
+# unreachable while throughput looks healthy. Two p0s sat 20 days that way.
+
+class _StuckDispatch:
+    def __init__(self, ready_items):
+        self._ready = ready_items
+        self.unclaimed = []
+
+    def list_claimed(self, agent_name, status=""):
+        return self._ready if status == "ready" else []
+
+    def unclaim(self, item, agent_name):
+        self.unclaimed.append(item.issue_number)
+        return True
+
+
+def _ready_item(number, repo="misospace/llmkube-images", has_pr=False):
+    return {"number": number, "repoFullName": repo, "issueId": f"id-{number}", "hasOpenPr": has_pr}
+
+
+def test_release_stuck_claims_releases_ready_claim_without_workload():
+    from bridge.reconcile import release_stuck_claims
+    d = _StuckDispatch([_ready_item(34)])
+    out = release_stuck_claims(d, "foreman-coder", set())
+    assert d.unclaimed == [34]
+    assert out and "released stuck claim" in out[0]
+
+
+def test_release_stuck_claims_skips_issue_with_live_workload():
+    from bridge.reconcile import release_stuck_claims
+    d = _StuckDispatch([_ready_item(34)])
+    release_stuck_claims(d, "foreman-coder", {"wl-misospace-llmkube-images-34"})
+    assert d.unclaimed == []
+
+
+def test_release_stuck_claims_skips_issue_with_open_pr():
+    from bridge.reconcile import release_stuck_claims
+    d = _StuckDispatch([_ready_item(34, has_pr=True)])
+    release_stuck_claims(d, "foreman-coder", set())
+    assert d.unclaimed == []
+
+
+def test_release_stuck_claims_noop_when_nothing_ready():
+    from bridge.reconcile import release_stuck_claims
+    d = _StuckDispatch([])
+    assert release_stuck_claims(d, "foreman-coder", set()) == []
+    assert d.unclaimed == []
