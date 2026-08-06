@@ -157,11 +157,20 @@ class TestReconcileStrandedIssues:
 # unreachable while throughput looks healthy. Two p0s sat 20 days that way.
 
 class _StuckDispatch:
-    def __init__(self, ready_items):
+    """Fake dispatch for the stuck-claim reaper.
+
+    *always* mimics a dispatch without the `status` parameter: it ignores the
+    filter and returns the items regardless, which is what an older version does.
+    """
+
+    def __init__(self, ready_items, always=False):
         self._ready = ready_items
+        self._always = always
         self.unclaimed = []
 
     def list_claimed(self, agent_name, status=""):
+        if self._always:
+            return self._ready
         return self._ready if status == "ready" else []
 
     def unclaim(self, item, agent_name):
@@ -169,9 +178,14 @@ class _StuckDispatch:
         return True
 
 
-def _ready_item(number, repo="misospace/llmkube-images", has_pr=False):
-    return {"number": number, "repoFullName": repo, "issueId": f"id-{number}", "hasOpenPr": has_pr,
-            "labels": ["status/ready", "agent/foreman-coder"]}
+def _ready_item(number, repo="misospace/llmkube-images", has_pr=False, labels=None):
+    return {
+        "number": number,
+        "repoFullName": repo,
+        "issueId": f"id-{number}",
+        "hasOpenPr": has_pr,
+        "labels": ["status/ready", "agent/foreman-coder"] if labels is None else labels,
+    }
 
 
 def test_release_stuck_claims_releases_ready_claim_without_workload():
@@ -209,18 +223,24 @@ def test_release_stuck_claims_ignores_items_that_are_not_ready():
     here would be an unintended change. The label check makes this version-safe."""
     from bridge.reconcile import release_stuck_claims
 
-    class D:
-        def __init__(self):
-            self.un = []
-
-        def list_claimed(self, a, status=""):
-            return [{"number": 42, "repoFullName": "o/r", "issueId": "x", "hasOpenPr": False,
-                     "labels": ["status/in-progress", "agent/foreman-coder"]}]
-
-        def unclaim(self, i, a):
-            self.un.append(i.issue_number)
-            return True
-
-    d = D()
+    d = _StuckDispatch(
+        [_ready_item(42, labels=["status/in-progress", "agent/foreman-coder"])],
+        always=True,
+    )
     assert release_stuck_claims(d, "foreman-coder", set()) == []
-    assert d.un == []
+    assert d.unclaimed == []
+
+
+def test_release_stuck_claims_warns_when_labels_are_absent(caplog):
+    """A missing labels field means the API contract moved. Skipping silently would
+    disable the reaper with no signal — the same shape that hid two p0s."""
+    from bridge.reconcile import release_stuck_claims
+
+    item = _ready_item(42)
+    del item["labels"]
+    d = _StuckDispatch([item])
+
+    with caplog.at_level("WARNING"):
+        assert release_stuck_claims(d, "foreman-coder", set()) == []
+    assert d.unclaimed == []
+    assert "no labels field" in caplog.text

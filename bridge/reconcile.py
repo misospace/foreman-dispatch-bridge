@@ -91,6 +91,7 @@ def release_stuck_claims(
     Returns human-readable log lines describing each release.
     """
     results: list[str] = []
+    missing_labels = 0
 
     for item in dispatch.list_claimed(agent_name, status="ready") or []:
         issue_number = item.get("number")
@@ -102,7 +103,15 @@ def release_stuck_claims(
         # and returns in-progress issues, which are the stranded-reconcile's to
         # handle — unclaiming them here would be an unintended, untested change on
         # live data. Checking the labels makes this correct on either version.
-        if "status/ready" not in (item.get("labels") or []):
+        labels = item.get("labels")
+        if labels is None:
+            # No labels field at all means the API contract changed underneath us.
+            # Skipping silently would disable this reaper with no signal — which is
+            # the same silent-skip shape that hid two p0s for 20 days. Count it and
+            # warn once per run rather than per item.
+            missing_labels += 1
+            continue
+        if "status/ready" not in labels:
             continue
 
         ci = ClaimedItem(
@@ -126,5 +135,14 @@ def release_stuck_claims(
             results.append(msg)
         except Exception:
             logger.exception("issue %d: failed to release stuck claim", issue_number)
+
+    if missing_labels:
+        logger.warning(
+            "stuck-claim sweep: %d claimed item(s) carried no labels field; "
+            "cannot confirm status/ready, so they were skipped. The reaper is "
+            "effectively disabled for those items — check the dispatch "
+            "/api/issues/claimed response shape.",
+            missing_labels,
+        )
 
     return results
