@@ -170,7 +170,8 @@ class _StuckDispatch:
 
 
 def _ready_item(number, repo="misospace/llmkube-images", has_pr=False):
-    return {"number": number, "repoFullName": repo, "issueId": f"id-{number}", "hasOpenPr": has_pr}
+    return {"number": number, "repoFullName": repo, "issueId": f"id-{number}", "hasOpenPr": has_pr,
+            "labels": ["status/ready", "agent/foreman-coder"]}
 
 
 def test_release_stuck_claims_releases_ready_claim_without_workload():
@@ -200,3 +201,26 @@ def test_release_stuck_claims_noop_when_nothing_ready():
     d = _StuckDispatch([])
     assert release_stuck_claims(d, "foreman-coder", set()) == []
     assert d.unclaimed == []
+
+
+def test_release_stuck_claims_ignores_items_that_are_not_ready():
+    """Defensive: a dispatch without the `status` parameter ignores it and returns
+    in-progress issues. Those belong to the stranded reconcile; unclaiming them
+    here would be an unintended change. The label check makes this version-safe."""
+    from bridge.reconcile import release_stuck_claims
+
+    class D:
+        def __init__(self):
+            self.un = []
+
+        def list_claimed(self, a, status=""):
+            return [{"number": 42, "repoFullName": "o/r", "issueId": "x", "hasOpenPr": False,
+                     "labels": ["status/in-progress", "agent/foreman-coder"]}]
+
+        def unclaim(self, i, a):
+            self.un.append(i.issue_number)
+            return True
+
+    d = D()
+    assert release_stuck_claims(d, "foreman-coder", set()) == []
+    assert d.un == []

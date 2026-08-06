@@ -97,6 +97,14 @@ def release_stuck_claims(
         if issue_number is None:
             continue
 
+        # Verify the status from the item's own labels rather than trusting the
+        # server-side filter. A dispatch without the `status` parameter ignores it
+        # and returns in-progress issues, which are the stranded-reconcile's to
+        # handle — unclaiming them here would be an unintended, untested change on
+        # live data. Checking the labels makes this correct on either version.
+        if "status/ready" not in (item.get("labels") or []):
+            continue
+
         ci = ClaimedItem(
             repo=item.get("repoFullName") or "",
             issue_number=int(issue_number),
