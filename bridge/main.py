@@ -303,6 +303,14 @@ def _real_main() -> None:  # pragma: no cover - thin wiring, exercised in the cl
         )
         return resp.get("items", [])
 
+    def issue_state_for(item) -> "str | None":
+        """Cached state of the workload's issue, or None when unknown.
+
+        Best-effort by design: DispatchClient.issue_state already returns None on a
+        404 or transport failure, and reconcile_failures treats None as "retry as
+        normal". Only an explicit "closed" cancels a retry."""
+        return dispatch.issue_state(item.repo, item.issue_number)
+
     def branch_pushed_for(workload_name: str) -> bool:
         """Did this Workload's task branch reach the remote? Drives whether the
         retry may overwrite it. Best-effort: on lookup failure report False, which
@@ -362,6 +370,7 @@ def _real_main() -> None:  # pragma: no cover - thin wiring, exercised in the cl
         verify_enabled=verify_enabled,
         self_go=self_go,
         branch_pushed_for=branch_pushed_for,
+        issue_state_for=issue_state_for,
     ):
         logger.info(line)
 

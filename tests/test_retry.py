@@ -325,3 +325,99 @@ def test_branch_pushed_on_push_failed_so_the_wedge_self_heals():
     # instead of wedging again.
     assert branch_pushed([_task(verdict="NO-GO", extra={"outcome": "PUSH-FAILED"})]) is True
     assert branch_pushed([_task(verdict="NO-GO", extra={"error": "non-fast-forward"})]) is True
+
+
+# --- closed-issue precondition -------------------------------------------------
+# A closed issue cannot be advanced, so neither a retry nor an escalation is worth
+# an attempt. Observed on wl-misospace-llmkube-images-38: Failed at attempt 1 for an
+# issue closed as already-resolved (a sibling's fix had deleted the file it named).
+# Every further attempt could only clone the repo, find nothing, return NO-CHANGES.
+#
+# The fail-open cases matter more than the happy path: reading an ambiguous lookup
+# as "closed" would cancel real retries whenever dispatch was briefly unreachable,
+# which is worse than the waste being avoided.
+
+def _reconcile(recorder, issue_state_for=None, attempts=3, **kw):
+    return reconcile_failures(
+        "foreman-coder", recorder.list_failed, recorder.create, recorder.delete,
+        namespace="llm", gate_profiles={"*": {"language": "generic"}},
+        max_attempts=attempts, issue_state_for=issue_state_for, **kw,
+    )
+
+
+def test_skips_retry_when_the_issue_is_closed():
+    r = _Recorder([_failed_wl("wl-misospace-dispatch-7", attempt=1)])
+    out = _reconcile(r, issue_state_for=lambda item: "closed")
+    assert out == ["wl-misospace-dispatch-7:skip-retry:issue-closed"]
+    assert r.created == []
+    assert r.deleted == []  # tombstone left for prune, not deleted here
+
+
+def test_retries_when_the_issue_is_open():
+    r = _Recorder([_failed_wl("wl-misospace-dispatch-7", attempt=1)])
+    out = _reconcile(r, issue_state_for=lambda item: "open")
+    assert out == ["wl-misospace-dispatch-7:retry:2/3"]
+    assert len(r.created) == 1
+
+
+def test_retries_when_the_state_is_unknown():
+    """None means the lookup 404'd or failed — fail open, retry as before."""
+    r = _Recorder([_failed_wl("wl-misospace-dispatch-7", attempt=1)])
+    out = _reconcile(r, issue_state_for=lambda item: None)
+    assert out == ["wl-misospace-dispatch-7:retry:2/3"]
+    assert len(r.created) == 1
+
+
+def test_retries_when_the_state_lookup_raises():
+    """A raising lookup must not abort or cancel the retry."""
+    def boom(item):
+        raise RuntimeError("dispatch unreachable")
+
+    r = _Recorder([_failed_wl("wl-misospace-dispatch-7", attempt=1)])
+    out = _reconcile(r, issue_state_for=boom)
+    assert out == ["wl-misospace-dispatch-7:retry:2/3"]
+    assert len(r.created) == 1
+
+
+def test_retries_when_no_state_hook_is_wired():
+    """Backward compatible: omitting the hook preserves the old behaviour."""
+    r = _Recorder([_failed_wl("wl-misospace-dispatch-7", attempt=1)])
+    out = _reconcile(r, issue_state_for=None)
+    assert out == ["wl-misospace-dispatch-7:retry:2/3"]
+    assert len(r.created) == 1
+
+
+def test_closed_issue_is_not_escalated_at_max_attempts():
+    """The check runs before the max_attempts branch: escalating a closed issue
+    would spend a strictly more expensive frontier coder on nothing."""
+    escalated = []
+
+    r = _Recorder([_failed_wl("wl-misospace-dispatch-7", attempt=3)])
+    out = _reconcile(
+        r, issue_state_for=lambda item: "closed", attempts=3,
+        escalate=lambda item: escalated.append(item.issue_number) or True,
+        escalation_lane="frontier",
+    )
+    assert out == ["wl-misospace-dispatch-7:skip-retry:issue-closed"]
+    assert escalated == []
+    assert r.deleted == []
+
+
+def test_state_is_checked_per_workload_with_the_right_identity():
+    seen = []
+
+    r = _Recorder([
+        _failed_wl("wl-misospace-dispatch-7", repo="misospace/dispatch", issue=7, attempt=1),
+        _failed_wl("wl-misospace-kubetix-9", repo="misospace/KubeTix", issue=9, attempt=1),
+    ])
+
+    def record(item):
+        seen.append((item.repo, item.issue_number))
+        return "closed" if item.issue_number == 7 else "open"
+
+    out = _reconcile(r, issue_state_for=record)
+    assert ("misospace/dispatch", 7) in seen
+    assert ("misospace/KubeTix", 9) in seen
+    assert "wl-misospace-dispatch-7:skip-retry:issue-closed" in out
+    assert "wl-misospace-kubetix-9:retry:2/3" in out
+    assert len(r.created) == 1  # only the open one was rebuilt
