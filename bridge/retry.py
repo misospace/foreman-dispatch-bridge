@@ -25,6 +25,7 @@ LookupIssueId = Callable[[ClaimedItem], str]   # (item) -> dispatch issue id, ""
 FeedbackFor = Callable[[str], str]             # (workload name) -> retry feedback text, "" if none
 BranchPushedFor = Callable[[str], bool]        # (workload name) -> did its task branch reach the remote
 IssueStateFor = Callable[[ClaimedItem], Optional[str]]  # (item) -> "open"/"closed", None if unknown
+DeclaredEscalationFor = Callable[[str], Optional[str]]  # (workload name) -> declared reason or None
 
 
 # Bounds the feedback block injected into a retry's coder prompt.
@@ -70,6 +71,44 @@ def feedback_from_tasks(tasks: list) -> str:
         "Address this feedback in your fix:\n- " + "\n- ".join(notes)
     )
     return text[:FEEDBACK_MAX_CHARS]
+
+
+# The escalation reasons a coder may declare. Anything else is ignored (treated as
+# no declaration), so a typo or a future value cannot silently divert work out of
+# the loop — the same reasoning as ISSUE_STATES in claim.py.
+DECLARED_ESCALATIONS = frozenset({"DESIGN-DECISION", "NO-TECHNICAL-FIX"})
+
+
+def declared_escalation(tasks: list) -> Optional[str]:
+    """Return the escalation reason a coder declared on this Workload, if any.
+
+    A coder that can see the work is not solvable by code — it needs a product or
+    design decision, or there is no technical fix — says so through submit_result's
+    free-form ``extra``, which foreman surfaces at
+    ``status.result.extra.modelExtra``. That is a first-hand judgement from the
+    model that read the issue and the code.
+
+    Without this the only route to a human is attempt-exhaustion, which is a lossy
+    proxy: it spends every attempt to reach a conclusion the coder already had on
+    the first read, and it files "CI was flaky" in the same bucket as "this needs
+    Jory's judgement" with no way to tell them apart afterwards.
+
+    Only values in DECLARED_ESCALATIONS count. An unrecognised string returns None
+    and the workload retries as before: a model inventing a reason must not be able
+    to route work out of the loop.
+    """
+    for t in tasks or []:
+        spec = t.get("spec") or {}
+        if spec.get("kind") not in ("issue-fix", "code"):
+            continue
+        extra = ((t.get("status") or {}).get("result") or {}).get("extra") or {}
+        model_extra = extra.get("modelExtra") or {}
+        if not isinstance(model_extra, dict):
+            continue
+        reason = model_extra.get("escalation")
+        if isinstance(reason, str) and reason.strip().upper() in DECLARED_ESCALATIONS:
+            return reason.strip().upper()
+    return None
 
 
 def branch_pushed(tasks: list) -> bool:
@@ -153,6 +192,8 @@ def reconcile_failures(
     self_go: list[str] | None = None,
     branch_pushed_for: Optional[BranchPushedFor] = None,
     issue_state_for: Optional[IssueStateFor] = None,
+    declared_escalation_for: Optional[DeclaredEscalationFor] = None,
+    park_for_human: Optional[Callable[[ClaimedItem, str], bool]] = None,
 ) -> list:
     """Retry Failed bridge Workloads, bounded by max_attempts.
 
@@ -208,6 +249,53 @@ def reconcile_failures(
                 logger.info(msg)
                 results.append(msg)
                 continue
+
+        # A coder that declared the work needs a human is taken at its word: no
+        # retry, no escalation to a stronger coder, and no attempt consumed. The
+        # model read the issue and the code; re-running the same prompt two more
+        # times cannot turn a design decision into a patch.
+        #
+        # The issue moves to status/backlog, which is triage-only — the agent queue
+        # filters it out (claimableOnly excludes backlog), so the loop stops serving
+        # it while it stays visible to a human instead of sitting claimed and
+        # invisible. The Failed workload is left as the tombstone to triage from,
+        # matching what max_attempts giveup already does.
+        #
+        # Fails open: if the park callback is missing or fails, fall through to the
+        # normal retry path rather than dropping the work on the floor.
+        if declared_escalation_for is not None:
+            try:
+                reason = declared_escalation_for(name)
+            except Exception as e:
+                reason = None
+                logger.warning(
+                    "declared-escalation-lookup-failed",
+                    extra={"workload": name, "error": repr(e)},
+                )
+            if reason:
+                item_h = item_from_workload(wl)
+                if not item_h.issue_id and lookup_issue_id:
+                    item_h = replace(item_h, issue_id=lookup_issue_id(item_h) or "")
+                parked = False
+                if park_for_human is not None:
+                    try:
+                        parked = bool(park_for_human(item_h, reason))
+                    except Exception as e:
+                        logger.warning(
+                            "park-for-human-failed",
+                            extra={"workload": name, "reason": reason, "error": repr(e)},
+                        )
+                if parked:
+                    msg = f"{name}:human-escalation:{reason}"
+                    logger.info(msg)
+                    results.append(msg)
+                    continue
+                # Could not park it — do not silently swallow the declaration, but
+                # do not strand the work either: fall through and retry as normal.
+                logger.warning(
+                    "human-escalation-not-parked",
+                    extra={"workload": name, "reason": reason},
+                )
         if attempt >= max_attempts:
             item = item_from_workload(wl)
             if not item.issue_id and lookup_issue_id:

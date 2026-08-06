@@ -421,3 +421,117 @@ def test_state_is_checked_per_workload_with_the_right_identity():
     assert "wl-misospace-dispatch-7:skip-retry:issue-closed" in out
     assert "wl-misospace-kubetix-9:retry:2/3" in out
     assert len(r.created) == 1  # only the open one was rebuilt
+
+
+# --- declared human escalation --------------------------------------------------
+# A coder that read the issue and the code, and concluded no code can resolve it, is
+# taken at its word. Attempt-exhaustion is the alternative and it is a lossy proxy:
+# it spends every attempt to reach a conclusion the coder already had, and files
+# "CI was flaky" in the same bucket as "this needs a human decision".
+
+def _wl_with_escalation(name, reason, kind="issue-fix"):
+    wl = _failed_wl(name, attempt=1)
+    wl["_tasks"] = [{
+        "spec": {"kind": kind},
+        "status": {"result": {"extra": {"modelExtra": {"escalation": reason}}}},
+    }]
+    return wl
+
+
+def test_declared_escalation_reads_recognised_reasons():
+    from bridge.retry import declared_escalation
+    for r in ("DESIGN-DECISION", "NO-TECHNICAL-FIX"):
+        tasks = [{"spec": {"kind": "issue-fix"},
+                  "status": {"result": {"extra": {"modelExtra": {"escalation": r}}}}}]
+        assert declared_escalation(tasks) == r
+
+
+def test_declared_escalation_normalises_case_and_whitespace():
+    from bridge.retry import declared_escalation
+    tasks = [{"spec": {"kind": "issue-fix"},
+              "status": {"result": {"extra": {"modelExtra": {"escalation": " design-decision "}}}}}]
+    assert declared_escalation(tasks) == "DESIGN-DECISION"
+
+
+def test_declared_escalation_ignores_unrecognised_reasons():
+    """A model inventing a reason must not be able to route work out of the loop."""
+    from bridge.retry import declared_escalation
+    for r in ("TOO-HARD", "NEEDS-HUMAN", "", "later", None, 42):
+        tasks = [{"spec": {"kind": "issue-fix"},
+                  "status": {"result": {"extra": {"modelExtra": {"escalation": r}}}}}]
+        assert declared_escalation(tasks) is None
+
+
+def test_declared_escalation_ignores_non_coder_tasks():
+    from bridge.retry import declared_escalation
+    tasks = [{"spec": {"kind": "review"},
+              "status": {"result": {"extra": {"modelExtra": {"escalation": "DESIGN-DECISION"}}}}}]
+    assert declared_escalation(tasks) is None
+
+
+def test_declared_escalation_tolerates_missing_and_malformed_extra():
+    from bridge.retry import declared_escalation
+    assert declared_escalation([]) is None
+    assert declared_escalation([{"spec": {"kind": "issue-fix"}, "status": {}}]) is None
+    assert declared_escalation([{"spec": {"kind": "issue-fix"},
+                                 "status": {"result": {"extra": {"modelExtra": "nope"}}}}]) is None
+
+
+def test_declared_escalation_parks_and_does_not_retry():
+    parked = []
+    r = _Recorder([_failed_wl("wl-misospace-dispatch-7", attempt=1)])
+    out = _reconcile(
+        r,
+        declared_escalation_for=lambda name: "DESIGN-DECISION",
+        park_for_human=lambda item, reason: parked.append((item.issue_number, reason)) or True,
+    )
+    assert out == ["wl-misospace-dispatch-7:human-escalation:DESIGN-DECISION"]
+    assert parked == [(7, "DESIGN-DECISION")]
+    assert r.created == []          # no attempt consumed
+    assert r.deleted == []          # tombstone left to triage from
+
+
+def test_declared_escalation_does_not_escalate_to_the_frontier_lane():
+    """At max_attempts the giveup branch would escalate to a stronger coder. A
+    declared design decision must not spend one."""
+    escalated = []
+    r = _Recorder([_failed_wl("wl-misospace-dispatch-7", attempt=3)])
+    out = _reconcile(
+        r, attempts=3,
+        declared_escalation_for=lambda name: "NO-TECHNICAL-FIX",
+        park_for_human=lambda item, reason: True,
+        escalate=lambda item: escalated.append(item.issue_number) or True,
+        escalation_lane="frontier",
+    )
+    assert out == ["wl-misospace-dispatch-7:human-escalation:NO-TECHNICAL-FIX"]
+    assert escalated == []
+
+
+def test_retries_normally_when_parking_fails():
+    """Do not strand the work: a failed park falls through to the retry path."""
+    r = _Recorder([_failed_wl("wl-misospace-dispatch-7", attempt=1)])
+    out = _reconcile(
+        r,
+        declared_escalation_for=lambda name: "DESIGN-DECISION",
+        park_for_human=lambda item, reason: False,
+    )
+    assert out == ["wl-misospace-dispatch-7:retry:2/3"]
+    assert len(r.created) == 1
+
+
+def test_retries_normally_when_no_escalation_is_declared():
+    r = _Recorder([_failed_wl("wl-misospace-dispatch-7", attempt=1)])
+    out = _reconcile(r, declared_escalation_for=lambda name: None,
+                     park_for_human=lambda item, reason: True)
+    assert out == ["wl-misospace-dispatch-7:retry:2/3"]
+    assert len(r.created) == 1
+
+
+def test_retries_normally_when_the_escalation_lookup_raises():
+    def boom(name):
+        raise RuntimeError("kube unreachable")
+
+    r = _Recorder([_failed_wl("wl-misospace-dispatch-7", attempt=1)])
+    out = _reconcile(r, declared_escalation_for=boom, park_for_human=lambda i, x: True)
+    assert out == ["wl-misospace-dispatch-7:retry:2/3"]
+    assert len(r.created) == 1
