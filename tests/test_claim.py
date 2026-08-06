@@ -412,3 +412,19 @@ def test_issue_state_none_when_state_missing_or_empty():
     assert _client(lambda url, headers: {"number": 1}).issue_state("o/n", 1) is None
     assert _client(lambda url, headers: {"state": ""}).issue_state("o/n", 1) is None
     assert _client(lambda url, headers: {"state": 42}).issue_state("o/n", 1) is None
+
+
+def test_issue_state_normalises_case_and_whitespace():
+    assert _client(lambda url, headers: {"state": "OPEN"}).issue_state("o/n", 1) == "open"
+    assert _client(lambda url, headers: {"state": " Closed "}).issue_state("o/n", 1) == "closed"
+
+
+def test_issue_state_none_for_an_unrecognised_state():
+    """An unknown value must read as unknown, not as 'not closed'.
+
+    Passing it through would silently bypass the caller's check: reconcile_failures
+    only skips on an explicit "closed", so any other string quietly means "retry".
+    None is the same behaviour but honest about why.
+    """
+    for weird in ("merged", "draft", "locked", "unknown", "OPENISH"):
+        assert _client(lambda url, headers: {"state": weird}).issue_state("o/n", 1) is None

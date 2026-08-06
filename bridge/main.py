@@ -303,7 +303,7 @@ def _real_main() -> None:  # pragma: no cover - thin wiring, exercised in the cl
         )
         return resp.get("items", [])
 
-    def issue_state_for(item) -> "str | None":
+    def issue_state_for(item: ClaimedItem) -> "str | None":
         """Cached state of the workload's issue, or None when unknown.
 
         Best-effort by design: DispatchClient.issue_state already returns None on a

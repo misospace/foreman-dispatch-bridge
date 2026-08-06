@@ -6,6 +6,11 @@ from bridge.models import ClaimedItem
 
 logger = logging.getLogger("bridge.claim")
 
+# The only issue states issue_state will report. Anything else is reported as
+# unknown (None), so a caller fails open instead of acting on a value it does not
+# understand.
+ISSUE_STATES = frozenset({"open", "closed"})
+
 # Injected transports so the client is testable without network.
 # http_get(url, headers) -> parsed JSON ; http_post(url, headers, json) -> parsed JSON | None
 HttpGet = Callable[[str, dict], object]
@@ -198,7 +203,15 @@ class DispatchClient:
         if not isinstance(data, dict):
             return None
         state = data.get("state")
-        return state if isinstance(state, str) and state else None
+        if not isinstance(state, str):
+            return None
+        state = state.strip().lower()
+        # Normalise to the documented contract. An unrecognised value (a future
+        # dispatch state, a typo, "merged") becomes None rather than being passed
+        # through: None is the fail-open answer, whereas returning an unknown string
+        # would silently read as "not closed" and quietly bypass the check the
+        # caller added it for.
+        return state if state in ISSUE_STATES else None
 
     def list_claimed(self, agent_name: str, status: str = "") -> list:
         """List issues currently claimed by *agent_name* (across all lanes).
