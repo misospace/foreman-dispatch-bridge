@@ -1,3 +1,4 @@
+import logging
 from dataclasses import replace
 from typing import Callable, Optional
 
@@ -11,6 +12,8 @@ from bridge.workload import (
     ISSUE_ID_ANNOTATION,
 )
 
+logger = logging.getLogger("bridge.retry")
+
 # How many total coder attempts before the bridge stops retrying a Workload and
 # leaves it as a Failed tombstone for human triage. Override via env.
 DEFAULT_MAX_ATTEMPTS = 3
@@ -21,6 +24,7 @@ Escalate = Callable[[ClaimedItem], bool]  # (item) -> True when re-laned + uncla
 LookupIssueId = Callable[[ClaimedItem], str]   # (item) -> dispatch issue id, "" if not found
 FeedbackFor = Callable[[str], str]             # (workload name) -> retry feedback text, "" if none
 BranchPushedFor = Callable[[str], bool]        # (workload name) -> did its task branch reach the remote
+IssueStateFor = Callable[[ClaimedItem], Optional[str]]  # (item) -> "open"/"closed", None if unknown
 
 
 # Bounds the feedback block injected into a retry's coder prompt.
@@ -148,6 +152,7 @@ def reconcile_failures(
     verify_enabled: bool = True,
     self_go: list[str] | None = None,
     branch_pushed_for: Optional[BranchPushedFor] = None,
+    issue_state_for: Optional[IssueStateFor] = None,
 ) -> list:
     """Retry Failed bridge Workloads, bounded by max_attempts.
 
@@ -174,6 +179,35 @@ def reconcile_failures(
     for wl in list_failed():
         name = (wl.get("metadata") or {}).get("name") or "?"
         attempt = attempt_of(wl)
+
+        # A closed issue cannot be advanced by anything we do here, so neither a
+        # retry nor an escalation is worth an attempt. Checked before the
+        # max_attempts branch because escalating a closed issue to the frontier
+        # lane wastes a strictly more expensive coder.
+        #
+        # Observed: wl-misospace-llmkube-images-38 sat Failed at attempt 1 for an
+        # issue closed as already-resolved (a sibling's fix had deleted the file it
+        # named). Each further attempt could only clone the repo, find nothing to
+        # do, and return NO-CHANGES.
+        #
+        # Fails OPEN on anything ambiguous: only an explicit "closed" skips. None
+        # means the lookup 404'd or errored, and treating that as closed would
+        # cancel real retries whenever dispatch was briefly unreachable.
+        if issue_state_for is not None:
+            item_for_state = item_from_workload(wl)
+            try:
+                state = issue_state_for(item_for_state)
+            except Exception as e:
+                state = None
+                logger.warning(
+                    "issue-state-check-failed",
+                    extra={"workload": name, "error": repr(e)},
+                )
+            if state == "closed":
+                msg = f"{name}:skip-retry:issue-closed"
+                logger.info(msg)
+                results.append(msg)
+                continue
         if attempt >= max_attempts:
             item = item_from_workload(wl)
             if not item.issue_id and lookup_issue_id:

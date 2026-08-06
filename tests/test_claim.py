@@ -359,3 +359,72 @@ def test_list_claimed_returns_items_with_has_open_pr():
     assert len(result) == 2
     assert result[0]["hasOpenPr"] is False
     assert result[1]["hasOpenPr"] is True
+
+
+# --- issue_state ---------------------------------------------------------------
+# The contract that matters: None for every ambiguous outcome, never a guess.
+# Callers cancel work on an explicit "closed", so a wrong answer here cancels real
+# retries.
+
+def _client(get_impl):
+    from bridge.claim import DispatchClient
+    return DispatchClient("http://d", "tok", get_impl, lambda *a, **k: {})
+
+
+def test_issue_state_returns_open():
+    c = _client(lambda url, headers: {"state": "open", "number": 38})
+    assert c.issue_state("misospace/llmkube-images", 38) == "open"
+
+
+def test_issue_state_returns_closed():
+    c = _client(lambda url, headers: {"state": "closed", "number": 38})
+    assert c.issue_state("misospace/llmkube-images", 38) == "closed"
+
+
+def test_issue_state_encodes_repo_and_number_in_the_query():
+    seen = {}
+
+    def get(url, headers):
+        seen["url"] = url
+        return {"state": "open"}
+
+    _client(get).issue_state("misospace/llmkube-images", 38)
+    assert "/api/issues/state?" in seen["url"]
+    # the slash in the repo must survive as a value, not split the path
+    assert "repo=misospace%2Fllmkube-images" in seen["url"]
+    assert "number=38" in seen["url"]
+
+
+def test_issue_state_none_on_http_error():
+    """http_get raises for status, so a 404 arrives as an exception -> unknown."""
+    def boom(url, headers):
+        raise RuntimeError("404 Not Found")
+
+    assert _client(boom).issue_state("o/n", 1) is None
+
+
+def test_issue_state_none_on_non_dict_response():
+    assert _client(lambda url, headers: ["unexpected"]).issue_state("o/n", 1) is None
+    assert _client(lambda url, headers: None).issue_state("o/n", 1) is None
+
+
+def test_issue_state_none_when_state_missing_or_empty():
+    assert _client(lambda url, headers: {"number": 1}).issue_state("o/n", 1) is None
+    assert _client(lambda url, headers: {"state": ""}).issue_state("o/n", 1) is None
+    assert _client(lambda url, headers: {"state": 42}).issue_state("o/n", 1) is None
+
+
+def test_issue_state_normalises_case_and_whitespace():
+    assert _client(lambda url, headers: {"state": "OPEN"}).issue_state("o/n", 1) == "open"
+    assert _client(lambda url, headers: {"state": " Closed "}).issue_state("o/n", 1) == "closed"
+
+
+def test_issue_state_none_for_an_unrecognised_state():
+    """An unknown value must read as unknown, not as 'not closed'.
+
+    Passing it through would silently bypass the caller's check: reconcile_failures
+    only skips on an explicit "closed", so any other string quietly means "retry".
+    None is the same behaviour but honest about why.
+    """
+    for weird in ("merged", "draft", "locked", "unknown", "OPENISH"):
+        assert _client(lambda url, headers: {"state": weird}).issue_state("o/n", 1) is None

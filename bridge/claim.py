@@ -1,9 +1,15 @@
 import logging
 import re
 from typing import Callable, Optional
+from urllib.parse import urlencode
 from bridge.models import ClaimedItem
 
 logger = logging.getLogger("bridge.claim")
+
+# The only issue states issue_state will report. Anything else is reported as
+# unknown (None), so a caller fails open instead of acting on a value it does not
+# understand.
+ISSUE_STATES = frozenset({"open", "closed"})
 
 # Injected transports so the client is testable without network.
 # http_get(url, headers) -> parsed JSON ; http_post(url, headers, json) -> parsed JSON | None
@@ -170,6 +176,42 @@ class DispatchClient:
         """Transition a PR-fix item's status (QUEUED/FIXED/BLOCKED/...)."""
         payload = {"repo": repo, "pr": pr, "status": status, "note": note}
         return self._post(f"{self._base}/api/pr-fix-queue/mark", self._headers(), payload) is not None
+
+    def issue_state(self, repo: str, number: int) -> Optional[str]:
+        """Return the cached state of repo#number ("open"/"closed"), or None if unknown.
+
+        None covers every ambiguous outcome: a 404 (the issue is not in dispatch's
+        cache), a transport error, or a malformed response. Callers MUST treat None
+        as "no answer" and proceed as they would have without the check — never as
+        "closed". Reading absence as closure would cancel legitimate work whenever
+        the lookup merely failed, which is a worse outcome than the waste such a
+        check is trying to avoid.
+
+        /api/issues/state applies no filters beyond identity, unlike /api/issues
+        (Renovate exclusion, excluded labels, open-only default), so a 404 here
+        really does mean "not cached" rather than "filtered out".
+        """
+        query = urlencode({"repo": repo, "number": number})
+        try:
+            data = self._get(f"{self._base}/api/issues/state?{query}", self._headers())
+        except Exception as e:
+            logger.warning(
+                "issue-state-lookup-failed",
+                extra={"repo": repo, "number": number, "error": repr(e)},
+            )
+            return None
+        if not isinstance(data, dict):
+            return None
+        state = data.get("state")
+        if not isinstance(state, str):
+            return None
+        state = state.strip().lower()
+        # Normalise to the documented contract. An unrecognised value (a future
+        # dispatch state, a typo, "merged") becomes None rather than being passed
+        # through: None is the fail-open answer, whereas returning an unknown string
+        # would silently read as "not closed" and quietly bypass the check the
+        # caller added it for.
+        return state if state in ISSUE_STATES else None
 
     def list_claimed(self, agent_name: str, status: str = "") -> list:
         """List issues currently claimed by *agent_name* (across all lanes).
