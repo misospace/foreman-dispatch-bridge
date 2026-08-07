@@ -109,6 +109,22 @@ def test_guard_rejects_a_traversal_reference(tmp_path):
         check_script_ref(repo, ".github/scripts/../../../../../../etc/passwd", "wf:job")
 
 
+def test_guard_rejects_a_symlink_escape(tmp_path):
+    """resolve() follows symlinks, so a link pointing out of the repo is caught.
+    Lexical normalization (os.path.normpath) collapses '..' without resolving
+    symlinks, so it keeps the traversal test green while admitting this one —
+    verified by mutation. The two cases fail for different reasons and both
+    are needed."""
+    repo = (tmp_path / "repo").resolve()
+    scripts = repo / ".github" / "scripts"
+    scripts.mkdir(parents=True)
+    outside = tmp_path / "outside.py"
+    outside.write_text("print('not a repo script')\n")
+    (scripts / "link.py").symlink_to(outside)
+    with pytest.raises(AssertionError, match="outside the repo"):
+        check_script_ref(repo, ".github/scripts/link.py", "wf:job")
+
+
 def test_guard_rejects_a_missing_script(tmp_path):
     repo = (tmp_path / "repo").resolve()
     (repo / ".github" / "scripts").mkdir(parents=True)
