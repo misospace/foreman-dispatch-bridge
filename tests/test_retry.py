@@ -1,3 +1,4 @@
+import pytest
 from bridge.retry import attempt_of, item_from_workload, reconcile_failures
 
 
@@ -593,4 +594,13 @@ def test_unparseable_name_yields_zero_not_a_wrong_issue():
     """0 is reported only when nothing can be recovered, and callers treat it as
     unusable — better than silently attaching work to a real issue."""
     wl = {"metadata": {"name": "wl-weird-name"}, "spec": {"repo": "a/b"}}
+    assert item_from_workload(wl).issue_number == 0
+
+
+@pytest.mark.parametrize("tail", ["²", "①", "٧", "abc", ""])
+def test_non_ascii_digit_names_yield_zero_rather_than_raising(tail):
+    """str.isdigit() is True for '²' and '①' but int() rejects them. This runs
+    outside the per-Workload try in reconcile_failures, so raising would abort
+    every remaining retry, not just this one."""
+    wl = {"metadata": {"name": f"wl-a-b-{tail}"}, "spec": {"repo": "a/b"}}
     assert item_from_workload(wl).issue_number == 0

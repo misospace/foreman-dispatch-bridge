@@ -169,7 +169,11 @@ def _issue_from_name(name: str) -> int:
     which callers treat as unusable rather than as issue 0.
     """
     tail = name.rsplit("-", 1)[-1]
-    return int(tail) if tail.isdigit() else 0
+    # isascii() before isdigit(): isdigit() is True for '²' and '①', which int()
+    # rejects. RFC 1123 keeps those out of real object names, but this function is
+    # called outside the per-Workload try in reconcile_failures, so a raise here
+    # would abort the whole sweep rather than one retry.
+    return int(tail) if tail.isascii() and tail.isdigit() else 0
 
 
 def item_from_workload(wl: dict) -> ClaimedItem:
