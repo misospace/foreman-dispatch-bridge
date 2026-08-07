@@ -247,6 +247,13 @@ def build_workload(
         spec: dict[str, object] = {
             "intent": item.intent,
             "repo": item.repo,
+            # Carried even though the pipeline is explicit: this is the only
+            # record of which issue the Workload belongs to, and the NEXT retry
+            # reconstructs its ClaimedItem from this spec. Dropping it renamed
+            # the third attempt to wl-<repo>-0 on branch issue-0 — one name and
+            # one branch shared by every third attempt in the repo, so retries
+            # force-pushed over each other.
+            "issues": [item.issue_number],
             "pipeline": _pipeline_steps(
                 item, workload_name(item), coder_agent, feedback, allow_overwrite,
                 verify_enabled=verify_enabled,

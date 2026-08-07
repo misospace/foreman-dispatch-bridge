@@ -157,6 +157,21 @@ def attempt_of(wl: dict) -> int:
         return 1
 
 
+def _issue_from_name(name: str) -> int:
+    """Recover the issue number from a Workload name (`wl-<owner>-<repo>-<n>`).
+
+    The spec used to lose `issues` on a retry, and the caller then substituted 0,
+    which silently became a real-looking issue number: the rebuilt Workload took
+    the name wl-<repo>-0 and branch issue-0, both fixed per repo, so every third
+    attempt in that repo collided on one branch. The name still carries the right
+    number at that point, so recovering it here keeps a dropped field from
+    escalating into overwritten work. Returns 0 when the suffix is not a number,
+    which callers treat as unusable rather than as issue 0.
+    """
+    tail = name.rsplit("-", 1)[-1]
+    return int(tail) if tail.isdigit() else 0
+
+
 def item_from_workload(wl: dict) -> ClaimedItem:
     """Reconstruct the ClaimedItem from a Workload so build_workload can re-render
     it (with the CURRENT gateProfile/config) on retry."""
@@ -164,10 +179,16 @@ def item_from_workload(wl: dict) -> ClaimedItem:
     spec = wl.get("spec") or {}
     labels = meta.get("labels") or {}
     ann = meta.get("annotations") or {}
-    issues = spec.get("issues") or [0]
+    issues = spec.get("issues") or []
+    number = int(issues[0]) if issues else _issue_from_name(meta.get("name") or "")
+    if not number:
+        logger.error(
+            "workload-missing-issue-number",
+            extra={"workload": meta.get("name"), "repo": spec.get("repo")},
+        )
     return ClaimedItem(
         repo=str(spec.get("repo") or ""),
-        issue_number=int(issues[0]),
+        issue_number=number,
         intent=str(spec.get("intent") or ""),
         lane=str(labels.get("lane") or ""),
         issue_id=str(ann.get(ISSUE_ID_ANNOTATION) or ""),
