@@ -52,6 +52,23 @@ def test_workflow_has_jobs_with_steps(path):
 SCRIPT_REF = re.compile(r"""(?:^|[\s"'(=])\.?/?(\.github/scripts/[\w./-]+)""")
 
 
+def check_script_ref(repo: Path, ref: str, where: str) -> None:
+    """Validate one `.github/scripts/` reference from a workflow `run:` block.
+
+    Extracted so the regression tests exercise THIS function rather than
+    pathlib's primitives. Asserting resolve()/is_relative_to() in isolation would
+    keep passing if someone restructured the caller and dropped the containment
+    check — the test would prove pathlib works, not that the guard does.
+    """
+    target = (repo / ref).resolve()
+    # Containment before existence: the character class permits '..', so a path
+    # could traverse out of the repo and satisfy is_file() against something
+    # unrelated. /etc/passwd exists — a guard that passes for the wrong reason is
+    # worse than no guard.
+    assert target.is_relative_to(repo), f"{where} references a path outside the repo: {ref}"
+    assert target.is_file(), f"{where} runs missing script {ref}"
+
+
 @pytest.mark.parametrize("path", WORKFLOWS, ids=lambda p: p.name)
 def test_referenced_local_scripts_exist(path):
     """A `run:` pointing at a repo script that does not exist fails only at
@@ -62,17 +79,7 @@ def test_referenced_local_scripts_exist(path):
     for name, job in (doc.get("jobs") or {}).items():
         for step in job.get("steps") or []:
             for ref in SCRIPT_REF.findall(step.get("run") or ""):
-                target = (repo / ref).resolve()
-                # Containment before existence: the character class permits '..',
-                # so a path could traverse out of the repo and satisfy is_file()
-                # against something entirely unrelated — a guard that passes for
-                # the wrong reason is worse than no guard.
-                assert target.is_relative_to(repo), (
-                    f"{path.name}:{name} references a path outside the repo: {ref}"
-                )
-                assert target.is_file(), (
-                    f"{path.name}:{name} runs missing script {ref}"
-                )
+                check_script_ref(repo, ref, f"{path.name}:{name}")
 
 
 @pytest.mark.parametrize(
@@ -92,15 +99,30 @@ def test_script_reference_detection_covers_common_spellings(run_line):
     assert SCRIPT_REF.findall(run_line) == [".github/scripts/x.py"]
 
 
-def test_traversal_reference_is_rejected_not_silently_accepted(tmp_path):
-    """A '..' escape must fail the containment assertion rather than pass the
-    existence one. /etc/passwd exists, so without containment this guard would
-    report success for a path that is not a repo script at all."""
+def test_guard_rejects_a_traversal_reference(tmp_path):
+    """Drive a traversal through the guard itself, so removing the containment
+    assertion fails this test. /etc/passwd exists, so the existence check alone
+    would report success for a path that is not a repo script at all."""
     repo = (tmp_path / "repo").resolve()
     (repo / ".github" / "scripts").mkdir(parents=True)
-    ref = ".github/scripts/../../../../../../etc/passwd"
-    target = (repo / ref).resolve()
-    assert not target.is_relative_to(repo)
+    with pytest.raises(AssertionError, match="outside the repo"):
+        check_script_ref(repo, ".github/scripts/../../../../../../etc/passwd", "wf:job")
+
+
+def test_guard_rejects_a_missing_script(tmp_path):
+    repo = (tmp_path / "repo").resolve()
+    (repo / ".github" / "scripts").mkdir(parents=True)
+    with pytest.raises(AssertionError, match="missing script"):
+        check_script_ref(repo, ".github/scripts/nope.py", "wf:job")
+
+
+def test_guard_accepts_a_real_script(tmp_path):
+    """The negative cases are only meaningful if the positive one passes."""
+    repo = (tmp_path / "repo").resolve()
+    scripts = repo / ".github" / "scripts"
+    scripts.mkdir(parents=True)
+    (scripts / "ok.py").write_text("print('hi')\n")
+    check_script_ref(repo, ".github/scripts/ok.py", "wf:job")
 
 
 def test_script_reference_detection_ignores_lookalikes():
