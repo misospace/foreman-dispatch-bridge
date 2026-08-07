@@ -56,13 +56,21 @@ SCRIPT_REF = re.compile(r"""(?:^|[\s"'(=])\.?/?(\.github/scripts/[\w./-]+)""")
 def test_referenced_local_scripts_exist(path):
     """A `run:` pointing at a repo script that does not exist fails only at
     schedule time, which for a weekly cron means up to a week of silence."""
-    repo = WORKFLOW_DIR.parents[1]
+    repo = WORKFLOW_DIR.parents[1].resolve()
     with open(path) as f:
         doc = yaml.safe_load(f)
     for name, job in (doc.get("jobs") or {}).items():
         for step in job.get("steps") or []:
             for ref in SCRIPT_REF.findall(step.get("run") or ""):
-                assert (repo / ref).is_file(), (
+                target = (repo / ref).resolve()
+                # Containment before existence: the character class permits '..',
+                # so a path could traverse out of the repo and satisfy is_file()
+                # against something entirely unrelated — a guard that passes for
+                # the wrong reason is worse than no guard.
+                assert target.is_relative_to(repo), (
+                    f"{path.name}:{name} references a path outside the repo: {ref}"
+                )
+                assert target.is_file(), (
                     f"{path.name}:{name} runs missing script {ref}"
                 )
 
@@ -82,6 +90,17 @@ def test_script_reference_detection_covers_common_spellings(run_line):
     """The detector is only useful if it actually finds the reference; each of
     these spellings appears in real workflows."""
     assert SCRIPT_REF.findall(run_line) == [".github/scripts/x.py"]
+
+
+def test_traversal_reference_is_rejected_not_silently_accepted(tmp_path):
+    """A '..' escape must fail the containment assertion rather than pass the
+    existence one. /etc/passwd exists, so without containment this guard would
+    report success for a path that is not a repo script at all."""
+    repo = (tmp_path / "repo").resolve()
+    (repo / ".github" / "scripts").mkdir(parents=True)
+    ref = ".github/scripts/../../../../../../etc/passwd"
+    target = (repo / ref).resolve()
+    assert not target.is_relative_to(repo)
 
 
 def test_script_reference_detection_ignores_lookalikes():
