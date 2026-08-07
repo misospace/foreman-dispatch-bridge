@@ -26,7 +26,7 @@ from bridge.retry import (
     DEFAULT_MAX_ATTEMPTS,
 )
 from bridge.prfix import (
-    reconcile_pr_fixes, drain_pr_fixes,
+    reconcile_pr_fixes, drain_pr_fixes, classify_check_runs,
     DEFAULT_PRFIX_LANE_AGENTS, ACTIONABLE_LANES, PRFIX_CREATED_BY,
 )
 from bridge.prune import prune_workloads
@@ -516,22 +516,14 @@ def _real_main() -> None:  # pragma: no cover - thin wiring, exercised in the cl
                     cr_data = http_get(check_runs_url, headers)
                     check_runs = (cr_data or {}).get("check_runs", [])
 
-                    has_failed = False
-                    has_pending = False
-
-                    for cr in check_runs:
-                        conclusion = str(cr.get("conclusion") or "").lower()
-                        status = str(cr.get("status") or "").lower()
-
-                        if conclusion in ("failed", "timed_out", "cancelled"):
-                            has_failed = True
-                        elif status in ("queued", "in_progress"):
-                            has_pending = True
-
-                    if has_failed:
-                        return "checks_failed"
-                    if has_pending:
-                        return "checks_pending"
+                    verdict = classify_check_runs(check_runs)
+                    if verdict != "ok":
+                        if not check_runs:
+                            logger.info(
+                                "prfix-no-check-runs",
+                                extra={"repo": repo, "pr": pr, "sha": head_sha},
+                            )
+                        return verdict
             except Exception as exc:
                 logger.error(
                     "prfix-check-runs-error",

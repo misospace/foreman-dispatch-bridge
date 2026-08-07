@@ -183,6 +183,50 @@ def drain_pr_fixes(list_queued, existing_prfix_names, create_workload,
     return results
 
 
+# GitHub check-run conclusions that mean "this check did not pass". The API
+# emits "failure" — never "failed". The earlier spelling matched nothing, so a
+# red PR classified as "ok" and got marked FIXED off unverified success.
+FAILING_CONCLUSIONS = frozenset(
+    {"failure", "timed_out", "cancelled", "action_required", "startup_failure", "stale"}
+)
+PENDING_STATUSES = frozenset({"queued", "in_progress", "waiting", "pending", "requested"})
+
+
+def classify_check_runs(check_runs) -> str:
+    """Classify a commit's check runs as "checks_failed", "checks_pending", or "ok".
+
+    An EMPTY set is "checks_pending", not "ok". No checks reported is not the
+    same as every check passing: during a GitHub Actions outage no run is ever
+    created, and treating that as success marked PR-fix workloads FIXED without
+    verifying anything. Dispatch then re-queued the still-unfixed PR, the drain
+    rebuilt the workload, and the coder force-pushed the branch again — six times
+    on misospace/dispatch#731 before anyone noticed. GitHub's own combined status
+    for such a commit is "pending", which is the answer this mirrors.
+
+    Lives at module level, unlike the closure it replaces, so both rules are
+    directly testable — the closure's callers all injected fakes, which is how
+    two defects survived in code that looked covered.
+    """
+    has_failed = False
+    has_pending = False
+    saw_any = False
+
+    for cr in check_runs or []:
+        saw_any = True
+        conclusion = str((cr or {}).get("conclusion") or "").lower()
+        status = str((cr or {}).get("status") or "").lower()
+        if conclusion in FAILING_CONCLUSIONS:
+            has_failed = True
+        elif status in PENDING_STATUSES or (not conclusion and status != "completed"):
+            has_pending = True
+
+    if has_failed:
+        return "checks_failed"
+    if has_pending or not saw_any:
+        return "checks_pending"
+    return "ok"
+
+
 _TERMINAL = ("Succeeded", "Completed", "Failed")
 
 

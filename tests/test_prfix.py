@@ -1,3 +1,4 @@
+import pytest
 from bridge.prfix import (
     DEFAULT_PRFIX_LANE_AGENTS,
     PRFIX_CREATED_BY,
@@ -10,6 +11,7 @@ from bridge.prfix import (
     parse_pr_fix_item,
     pr_fix_coder_for,
     prfix_workload_name,
+    classify_check_runs,
     rebuild_prfix_manifest,
     reconcile_pr_fixes,
 )
@@ -526,3 +528,84 @@ def test_build_fix_workload_stamps_verdict_policy():
     assert wl["spec"]["verdictPolicy"] == {"selfGO": ["code-fix", "ci-policy"]}
     wl = build_fix_workload(item, "llm", None, "agent", "coder")
     assert "verdictPolicy" not in wl["spec"]
+
+
+# --- classify_check_runs ------------------------------------------------
+# These exist because the logic they cover used to be a closure inside main.py
+# that every test replaced with a lambda, so two defects sat in it unnoticed.
+
+@pytest.mark.parametrize("check_runs", [[], None, ()])
+def test_no_check_runs_is_pending_not_ok(check_runs):
+    """The misospace/dispatch#731 force-push loop. During the GitHub Actions
+    outage no check run was ever created; the old code set neither flag and fell
+    through to "ok", so reconcile marked the fix FIXED without verifying
+    anything, dispatch re-queued the still-broken PR, and the coder force-pushed
+    again. GitHub's own combined status for such a commit is "pending"."""
+    assert classify_check_runs(check_runs) == "checks_pending"
+
+
+def test_failure_is_the_spelling_github_actually_emits():
+    """The old code tested for "failed", which the API never returns, so a red
+    PR classified as "ok". Verified against real check-run data."""
+    assert classify_check_runs([{"conclusion": "failure", "status": "completed"}]) == "checks_failed"
+
+
+@pytest.mark.parametrize(
+    "conclusion", ["timed_out", "cancelled", "action_required", "startup_failure", "stale"]
+)
+def test_other_non_passing_conclusions_are_failures(conclusion):
+    assert classify_check_runs([{"conclusion": conclusion, "status": "completed"}]) == "checks_failed"
+
+
+def test_all_successful_is_ok():
+    """The negative cases only mean something if the passing case still passes."""
+    runs = [{"conclusion": "success", "status": "completed"} for _ in range(3)]
+    assert classify_check_runs(runs) == "ok"
+
+
+@pytest.mark.parametrize("status", ["queued", "in_progress", "waiting", "requested"])
+def test_unfinished_checks_are_pending(status):
+    assert classify_check_runs([{"conclusion": None, "status": status}]) == "checks_pending"
+
+
+def test_a_failure_outranks_pending_and_success():
+    """A red check must not be masked by a sibling still running: reporting
+    pending would leave the workload waiting instead of retrying the fix."""
+    runs = [
+        {"conclusion": "success", "status": "completed"},
+        {"conclusion": None, "status": "in_progress"},
+        {"conclusion": "failure", "status": "completed"},
+    ]
+    assert classify_check_runs(runs) == "checks_failed"
+
+
+def test_skipped_and_neutral_do_not_count_as_failures():
+    """Skipped path filters and neutral results are normal on green PRs;
+    treating them as failures would retry fixes against healthy branches."""
+    runs = [
+        {"conclusion": "skipped", "status": "completed"},
+        {"conclusion": "neutral", "status": "completed"},
+        {"conclusion": "success", "status": "completed"},
+    ]
+    assert classify_check_runs(runs) == "ok"
+
+
+def test_outage_does_not_mark_a_fix_workload_FIXED():
+    """End-to-end guard on the actual damage: with no check runs, reconcile must
+    NOT mark FIXED and must NOT rebuild the workload (which is what re-ran the
+    coder and force-pushed). It leaves the workload for the next tick."""
+    marked, created, deleted = [], [], []
+    results = reconcile_pr_fixes(
+        list_prfix_workloads=lambda: [_wl(731, "Succeeded", attempt=1)],
+        delete_workload=deleted.append,
+        create_workload=created.append,
+        mark_pr_fix=lambda repo, pr, status, note: (
+            marked.append((repo, pr, status)) or True
+        ),
+        pr_is_mergeable=lambda repo, pr: classify_check_runs([]),
+        max_attempts=3,
+    )
+    assert marked == [], f"marked FIXED off an unverified success: {marked}"
+    assert created == [], f"rebuilt the workload, which re-runs the coder: {created}"
+    assert deleted == []
+    assert any("checks-pending" in r for r in results), results
