@@ -1,5 +1,6 @@
 import logging
 import re
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Callable, Optional
 from urllib.parse import urlencode
 from bridge.models import ClaimedItem
@@ -85,6 +86,30 @@ class DispatchClient:
         data = self._get(url, self._headers())
         return data if isinstance(data, list) else []
 
+    def queues(self, agent_name: str, lanes: list) -> dict:
+        """Fetch every lane queue in parallel and return {lane: [items]}.
+
+        Each lane is fetched concurrently via ThreadPoolExecutor so the total
+        wall-clock time is bounded by the slowest single lane rather than the
+        sum of all lane latencies.  If a single lane fails its HTTP call, the
+        error is logged and that lane's result is an empty list (the caller can
+        distinguish this from a genuinely empty queue by checking the log).
+        """
+        if not lanes:
+            return {}
+
+        results = {}
+        with ThreadPoolExecutor(max_workers=len(lanes)) as executor:
+            futures = {executor.submit(self.queue, agent_name, lane): lane for lane in lanes}
+            for future in as_completed(futures):
+                lane = futures[future]
+                try:
+                    results[lane] = future.result()
+                except Exception as exc:
+                    logger.warning("lane-fetch-failed", extra={"lane": lane, "error": str(exc)})
+                    results[lane] = []
+        return results
+
     def claim(self, item: dict, agent_name: str) -> bool:
         payload = {
             "issueId": item.get("issueId") or item.get("id"),
@@ -144,8 +169,10 @@ class DispatchClient:
         """Recover a dispatch issue id by repo+number from the lane queues
         (includeClaimed=true, so claimed items are visible). Used to backfill
         Workloads whose issue-id annotation predates bridge 0.3.0."""
+        all_queues = self.queues(agent_name, lanes)
+        # Preserve original lane order for deterministic first-match semantics.
         for lane in lanes:
-            for item in self.queue(agent_name, lane):
+            for item in all_queues.get(lane, []):
                 if not isinstance(item, dict):
                     continue
                 if item.get("repoFullName") == repo and int(_number(item) or 0) == issue_number:
@@ -163,13 +190,31 @@ class DispatchClient:
 
     def list_pr_fix_queued(self, lanes: list) -> list:
         """List QUEUED PR-fix items across the given lanes (one GET per lane,
-        concatenated). A non-list response for a lane contributes nothing."""
-        items = []
-        for lane in lanes:
+        concatenated in lane order). A non-list response for a lane contributes
+        nothing; failures are logged."""
+        if not lanes:
+            return []
+
+        def _fetch_lane(lane: str) -> list:
             url = f"{self._base}/api/pr-fix-queue/queued?lane={lane}"
             data = self._get(url, self._headers())
-            if isinstance(data, list):
-                items.extend(data)
+            return data if isinstance(data, list) else []
+
+        results = {}
+        with ThreadPoolExecutor(max_workers=len(lanes)) as executor:
+            futures = {executor.submit(_fetch_lane, lane): lane for lane in lanes}
+            for future in as_completed(futures):
+                lane = futures[future]
+                try:
+                    results[lane] = future.result()
+                except Exception as exc:
+                    logger.warning("pr-fix-lane-fetch-failed", extra={"lane": lane, "error": str(exc)})
+                    results[lane] = []
+
+        # Preserve lane order for deterministic concatenation.
+        items = []
+        for lane in lanes:
+            items.extend(results.get(lane, []))
         return items
 
     def mark_pr_fix(self, repo: str, pr: int, status: str, note: str = "") -> bool:
