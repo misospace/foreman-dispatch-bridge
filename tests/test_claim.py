@@ -428,3 +428,121 @@ def test_issue_state_none_for_an_unrecognised_state():
     """
     for weird in ("merged", "draft", "locked", "unknown", "OPENISH"):
         assert _client(lambda url, headers: {"state": weird}).issue_state("o/n", 1) is None
+
+
+# --- Parallel lane-fetching tests ---
+
+class TestFindIssueIdParallel:
+    """find_issue_id uses queues() which fetches lanes in parallel."""
+
+    def test_finds_across_parallel_lanes(self):
+        client = _client(lambda *a, **kw: [
+            {"repoFullName": "org/repo", "number": 42, "issueId": "id-42"}
+        ])
+        assert client.find_issue_id("a", ["l1", "l2"], "org/repo", 42) == "id-42"
+
+    def test_empty_lanes_returns_empty_string(self):
+        client = _client(lambda *a, **kw: [])
+        assert client.find_issue_id("a", [], "org/repo", 42) == ""
+
+
+class TestQueues:
+    """queues() fetches all lanes in parallel and returns {lane: [items]}."""
+
+    def test_returns_dict_with_lane_keys(self):
+        client = _client(lambda *a, **kw: [{"id": 1}])
+        result = client.queues("a", ["l1", "l2"])
+        assert set(result.keys()) == {"l1", "l2"}
+        assert result["l1"] == [{"id": 1}]
+        assert result["l2"] == [{"id": 1}]
+
+    def test_empty_lanes_returns_empty_dict(self):
+        client = _client(lambda *a, **kw: [])
+        result = client.queues("a", [])
+        assert result == {}
+
+    def test_lane_failure_logged_and_empty_list(self, caplog):
+        call_count = [0]
+
+        def side_effect(*a, **kw):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                raise ConnectionError("timeout")
+            return [{"id": 2}]
+
+        client = _client(side_effect)
+        result = client.queues("a", ["l1", "l2"])
+        assert result["l1"] == []
+        assert result["l2"] == [{"id": 2}]
+        assert any("lane-fetch-failed" in r.message for r in caplog.records)
+
+    def test_parallel_execution(self):
+        """All lanes are fetched concurrently (verified with a barrier)."""
+        import threading
+        barrier = threading.Barrier(3, timeout=5)
+        started = threading.Event()
+        completed = threading.Event()
+
+        def side_effect(*a, **kw):
+            started.set()
+            barrier.wait()  # synchronize all threads
+            completed.set()
+            return []
+
+        client = _client(side_effect)
+        result = client.queues("a", ["l1", "l2", "l3"])
+        assert set(result.keys()) == {"l1", "l2", "l3"}
+        assert started.is_set()
+        assert completed.is_set()
+
+
+class TestListPrFixQueuedParallel:
+    """list_pr_fix_queued fetches lanes in parallel, preserves lane order."""
+
+    def test_concatenates_in_lane_order(self):
+        call_count = [0]
+
+        def side_effect(*a, **kw):
+            call_count[0] += 1
+            return [{"id": call_count[0]}]
+
+        client = _client(side_effect)
+        result = client.list_pr_fix_queued(["NORMAL", "ESCALATED"])
+        assert len(result) == 2
+
+    def test_empty_lanes_returns_empty_list(self):
+        client = _client(lambda *a, **kw: [])
+        assert client.list_pr_fix_queued([]) == []
+
+    def test_lane_failure_logged_and_skipped(self, caplog):
+        call_count = [0]
+
+        def side_effect(*a, **kw):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                raise ConnectionError("timeout")
+            return [{"id": 2}]
+
+        client = _client(side_effect)
+        result = client.list_pr_fix_queued(["l1", "l2"])
+        assert len(result) == 1
+        assert any("pr-fix-lane-fetch-failed" in r.message for r in caplog.records)
+
+    def test_parallel_execution(self):
+        """All lanes are fetched concurrently (verified with a barrier)."""
+        import threading
+        barrier = threading.Barrier(2, timeout=5)
+        started = threading.Event()
+        completed = threading.Event()
+
+        def side_effect(*a, **kw):
+            started.set()
+            barrier.wait()  # synchronize all threads
+            completed.set()
+            return []
+
+        client = _client(side_effect)
+        result = client.list_pr_fix_queued(["NORMAL", "ESCALATED"])
+        assert result == []
+        assert started.is_set()
+        assert completed.is_set()
