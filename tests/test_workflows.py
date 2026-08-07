@@ -49,7 +49,11 @@ def test_workflow_has_jobs_with_steps(path):
 # Matches a repo-script path anywhere in a run block, including a leading ./ and
 # surrounding quotes. Token-prefix matching missed all of those, which would have
 # made this check quietly vacuous the first time someone wrote `./.github/...`.
-SCRIPT_REF = re.compile(r"""(?:^|[\s"'(=])\.?/?(\.github/scripts/[\w./-]+)""")
+# The '/' in the prefix class catches refs rooted at an expression or variable
+# ("${{ github.workspace }}/.github/scripts/x.py"). Without it those match
+# nothing and pass unchecked, which is worse than not guarding at all — the
+# suite would report the workflows covered while skipping exactly those refs.
+SCRIPT_REF = re.compile(r"""(?:^|[\s"'(=/])\.?/?(\.github/scripts/[\w./-]+)""")
 
 
 def check_script_ref(repo: Path, ref: str, where: str) -> None:
@@ -91,6 +95,8 @@ def test_referenced_local_scripts_exist(path):
         "python '.github/scripts/x.py'",
         "cd repo && python .github/scripts/x.py --flag",
         "bash(.github/scripts/x.py)",
+        "python ${{ github.workspace }}/.github/scripts/x.py",
+        "python $GITHUB_WORKSPACE/.github/scripts/x.py",
     ],
 )
 def test_script_reference_detection_covers_common_spellings(run_line):
