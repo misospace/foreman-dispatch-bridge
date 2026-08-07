@@ -1,3 +1,4 @@
+import pytest
 from bridge.retry import attempt_of, item_from_workload, reconcile_failures
 
 
@@ -218,7 +219,11 @@ def test_reconcile_retry_carries_feedback_into_pipeline_prompt():
                        "llm", {}, max_attempts=3,
                        feedback_for=lambda name: "Reviewer said: add tests")
     spec = r.created[0]["spec"]
-    assert "pipeline" in spec and "issues" not in spec
+    # Both are set on purpose. The CRD guarantees "Pipeline takes precedence over
+    # Issues ... when both are set", so carrying issues cannot double-decompose —
+    # and it is the only record of which issue this Workload belongs to when the
+    # NEXT retry reconstructs its ClaimedItem from this spec.
+    assert "pipeline" in spec and spec["issues"] == [7]
     code_step = spec["pipeline"][0]
     assert code_step["payload"]["prompt"] == "Reviewer said: add tests"
     # verify + review steps present and chained
@@ -282,7 +287,7 @@ def test_reconcile_gateless_feedback_retry_builds_code_review_no_verify():
                        feedback_for=lambda name: "Reviewer said: add tests",
                        verify_enabled=False)
     spec = r.created[0]["spec"]
-    assert "pipeline" in spec and "issues" not in spec
+    assert "pipeline" in spec and spec["issues"] == [7]
     steps = spec["pipeline"]
     kinds = [s["kind"] for s in steps]
     assert kinds == ["issue-fix", "review"]
@@ -535,3 +540,67 @@ def test_retries_normally_when_the_escalation_lookup_raises():
     out = _reconcile(r, declared_escalation_for=boom, park_for_human=lambda i, x: True)
     assert out == ["wl-misospace-dispatch-7:retry:2/3"]
     assert len(r.created) == 1
+
+
+# --- issue-number survival across retries --------------------------------
+# The wl-<repo>-0 / issue-0 collision: attempt 2 dropped spec.issues, attempt 3
+# read it back as `or [0]`, and the rebuilt Workload took a name and branch that
+# are FIXED PER REPO. Every third attempt in a repo then shared one branch and
+# force-pushed over the last one's work.
+
+def test_retry_spec_keeps_the_issue_number_for_the_next_rebuild():
+    """Attempt 2 goes down the pipeline path; losing issues here is what made
+    attempt 3 fabricate issue 0."""
+    r = _Recorder([_failed_wl("wl-a-b-7", attempt=1)])
+    reconcile_failures("foreman-coder", r.list_failed, r.create, r.delete,
+                       "llm", {}, max_attempts=3,
+                       feedback_for=lambda name: "Reviewer said: add tests")
+    assert r.created[0]["spec"]["issues"] == [7]
+
+
+def test_third_attempt_keeps_the_real_issue_number():
+    """Drive attempt 2 -> attempt 3 and assert the Workload is not renamed to
+    wl-a-b-0. This is the end-to-end shape of the bug."""
+    r1 = _Recorder([_failed_wl("wl-a-b-7", attempt=1)])
+    reconcile_failures("foreman-coder", r1.list_failed, r1.create, r1.delete,
+                       "llm", {}, max_attempts=3,
+                       feedback_for=lambda name: "findings")
+    second = r1.created[0]
+    second.setdefault("metadata", {}).setdefault("annotations", {})["foreman.llmkube.dev/attempt"] = "2"
+    second["status"] = {"phase": "Failed"}
+
+    r2 = _Recorder([second])
+    reconcile_failures("foreman-coder", r2.list_failed, r2.create, r2.delete,
+                       "llm", {}, max_attempts=3,
+                       feedback_for=lambda name: "more findings")
+    third = r2.created[0]
+    assert third["spec"]["issues"] == [7]
+    name = third["metadata"]["name"]
+    assert name.endswith("-7") and not name.endswith("-0"), (
+        f"renamed to {name} — a -0 name is fixed per repo, so every third "
+        "attempt in this repo would share one Workload and one branch"
+    )
+
+
+def test_issue_number_recovered_from_name_when_spec_lost_it():
+    """Defence in depth for Workloads already in the cluster with no issues
+    field: the name still carries the number, so use it instead of 0."""
+    wl = {"metadata": {"name": "wl-misospace-dispatch-681"},
+          "spec": {"repo": "misospace/dispatch", "intent": "x"}}
+    assert item_from_workload(wl).issue_number == 681
+
+
+def test_unparseable_name_yields_zero_not_a_wrong_issue():
+    """0 is reported only when nothing can be recovered, and callers treat it as
+    unusable — better than silently attaching work to a real issue."""
+    wl = {"metadata": {"name": "wl-weird-name"}, "spec": {"repo": "a/b"}}
+    assert item_from_workload(wl).issue_number == 0
+
+
+@pytest.mark.parametrize("tail", ["²", "①", "٧", "abc", ""])
+def test_non_ascii_digit_names_yield_zero_rather_than_raising(tail):
+    """str.isdigit() is True for '²' and '①' but int() rejects them. This runs
+    outside the per-Workload try in reconcile_failures, so raising would abort
+    every remaining retry, not just this one."""
+    wl = {"metadata": {"name": f"wl-a-b-{tail}"}, "spec": {"repo": "a/b"}}
+    assert item_from_workload(wl).issue_number == 0
