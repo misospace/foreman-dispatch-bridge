@@ -4,6 +4,7 @@ Provides exponential-backoff retry on transient failures (timeouts, 429, 5xx)
 while passing through semantic client errors (4xx except 429) immediately.
 """
 
+import re
 import time
 import logging
 
@@ -13,6 +14,34 @@ logger = logging.getLogger(__name__)
 
 # Status codes that indicate a transient condition worth retrying.
 _RETRYABLE_STATUS_CODES = frozenset((429, 500, 502, 503, 504))
+
+
+# ── Token redaction helpers ────────────────────────────────────────────
+
+# Matches common token patterns: Bearer tokens, raw token strings, and
+# Authorization header values.  The pattern is intentionally broad to catch
+# leaked secrets in error messages and tracebacks.
+_TOKEN_REDACTION_PATTERNS = [
+    # "Authorization: Bearer <token>" or "Bearer <token>"
+    re.compile(r"(Bearer )[A-Za-z0-9_\-\.]+", re.IGNORECASE),
+    # "Authorization: Basic <encoded>"
+    re.compile(r"(Basic )[A-Za-z0-9+/=]+", re.IGNORECASE),
+]
+
+_REDACTED = "***"
+
+
+def redact_tokens(text: str) -> str:
+    """Return *text* with any embedded tokens replaced by ``***``.
+
+    This is used to sanitise error messages, tracebacks, and log lines
+    before they reach the operator-visible output so that secrets never
+    leak through exception chains.
+    """
+    result = text
+    for pattern in _TOKEN_REDACTION_PATTERNS:
+        result = pattern.sub(r"\1" + _REDACTED, result)
+    return result
 
 
 def _is_retryable(exc_or_response):
@@ -69,7 +98,7 @@ def retry_request(func, *, retries=2, base_delay=0.5, max_delay=16.0, backoff_fa
             delay = min(base_delay * (backoff_factor ** attempt), max_delay)
             logger.warning(
                 "http-retry: attempt %d failed (%s), retrying in %.1fs",
-                attempt + 1, exc, delay,
+                attempt + 1, redact_tokens(str(exc)), delay,
             )
             time.sleep(delay)
             continue
@@ -90,7 +119,12 @@ def retry_request(func, *, retries=2, base_delay=0.5, max_delay=16.0, backoff_fa
                 delay = min(base_delay * (backoff_factor ** attempt), max_delay)
 
             if attempt == retries:
-                resp.raise_for_status()
+                try:
+                    resp.raise_for_status()
+                except requests.HTTPError as exc:
+                    raise requests.HTTPError(
+                        redact_tokens(str(exc)), response=exc.response
+                    ) from None
             logger.warning(
                 "http-retry: attempt %d returned %d, retrying in %.1fs",
                 attempt + 1, resp.status_code, delay,

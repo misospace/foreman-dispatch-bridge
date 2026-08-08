@@ -32,6 +32,7 @@ from bridge.prfix import (
 from bridge.prune import prune_workloads
 from bridge.reconcile import reconcile_stranded_issues, release_stuck_claims
 from bridge.review_transition import transition_to_in_review
+from bridge.http_retry import redact_tokens
 
 logger = logging.getLogger("bridge.main")
 
@@ -317,7 +318,7 @@ def _real_main() -> None:  # pragma: no cover - thin wiring, exercised in the cl
         except Exception as e:
             logger.warning(
                 "declared-escalation-read-failed",
-                extra={"workload": workload_name, "error": repr(e)},
+                extra={"workload": workload_name, "error": redact_tokens(repr(e))},
             )
             return None
 
@@ -366,7 +367,7 @@ def _real_main() -> None:  # pragma: no cover - thin wiring, exercised in the cl
         except Exception as e:
             logger.warning(
                 "branch-evidence-lookup-failed",
-                extra={"workload": workload_name, "error": repr(e)},
+                extra={"workload": workload_name, "error": redact_tokens(repr(e))},
             )
             return False
 
@@ -376,7 +377,7 @@ def _real_main() -> None:  # pragma: no cover - thin wiring, exercised in the cl
         except Exception as e:  # feedback is best-effort; never block a retry on it
             logger.warning(
                 "feedback-lookup-failed",
-                extra={"workload": workload_name, "error": repr(e)},
+                extra={"workload": workload_name, "error": redact_tokens(repr(e))},
             )
             return ""
 
@@ -389,7 +390,7 @@ def _real_main() -> None:  # pragma: no cover - thin wiring, exercised in the cl
                 extra={
                     "repo": item.repo,
                     "issue_number": item.issue_number,
-                    "error": repr(e),
+                    "error": redact_tokens(repr(e)),
                 },
             )
             return ""
@@ -454,7 +455,7 @@ def _real_main() -> None:  # pragma: no cover - thin wiring, exercised in the cl
                         "repo": repo,
                         "pr": pr,
                         "status": status,
-                        "error": repr(e),
+                        "error": redact_tokens(repr(e)),
                     },
                 )
                 return False
@@ -488,62 +489,62 @@ def _real_main() -> None:  # pragma: no cover - thin wiring, exercised in the cl
             except Exception as e:
                 logger.warning(
                     "prfix-mergeable-check-failed",
-                    extra={"repo": repo, "pr": pr, "error": repr(e)},
+                            extra={"repo": repo, "pr": pr, "error": redact_tokens(repr(e))},
                 )
                 return "checks_pending"
 
-            # A merged or closed PR cannot be advanced by anything the loop does.
-            # Checked before mergeable_state because GitHub reports
-            # mergeable_state=unknown for a merged PR, which reads as mergeable and
-            # sent the fix loop through its full attempt budget — including the
-            # escalation to the frontier coder — against work that had already
-            # landed (#118).
-            lifecycle = classify_pr_lifecycle(data)
-            if lifecycle:
-                return lifecycle
+        # A merged or closed PR cannot be advanced by anything the loop does.
+        # Checked before mergeable_state because GitHub reports
+        # mergeable_state=unknown for a merged PR, which reads as mergeable and
+        # sent the fix loop through its full attempt budget — including the
+        # escalation to the frontier coder — against work that had already
+        # landed (#118).
+        lifecycle = classify_pr_lifecycle(data)
+        if lifecycle:
+            return lifecycle
 
-            state = str((data or {}).get("mergeable_state") or "").lower()
+        state = str((data or {}).get("mergeable_state") or "").lower()
 
-            # Existing guards for dirty/conflicting
-            if state == "dirty":
-                return "dirty"
-            if state == "conflicting":
-                return "conflicting"
+        # Existing guards for dirty/conflicting
+        if state == "dirty":
+            return "dirty"
+        if state == "conflicting":
+            return "conflicting"
 
-            # Treat unstable (required checks failed) as checks_failed
-            if state == "unstable":
-                return "checks_failed"
-            # blocked means required statuses are pending or other blockers
-            if state == "blocked":
-                return "checks_pending"
+        # Treat unstable (required checks failed) as checks_failed
+        if state == "unstable":
+            return "checks_failed"
+        # blocked means required statuses are pending or other blockers
+        if state == "blocked":
+            return "checks_pending"
 
-            # Additionally verify check-runs on the head commit
-            try:
-                head_sha = (data or {}).get("head", {}).get("sha")
-                if head_sha:
-                    check_runs_url = (
-                        f"https://api.github.com/repos/{repo}/commits/"
-                        f"{head_sha}/check-runs"
-                    )
-                    cr_data = http_get(check_runs_url, headers)
-                    check_runs = (cr_data or {}).get("check_runs", [])
-
-                    verdict = classify_check_runs(check_runs)
-                    if verdict != "ok":
-                        if not check_runs:
-                            logger.info(
-                                "prfix-no-check-runs",
-                                extra={"repo": repo, "pr": pr, "sha": head_sha},
-                            )
-                        return verdict
-            except Exception as exc:
-                logger.error(
-                    "prfix-check-runs-error",
-                    extra={"repo": repo, "pr": pr, "error": repr(exc)},
+        # Additionally verify check-runs on the head commit
+        try:
+            head_sha = (data or {}).get("head", {}).get("sha")
+            if head_sha:
+                check_runs_url = (
+                    f"https://api.github.com/repos/{repo}/commits/"
+                    f"{head_sha}/check-runs"
                 )
-                # If we can't reach the API, fall through to "ok" (optimistic)
+                cr_data = http_get(check_runs_url, headers)
+                check_runs = (cr_data or {}).get("check_runs", [])
 
-            return "ok"
+                verdict = classify_check_runs(check_runs)
+                if verdict != "ok":
+                    if not check_runs:
+                        logger.info(
+                            "prfix-no-check-runs",
+                            extra={"repo": repo, "pr": pr, "sha": head_sha},
+                        )
+                    return verdict
+        except Exception as exc:
+            logger.error(
+                "prfix-check-runs-error",
+                extra={"repo": repo, "pr": pr, "error": redact_tokens(repr(exc))},
+            )
+            # If we can't reach the API, fall through to "ok" (optimistic)
+
+        return "ok"
 
         for line in reconcile_pr_fixes(
             list_prfix_workloads, delete_workload, create_workload,

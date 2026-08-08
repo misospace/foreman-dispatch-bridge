@@ -10,6 +10,7 @@ from bridge.http_retry import (
     retry_request,
     http_get,
     http_post,
+    redact_tokens,
 )
 
 
@@ -338,3 +339,80 @@ class TestHttpPost:
         mock_post.assert_called_once_with(
             "http://example.com", headers={}, json={"key": "val"}, timeout=30,
         )
+
+
+# ── redact_tokens — token sanitisation ────────────────────────────────
+
+class TestRedactTokens:
+    def test_redacts_bearer_token(self):
+        msg = "Authorization: Bearer ghp_abc123XYZ"
+        assert redact_tokens(msg) == "Authorization: Bearer ***"
+
+    def test_redacts_bearer_in_error_string(self):
+        msg = "HTTPError: 401 Client Error: Unauthorized (Bearer gho_secret-token-here)"
+        result = redact_tokens(msg)
+        assert "gho_secret-token-here" not in result
+        assert "Bearer ***" in result
+
+    def test_redacts_basic_auth(self):
+        msg = "Authorization: Basic dXNlcjpwYXNz"
+        assert redact_tokens(msg) == "Authorization: Basic ***"
+
+    def test_case_insensitive_bearer(self):
+        msg = "bearer ghp_lowercase_token"
+        assert redact_tokens(msg) == "bearer ***"
+
+    def test_no_false_positives(self):
+        msg = "The bearer of good news arrived"
+        # "bearer" followed by a space and then a non-token word should not match
+        # since the regex requires [A-Za-z0-9_\-\.]+ after "Bearer "
+        result = redact_tokens(msg)
+        assert "bearer" in result.lower()
+
+    def test_empty_string(self):
+        assert redact_tokens("") == ""
+
+    def test_no_token_in_text(self):
+        msg = "All systems operational"
+        assert redact_tokens(msg) == msg
+
+    def test_multiple_tokens_redacted(self):
+        msg = "Bearer ghp_first and Bearer gho_second"
+        result = redact_tokens(msg)
+        assert "ghp_first" not in result
+        assert "gho_second" not in result
+        assert result.count("***") == 2
+
+    def test_token_in_repr_exception(self):
+        # Simulate repr() of an exception that contains a token
+        msg = "HTTPError('401 Client Error: Unauthorized for url: https://api.example.com (Bearer ghp_leaked)')"
+        result = redact_tokens(msg)
+        assert "ghp_leaked" not in result
+        assert "Bearer ***" in result
+
+
+# ── retry_request redacts tokens from HTTPError messages ───────────────
+
+class TestRetryRequestTokenRedaction:
+    @patch("bridge.http_retry.time.sleep", return_value=None)
+    def test_http_error_message_redacted(self, mock_sleep):
+        """When retries are exhausted with a 5xx error, the raised HTTPError
+        must not contain the raw token from the request."""
+
+        def func():
+            resp = MagicMock(spec=requests.Response)
+            resp.status_code = 503
+            resp.request = MagicMock()
+            resp.request.headers = {"Authorization": "Bearer ghp_secret_token_123"}
+            # Make raise_for_status actually raise for 5xx
+            resp.raise_for_status.side_effect = requests.HTTPError(
+                "503 Server Error: Service Unavailable (Bearer ghp_secret_token_123)"
+            )
+            resp.raise_for_status.side_effect.response = resp
+            return resp
+
+        with pytest.raises(requests.exceptions.HTTPError) as exc_info:
+            retry_request(func, retries=1, base_delay=0.01)
+
+        error_msg = str(exc_info.value)
+        assert "ghp_secret_token_123" not in error_msg
