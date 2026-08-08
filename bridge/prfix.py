@@ -365,8 +365,9 @@ def reconcile_pr_fixes(list_prfix_workloads, delete_workload, create_workload,
                 results.append(f"{name}:checks-pending:{attempt}/{max_attempts}")
             # Mark failed, still conflicting, or Failed phase -> retry or BLOCKED
             elif attempt < max_attempts:
-                delete_workload(name)
+                # Create before delete so a failed create does not lose the fix.
                 create_workload(rebuild_prfix_manifest(wl, attempt + 1))
+                delete_workload(name)
                 tag = "not-mergeable-retry" if merge_status in (
                     "dirty", "conflicting", "checks_failed"
                 ) else "retry"
@@ -381,8 +382,9 @@ def reconcile_pr_fixes(list_prfix_workloads, delete_workload, create_workload,
                 nxt = next_prfix_lane(current_lane)
                 next_coder = pr_fix_coder_for(nxt, lane_agents or {}) if nxt else None
                 if nxt and next_coder and next_coder != _prfix_current_coder(wl):
-                    delete_workload(name)
+                    # Create before delete so a failed create does not lose the fix.
                     create_workload(escalate_prfix_manifest(wl, nxt, next_coder))
+                    delete_workload(name)
                     results.append(f"{name}:escalate:{current_lane or 'NORMAL'}->{nxt}")
                 else:
                     if repo and pr is not None:

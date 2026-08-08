@@ -707,3 +707,52 @@ def test_classify_pr_lifecycle(data, expected):
     """mergeable_state=unknown on a merged PR reads as mergeable, which is what
     sent the loop through its full budget — so merged must win over it."""
     assert classify_pr_lifecycle(data) == expected
+
+
+def test_retry_creates_before_deleting():
+    """If create_workload raises after delete_workload, the fix is lost.
+    Verify that create happens before delete on the retry path so a failed
+    create leaves the original workload intact."""
+    order = []
+    def track_create(m):
+        order.append("create")
+        raise RuntimeError("simulated failure")
+
+    def track_delete(n):
+        order.append("delete")
+
+    reconcile_pr_fixes(
+        list_prfix_workloads=lambda: [_wl(10, "Failed", attempt=1)],
+        delete_workload=track_delete,
+        create_workload=track_create,
+        mark_pr_fix=lambda *a: True,
+        pr_is_mergeable=lambda repo, pr: None,
+        max_attempts=3,
+    )
+    # Create must come before delete so the original workload survives a failed create.
+    assert order == ["create"]
+
+
+def test_escalation_creates_before_deleting():
+    """If create_workload raises after delete_workload, the fix is lost.
+    Verify that create happens before delete on the escalation path so a
+    failed create leaves the original workload intact."""
+    order = []
+    def track_create(m):
+        order.append("create")
+        raise RuntimeError("simulated failure")
+
+    def track_delete(n):
+        order.append("delete")
+
+    reconcile_pr_fixes(
+        list_prfix_workloads=lambda: [_wl(10, "Failed", attempt=3)],
+        delete_workload=track_delete,
+        create_workload=track_create,
+        mark_pr_fix=lambda *a: True,
+        pr_is_mergeable=lambda repo, pr: None,
+        max_attempts=3,
+        lane_agents={"ESCALATED": "escalated-coder"},
+    )
+    # Create must come before delete so the original workload survives a failed create.
+    assert order == ["create"]
