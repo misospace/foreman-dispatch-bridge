@@ -7,6 +7,9 @@ on:
 permissions:
   contents: write
   packages: write
+  # Required so the Trivy SARIF upload step can publish findings to the
+  # repository's Security tab.
+  security-events: write
 
 jobs:
   publish:
@@ -22,7 +25,66 @@ jobs:
       - name: Version from tag
         id: v
         run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
-      - name: Build and push
+      - name: Build image
+        # Build the image locally (push: false, load: true) so the Trivy scans
+        # below can inspect it before any tag is published to ghcr.io. If a
+        # critical/high CVE is found we never push.
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7
+        with:
+          context: .
+          push: false
+          load: true
+          tags: |
+            ghcr.io/misospace/foreman-dispatch-bridge:${{ steps.v.outputs.version }}
+            ghcr.io/misospace/foreman-dispatch-bridge:latest
+          labels: |
+            org.opencontainers.image.source=https://github.com/misospace/foreman-dispatch-bridge
+      - name: Scan versioned image
+        uses: aquasecurity/trivy-action@a9c7b0f06e461e9d4b4d1711f154ee024b8d7ab8 # v0.36.0
+        with:
+          image-ref: ghcr.io/misospace/foreman-dispatch-bridge:${{ steps.v.outputs.version }}
+          format: sarif
+          output: trivy-versioned.sarif
+          # Gate the release on CRITICAL/HIGH vulns in the OS packages and
+          # language libraries bundled into the image.
+          exit-code: "1"
+          severity: CRITICAL,HIGH
+          vuln-type: os,library
+          # Vulns without a published fix are reported in the Security tab via
+          # the SARIF upload below, but do not block the release on their own.
+          ignore-unfixed: true
+          hide-progress: true
+      - name: Scan latest image
+        # The "latest" tag is published in this same workflow, so it must be
+        # scanned independently — gating only the versioned tag would let a
+        # CVE introduced between releases ride the mutable tag.
+        uses: aquasecurity/trivy-action@a9c7b0f06e461e9d4b4d1711f154ee024b8d7ab8 # v0.36.0
+        with:
+          image-ref: ghcr.io/misospace/foreman-dispatch-bridge:latest
+          format: sarif
+          output: trivy-latest.sarif
+          exit-code: "1"
+          severity: CRITICAL,HIGH
+          vuln-type: os,library
+          ignore-unfixed: true
+          hide-progress: true
+      - name: Upload Trivy versioned scan results to GitHub Security tab
+        # `if: always()` so the SARIF is published even when the scan step
+        # failed, letting reviewers see the offending vulns in the Security
+        # tab rather than only in the workflow log.
+        uses: github/codeql-action/upload-sarif@404bd795832c959ffb8efae2b1b4cc1aafc82058 # v3.37.6
+        if: always()
+        with:
+          sarif_file: trivy-versioned.sarif
+      - name: Upload Trivy latest scan results to GitHub Security tab
+        uses: github/codeql-action/upload-sarif@404bd795832c959ffb8efae2b1b4cc1aafc82058 # v3.37.6
+        if: always()
+        with:
+          sarif_file: trivy-latest.sarif
+      - name: Push image
+        # Re-tag and push now that both Trivy scans have passed. We rebuild
+        # instead of `docker push`-ing the loaded image so buildx metadata
+        # (labels, provenance) is reproducible on every release.
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7
         with:
           context: .
