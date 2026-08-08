@@ -11,10 +11,3 @@ line-length = 120
 [tool.ruff.lint]
 select = ["E", "F"]
 ignore = ["E501"]
-
-[tool.pytest.ini_options]
-minversion = "9.0"
-pythonpath = ["."]
-testpaths = ["tests"]
-addopts = ["--strict-markers"]
-filterwarnings = ["error"]
