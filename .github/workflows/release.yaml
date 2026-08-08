@@ -72,12 +72,12 @@ jobs:
         # `if: always()` so the SARIF is published even when the scan step
         # failed, letting reviewers see the offending vulns in the Security
         # tab rather than only in the workflow log.
-        uses: github/codeql-action/upload-sarif@c4dd10e44af883a891fe31ced449bcb4a6728b9b # v3.37.6
+        uses: github/codeql-action/upload-sarif@5595ccaf912efad79be6eef63a5619ff05969be3 # v4.37.6
         if: always()
         with:
           sarif_file: trivy-versioned.sarif
       - name: Upload Trivy latest scan results to GitHub Security tab
-        uses: github/codeql-action/upload-sarif@c4dd10e44af883a891fe31ced449bcb4a6728b9b # v3.37.6
+        uses: github/codeql-action/upload-sarif@5595ccaf912efad79be6eef63a5619ff05969be3 # v4.37.6
         if: always()
         with:
           sarif_file: trivy-latest.sarif
