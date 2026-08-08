@@ -26,7 +26,7 @@ from bridge.retry import (
     DEFAULT_MAX_ATTEMPTS,
 )
 from bridge.prfix import (
-    reconcile_pr_fixes, drain_pr_fixes, classify_check_runs,
+    reconcile_pr_fixes, drain_pr_fixes, classify_check_runs, classify_pr_lifecycle,
     DEFAULT_PRFIX_LANE_AGENTS, ACTIONABLE_LANES, PRFIX_CREATED_BY,
 )
 from bridge.prune import prune_workloads
@@ -475,6 +475,8 @@ def _real_main() -> None:  # pragma: no cover - thin wiring, exercised in the cl
                 "conflicting"    – merge conflicts
                 "checks_failed"  – required checks failed / timed out / cancelled
                 "checks_pending" – checks still queued or in progress
+                "merged"         – PR is merged; nothing left to fix
+                "closed"         – PR closed unmerged; the item is stale
             """
             headers = {"Accept": "application/vnd.github+json"}
             if github_token:
@@ -489,6 +491,16 @@ def _real_main() -> None:  # pragma: no cover - thin wiring, exercised in the cl
                     extra={"repo": repo, "pr": pr, "error": repr(e)},
                 )
                 return "checks_pending"
+
+            # A merged or closed PR cannot be advanced by anything the loop does.
+            # Checked before mergeable_state because GitHub reports
+            # mergeable_state=unknown for a merged PR, which reads as mergeable and
+            # sent the fix loop through its full attempt budget — including the
+            # escalation to the frontier coder — against work that had already
+            # landed (#118).
+            lifecycle = classify_pr_lifecycle(data)
+            if lifecycle:
+                return lifecycle
 
             state = str((data or {}).get("mergeable_state") or "").lower()
 
