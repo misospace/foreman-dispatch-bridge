@@ -14,6 +14,10 @@ jobs:
         with:
           python-version: "3.14"
       - run: pip install -r requirements.txt -r requirements-dev.txt
+      - name: Audit dependencies
+        uses: pypa/gh-action-pip-audit@v1
+        with:
+          requirements: requirements.txt
       - run: ruff check .
       - run: python -m mypy bridge/
       - run: python -m pytest tests/ -q
