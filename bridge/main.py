@@ -123,6 +123,12 @@ def run_once(
     coder-python, a Node repo to coder-node, etc. None/empty routes every lane
     to the default coder (legacy behavior).
 
+    repo_coder_agents maps a repo full name -> a coder Agent name, checked after
+    lane_coder_agents and before base_coder_agents. gateProfile.language is an
+    enum, so every repo outside its presets is "generic" and base_coder_agents
+    collapses them onto one coder; a GDScript repo and an Elixir repo both need
+    "generic" and different runtimes. None/empty is unchanged behavior.
+
     max_in_progress (when > 0) caps how many issues are worked at once. Each lane
     is drained up to the remaining headroom: claiming continues until the lane has
     no more claimable work or in_progress reaches the cap, so a backlog fills the
