@@ -12,6 +12,7 @@ from bridge.prfix import (
     pr_fix_coder_for,
     prfix_workload_name,
     classify_check_runs,
+    classify_pr_lifecycle,
     rebuild_prfix_manifest,
     reconcile_pr_fixes,
 )
@@ -609,3 +610,100 @@ def test_outage_does_not_mark_a_fix_workload_FIXED():
     assert created == [], f"rebuilt the workload, which re-runs the coder: {created}"
     assert deleted == []
     assert any("checks-pending" in r for r in results), results
+
+
+# --- terminal PRs (#118) ----------------------------------------------------
+# A Failed fix Workload used to retry purely against the attempt cap, so a merged
+# PR burned all three attempts AND escalated to the frontier coder. Observed live
+# on prfix-misospace-pr-reviewer-action-467 (merged, attempt=3, lane=ESCALATED)
+# and prfix-misospace-kubetix-327 (merged, attempt=2).
+
+@pytest.mark.parametrize("phase", ["Failed", "Succeeded", "Completed"])
+def test_merged_pr_is_resolved_not_retried(phase):
+    marks, created, deleted = [], [], []
+    out = reconcile_pr_fixes(
+        list_prfix_workloads=lambda: [_wl(467, phase, attempt=1)],
+        delete_workload=deleted.append,
+        create_workload=created.append,
+        mark_pr_fix=lambda repo, pr, status, note: marks.append((repo, pr, status)) or True,
+        pr_is_mergeable=lambda repo, pr: "merged",
+        max_attempts=3,
+    )
+    assert created == [], f"retried a merged PR: {created}"
+    assert deleted == ["prfix-o-r-467"]
+    assert marks == [("o/r", 467, "FIXED")]
+    assert out == ["prfix-o-r-467:pr-merged"]
+
+
+def test_merged_pr_does_not_escalate_at_the_attempt_cap():
+    """The expensive half of #118: at the cap the loop escalated to the frontier
+    coder rather than giving up, so a merged PR bought frontier tokens."""
+    created = []
+    out = reconcile_pr_fixes(
+        list_prfix_workloads=lambda: [_wl(467, "Failed", attempt=3)],
+        delete_workload=lambda n: None,
+        create_workload=created.append,
+        mark_pr_fix=lambda *a: True,
+        pr_is_mergeable=lambda repo, pr: "merged",
+        max_attempts=3,
+        lane_agents=DEFAULT_PRFIX_LANE_AGENTS,
+    )
+    assert created == [], f"escalated a merged PR: {created}"
+    assert out == ["prfix-o-r-467:pr-merged"]
+
+
+def test_closed_unmerged_pr_is_marked_stale():
+    marks = []
+    reconcile_pr_fixes(
+        list_prfix_workloads=lambda: [_wl(9, "Failed", attempt=1)],
+        delete_workload=lambda n: None,
+        create_workload=lambda m: (_ for _ in ()).throw(AssertionError("must not retry")),
+        mark_pr_fix=lambda repo, pr, status, note: marks.append(status) or True,
+        pr_is_mergeable=lambda repo, pr: "closed",
+        max_attempts=3,
+    )
+    assert marks == ["STALE"]
+
+
+def test_workload_is_kept_when_the_mark_fails():
+    """Deleting on a failed mark would lose the item entirely — leave the
+    tombstone so the next tick retries the mark, matching the FIXED path."""
+    deleted = []
+    out = reconcile_pr_fixes(
+        list_prfix_workloads=lambda: [_wl(467, "Failed", attempt=1)],
+        delete_workload=deleted.append,
+        create_workload=lambda m: None,
+        mark_pr_fix=lambda *a: False,
+        pr_is_mergeable=lambda repo, pr: "merged",
+        max_attempts=3,
+    )
+    assert deleted == []
+    assert out == ["prfix-o-r-467:pr-merged:mark-failed"]
+
+
+def test_open_pr_still_retries_normally():
+    """The guard must not swallow live work."""
+    created = []
+    reconcile_pr_fixes(
+        list_prfix_workloads=lambda: [_wl(5, "Failed", attempt=1)],
+        delete_workload=lambda n: None,
+        create_workload=created.append,
+        mark_pr_fix=lambda *a: True,
+        pr_is_mergeable=lambda repo, pr: "checks_failed",
+        max_attempts=3,
+    )
+    assert len(created) == 1
+
+
+@pytest.mark.parametrize("data,expected", [
+    ({"merged": True, "state": "closed", "mergeable_state": "unknown"}, "merged"),
+    ({"merged": False, "state": "closed"}, "closed"),
+    ({"merged": False, "state": "open", "mergeable_state": "clean"}, None),
+    ({"state": "OPEN"}, None),
+    ({}, None),
+    (None, None),
+])
+def test_classify_pr_lifecycle(data, expected):
+    """mergeable_state=unknown on a merged PR reads as mergeable, which is what
+    sent the loop through its full budget — so merged must win over it."""
+    assert classify_pr_lifecycle(data) == expected

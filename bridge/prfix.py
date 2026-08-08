@@ -192,6 +192,25 @@ FAILING_CONCLUSIONS = frozenset(
 PENDING_STATUSES = frozenset({"queued", "in_progress", "waiting", "pending", "requested"})
 
 
+def classify_pr_lifecycle(data) -> Optional[str]:
+    """Return "merged"/"closed" for a PR nothing can advance, else None.
+
+    Lives at module level, unlike the closure that calls it, so it is directly
+    testable — the callers all inject a fake pr_is_mergeable, which is how the
+    "failed" vs "failure" spelling bug survived in the closure until v0.6.19.
+
+    GitHub reports mergeable_state=unknown for a merged PR, which reads as
+    mergeable, so this must be checked BEFORE that field (#118).
+    """
+    if not isinstance(data, dict):
+        return None
+    if data.get("merged"):
+        return "merged"
+    if str(data.get("state") or "").lower() == "closed":
+        return "closed"
+    return None
+
+
 def classify_check_runs(check_runs) -> str:
     """Classify a commit's check runs as "checks_failed", "checks_pending", or "ok".
 
@@ -228,6 +247,9 @@ def classify_check_runs(check_runs) -> str:
 
 
 _TERMINAL = ("Succeeded", "Completed", "Failed")
+
+# PR lifecycle states that no amount of coder work can advance.
+_TERMINAL_PR = ("merged", "closed")
 
 
 def rebuild_prfix_manifest(wl: dict, attempt: int) -> dict:
@@ -311,8 +333,24 @@ def reconcile_pr_fixes(list_prfix_workloads, delete_workload, create_workload,
         try:
             attempt = int(ann.get(ATTEMPT_ANNOTATION, "1") or "1")
             merge_status = "ok"
-            if phase in ("Succeeded", "Completed") and repo and pr is not None:
+            # Consulted for EVERY terminal phase, not just Succeeded. A Failed
+            # Workload used to retry purely against the attempt cap, so a merged
+            # PR burned the whole budget and then escalated to the frontier coder
+            # to fix something that had already landed (#118).
+            if repo and pr is not None:
                 merge_status = pr_is_mergeable(repo, pr)
+
+            # A merged or closed PR is terminal: resolve the item and drop the
+            # Workload instead of retrying or escalating. Resolving it also keeps
+            # drain_pr_fixes from recreating the Workload on the next tick.
+            if merge_status in _TERMINAL_PR and repo and pr is not None:
+                outcome = "FIXED" if merge_status == "merged" else "STALE"
+                if mark_pr_fix(repo, pr, outcome, f"PR is {merge_status}; nothing left to fix"):
+                    delete_workload(name)
+                    results.append(f"{name}:pr-{merge_status}")
+                else:
+                    results.append(f"{name}:pr-{merge_status}:mark-failed")
+                continue
 
             ok = False
             if phase in ("Succeeded", "Completed") and merge_status == "ok":
