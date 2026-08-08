@@ -211,6 +211,7 @@ def reconcile_failures(
     escalation_lane: str = "",
     lane_coder_agents: Optional[dict] = None,
     base_coder_agents: Optional[dict] = None,
+    repo_coder_agents: Optional[dict] = None,
     lookup_issue_id: Optional[LookupIssueId] = None,
     feedback_for: Optional[FeedbackFor] = None,
     verify_enabled: bool = True,
@@ -241,6 +242,7 @@ def reconcile_failures(
     """
     lane_coder_agents = lane_coder_agents or {}
     base_coder_agents = base_coder_agents or {}
+    repo_coder_agents = repo_coder_agents or {}
     results = []
     for wl in list_failed():
         name = (wl.get("metadata") or {}).get("name") or "?"
@@ -373,7 +375,10 @@ def reconcile_failures(
                 gate_profile_for(item.repo, gate_profiles),
                 agent_name,
                 attempt + 1,
-                coder_agent_for(item.lane, language, lane_coder_agents, base_coder_agents),
+                coder_agent_for(
+                    item.lane, language, lane_coder_agents, base_coder_agents,
+                    repo=item.repo, repo_coder_agents=repo_coder_agents,
+                ),
                 feedback=feedback,
                 verify_enabled=verify_enabled,
                 self_go=self_go,

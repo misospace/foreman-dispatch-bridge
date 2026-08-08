@@ -7,6 +7,8 @@ from bridge.workload import (
     parse_gate_profiles,
     gate_profile_for,
     parse_self_go,
+    coder_agent_for,
+    CODER_AGENT,
 )
 
 ITEM = ClaimedItem(repo="joryirving/home-ops", issue_number=42,
@@ -367,3 +369,48 @@ def test_build_workload_attempt_alone_never_sets_overwrite():
     spec = build_workload(item, "llm", attempt=5)["spec"]
     assert "allowOverwrite" not in spec
     assert "reviseFromBranch" not in spec
+
+
+# --- per-repo coder routing -------------------------------------------------
+# gateProfile.language is an enum (go|python|rust|node|generic), so every repo
+# outside those presets is "generic" and BASE_CODER_AGENTS collapses them onto
+# one coder. windowstead (GDScript) and pinchflat (Elixir) both need "generic"
+# and different runtimes. A coder without the runtime cannot run the tests it
+# writes: windowstead#321 shipped a test file that did not parse.
+
+def test_repo_mapping_beats_language():
+    assert coder_agent_for(
+        "local", "generic", {}, {"generic": "coder", "*": "coder"},
+        repo="misospace/windowstead", repo_coder_agents={"misospace/windowstead": "coder-godot"},
+    ) == "coder-godot"
+
+
+def test_two_generic_repos_get_different_coders():
+    """The whole point: language cannot distinguish these two."""
+    m = {"misospace/windowstead": "coder-godot", "misospace/pinchflat": "coder-elixir"}
+    assert coder_agent_for("local", "generic", {}, {"*": "coder"},
+                           repo="misospace/windowstead", repo_coder_agents=m) == "coder-godot"
+    assert coder_agent_for("local", "generic", {}, {"*": "coder"},
+                           repo="misospace/pinchflat", repo_coder_agents=m) == "coder-elixir"
+
+
+def test_unmapped_repo_still_routes_by_language():
+    assert coder_agent_for(
+        "local", "python", {}, {"python": "coder-python", "*": "coder"},
+        repo="misospace/other", repo_coder_agents={"misospace/windowstead": "coder-godot"},
+    ) == "coder-python"
+
+
+def test_lane_escalation_still_outranks_the_repo_mapping():
+    """Deliberate: an escalation lane overrides, so a repo coder cannot silently
+    outrank the frontier tier. The cost is that an escalated attempt loses the
+    runtime — documented, not accidental."""
+    assert coder_agent_for(
+        "frontier", "generic", {"frontier": "coder-frontier"}, {"*": "coder"},
+        repo="misospace/windowstead", repo_coder_agents={"misospace/windowstead": "coder-godot"},
+    ) == "coder-frontier"
+
+
+def test_absent_map_is_unchanged_behaviour():
+    assert coder_agent_for("local", "node", {}, {"node": "coder-node", "*": "coder"}) == "coder-node"
+    assert coder_agent_for("local", "generic", {}, {}) == CODER_AGENT
