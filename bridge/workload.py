@@ -112,22 +112,53 @@ def parse_base_coder_agents(raw: Optional[str]) -> dict:
     return _parse_json_map(raw, "BASE_CODER_AGENTS")
 
 
+def parse_repo_coder_agents(raw: Optional[str]) -> dict:
+    """Parse the REPO_CODER_AGENTS env var (JSON object: repo -> coder Agent name).
+
+    Keyed by repo full name, like GATEPROFILE_MAP, because language cannot
+    express this: Workload.spec.gateProfile.language is an enum
+    (go|python|rust|node|generic), so every repo outside those presets is
+    "generic" and BASE_CODER_AGENTS collapses them onto one coder. windowstead
+    (GDScript) and pinchflat (Elixir) both need "generic" and both need a
+    different runtime in the coder pod. Example:
+
+        {"misospace/windowstead": "coder-godot"}
+    """
+    return _parse_json_map(raw, "REPO_CODER_AGENTS")
+
+
 def coder_agent_for(
-    lane: str, language: Optional[str], lane_coder_agents: dict, base_coder_agents: Optional[dict] = None
+    lane: str, language: Optional[str], lane_coder_agents: dict,
+    base_coder_agents: Optional[dict] = None, repo: Optional[str] = None,
+    repo_coder_agents: Optional[dict] = None,
 ) -> str:
     """Resolve a lane's coder Agent.
 
     Explicit per-lane mappings (e.g. the frontier escalation lane -> a
-    cloud-proxy coder) are language-agnostic and win outright. Otherwise the
-    base lane routes by the repo's language via base_coder_agents (exact
-    match, then its own "*" wildcard). Falls back to the lane wildcard, then
-    the hardcoded default coder.
+    cloud-proxy coder) are language-agnostic and win outright. Then an exact
+    repo match, then the repo's language via base_coder_agents (exact match,
+    then its own "*" wildcard). Falls back to the lane wildcard, then the
+    hardcoded default coder.
+
+    The repo tier exists because language cannot express a per-repo runtime:
+    gateProfile.language is an enum, so GDScript and Elixir repos are both
+    "generic" and share one coder. A coder without the repo's runtime cannot
+    run the tests it just wrote — windowstead#321 shipped a test file that did
+    not parse, because nothing executed it before the PR opened.
+
+    Kept BELOW the lane tier deliberately: an escalation lane still overrides,
+    so a repo-specific coder does not silently outrank the frontier tier. The
+    consequence is that an escalated attempt loses the runtime again.
     """
     lane_coder_agents = lane_coder_agents or {}
     base_coder_agents = base_coder_agents or {}
+    repo_coder_agents = repo_coder_agents or {}
     explicit = lane_coder_agents.get(lane)
     if explicit:
         return explicit
+    by_repo = repo_coder_agents.get(repo) if repo else None
+    if by_repo:
+        return by_repo
     if base_coder_agents:
         by_lang = base_coder_agents.get(language) or base_coder_agents.get(LANE_CODER_WILDCARD)
         if by_lang:

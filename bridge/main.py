@@ -17,6 +17,7 @@ from bridge.workload import (
     parse_self_go,
     parse_lane_coder_agents,
     parse_base_coder_agents,
+    parse_repo_coder_agents,
 )
 from bridge.retry import (
     reconcile_failures,
@@ -101,6 +102,7 @@ def run_once(
     lane_coder_agents: Optional[dict] = None,
     revision_coder_agents: Optional[dict] = None,
     base_coder_agents: Optional[dict] = None,
+    repo_coder_agents: Optional[dict] = None,
     in_progress: int = 0,
     max_in_progress: int = 0,
     verify_enabled: bool = True,
@@ -132,6 +134,7 @@ def run_once(
     lane_coder_agents = lane_coder_agents or {}
     revision_coder_agents = revision_coder_agents or {}
     base_coder_agents = base_coder_agents or {}
+    repo_coder_agents = repo_coder_agents or {}
     results = []
     for lane in lanes:
         created_here = 0
@@ -153,7 +156,10 @@ def run_once(
                 namespace,
                 gate_profile_for(item.repo, gate_profiles),
                 agent_name,
-                coder_agent=coder_agent_for(item.lane, language, lane_coder_agents, base_coder_agents),
+                coder_agent=coder_agent_for(
+                    item.lane, language, lane_coder_agents, base_coder_agents,
+                    repo=item.repo, repo_coder_agents=repo_coder_agents,
+                ),
                 revision_coder_agent=revision_coder_agent_for(item.lane, revision_coder_agents),
                 verify_enabled=verify_enabled,
                 self_go=self_go,
@@ -197,6 +203,7 @@ def _real_main() -> None:  # pragma: no cover - thin wiring, exercised in the cl
     # '{"python": "coder-python", "node": "coder-node", "go": "coder-go", "*": "coder"}'.
     # Explicit lane_coder_agents entries (e.g. frontier) still win outright.
     base_coder_agents = parse_base_coder_agents(os.environ.get("BASE_CODER_AGENTS"))
+    repo_coder_agents = parse_repo_coder_agents(os.environ.get("REPO_CODER_AGENTS"))
     # When set, exhausted Workloads outside this lane escalate into it (re-lane +
     # unclaim) instead of tombstoning. Empty disables escalation.
     escalation_lane = os.environ.get("ESCALATION_LANE", "").strip()
@@ -410,6 +417,7 @@ def _real_main() -> None:  # pragma: no cover - thin wiring, exercised in the cl
         escalation_lane=escalation_lane,
         lane_coder_agents=lane_coder_agents,
         base_coder_agents=base_coder_agents,
+        repo_coder_agents=repo_coder_agents,
         lookup_issue_id=lookup_issue_id,
         feedback_for=feedback_for,
         verify_enabled=verify_enabled,
@@ -429,6 +437,7 @@ def _real_main() -> None:  # pragma: no cover - thin wiring, exercised in the cl
         lanes, agent_name, dispatch.claim_one, create_workload, namespace,
         gate_profiles, lane_coder_agents, revision_coder_agents,
         base_coder_agents=base_coder_agents,
+        repo_coder_agents=repo_coder_agents,
         in_progress=active, max_in_progress=max_in_progress,
         verify_enabled=verify_enabled,
         self_go=self_go,
