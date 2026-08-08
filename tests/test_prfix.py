@@ -612,6 +612,29 @@ def test_outage_does_not_mark_a_fix_workload_FIXED():
     assert any("checks-pending" in r for r in results), results
 
 
+def test_check_runs_api_error_does_not_mark_fixed():
+    """#93: When the check-runs API call fails (5xx, rate limit), pr_is_mergeable
+    must return "checks_pending" so the workload stays and reconcile retries under
+    the attempt cap — never mark FIXED off an unverified success."""
+    marked = []
+    created = []
+    deleted = []
+    results = reconcile_pr_fixes(
+        list_prfix_workloads=lambda: [_wl(467, "Succeeded", attempt=1)],
+        delete_workload=deleted.append,
+        create_workload=created.append,
+        mark_pr_fix=lambda repo, pr, status, note: marked.append((repo, pr, status)) or True,
+        # Simulate check-runs API failure by returning "checks_pending"
+        # (this is what pr_is_mergeable now returns on exception)
+        pr_is_mergeable=lambda repo, pr: "checks_pending",
+        max_attempts=3,
+    )
+    assert marked == [], f"marked FIXED off an unverified success: {marked}"
+    assert created == [], f"rebuilt the workload: {created}"
+    assert deleted == []
+    assert any("checks-pending" in r for r in results), results
+
+
 # --- terminal PRs (#118) ----------------------------------------------------
 # A Failed fix Workload used to retry purely against the attempt cap, so a merged
 # PR burned all three attempts AND escalated to the frontier coder. Observed live

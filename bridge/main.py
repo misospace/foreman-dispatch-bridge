@@ -541,7 +541,10 @@ def _real_main() -> None:  # pragma: no cover - thin wiring, exercised in the cl
                     "prfix-check-runs-error",
                     extra={"repo": repo, "pr": pr, "error": repr(exc)},
                 )
-                # If we can't reach the API, fall through to "ok" (optimistic)
+                # If we can't reach the API, treat as not mergeable (conservative).
+                # reconcile_pr_fixes retries under the attempt cap rather than
+                # falsely marking FIXED off an unverified success.
+                return "checks_pending"
 
             return "ok"
 
