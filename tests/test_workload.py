@@ -459,3 +459,20 @@ def test_lane_list_survives_the_env_json_round_trip():
     m = _parse_json_map('{"*": ["coder", "coder-strix"], "frontier": "coder-frontier"}')
     assert coder_agent_for("local", None, m, {}, issue_number=8) == "coder"
     assert coder_agent_for("local", None, m, {}, issue_number=9) == "coder-strix"
+
+
+def test_language_tier_rotates_so_every_repo_is_covered():
+    """The wildcard-lane list alone never fires for python/node/go repos — the
+    language tier resolves first. Lists must rotate at every tier or only
+    generic repos split."""
+    base = {"python": ["coder-python", "coder-strix"], "*": ["coder", "coder-strix"]}
+    assert coder_agent_for("local", "python", {}, base, issue_number=4) == "coder-python"
+    assert coder_agent_for("local", "python", {}, base, issue_number=5) == "coder-strix"
+
+
+def test_repo_tier_rotates_too():
+    m = {"misospace/windowstead": ["coder-godot", "coder-strix"]}
+    assert coder_agent_for("local", "generic", {}, {}, repo="misospace/windowstead",
+                           repo_coder_agents=m, issue_number=310) == "coder-godot"
+    assert coder_agent_for("local", "generic", {}, {}, repo="misospace/windowstead",
+                           repo_coder_agents=m, issue_number=311) == "coder-strix"

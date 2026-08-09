@@ -173,11 +173,14 @@ def coder_agent_for(
     explicit = _pick_coder(lane_coder_agents.get(lane), issue_number)
     if explicit:
         return explicit
-    by_repo = repo_coder_agents.get(repo) if repo else None
+    by_repo = _pick_coder(repo_coder_agents.get(repo), issue_number) if repo else None
     if by_repo:
         return by_repo
     if base_coder_agents:
-        by_lang = base_coder_agents.get(language) or base_coder_agents.get(LANE_CODER_WILDCARD)
+        by_lang = _pick_coder(
+            base_coder_agents.get(language) or base_coder_agents.get(LANE_CODER_WILDCARD),
+            issue_number,
+        )
         if by_lang:
             return by_lang
     return _pick_coder(lane_coder_agents.get(LANE_CODER_WILDCARD), issue_number) or CODER_AGENT
