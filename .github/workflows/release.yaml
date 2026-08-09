@@ -26,61 +26,52 @@ jobs:
         id: v
         run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
       - name: Build image
-        # Build the image locally (push: false, load: true) so the Trivy scans
-        # below can inspect it before any tag is published to ghcr.io. If a
-        # critical/high CVE is found we never push.
+        # Build to a tarball (never the daemon) so the Trivy gate below scans
+        # the exact artifact bytes this build produced. Scanning by registry
+        # ref let trivy's daemon/remote resolution pick a different image than
+        # the one just built: v0.6.22's gate kept reporting the PREVIOUS
+        # release's packages against a provably clean build. A tarball has no
+        # resolution logic to get wrong. If a critical/high CVE is found we
+        # never push.
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7
         with:
           context: .
           push: false
-          load: true
+          outputs: type=docker,dest=/tmp/bridge-image.tar
           tags: |
             ghcr.io/misospace/foreman-dispatch-bridge:${{ steps.v.outputs.version }}
             ghcr.io/misospace/foreman-dispatch-bridge:latest
           labels: |
             org.opencontainers.image.source=https://github.com/misospace/foreman-dispatch-bridge
-      - name: Scan versioned image
+      - name: Scan image
+        # One scan: both tags name the same bytes, so scanning the tarball
+        # covers versioned and latest alike.
         uses: aquasecurity/trivy-action@a9c7b0f06e461e9d4b4d1711f154ee024b8d7ab8 # v0.36.0
         with:
-          image-ref: ghcr.io/misospace/foreman-dispatch-bridge:${{ steps.v.outputs.version }}
+          input: /tmp/bridge-image.tar
           format: sarif
-          output: trivy-versioned.sarif
+          output: trivy.sarif
           # Gate the release on CRITICAL/HIGH vulns in the OS packages and
           # language libraries bundled into the image.
           exit-code: "1"
           severity: CRITICAL,HIGH
+          # Without this the action drops the severity filter for SARIF output
+          # and the exit-code gate fires on ANY severity (v0.6.22's SARIF
+          # carried a MEDIUM despite the CRITICAL,HIGH filter above).
+          limit-severities-for-sarif: true
           vuln-type: os,library
           # Vulns without a published fix are reported in the Security tab via
           # the SARIF upload below, but do not block the release on their own.
           ignore-unfixed: true
           hide-progress: true
-      - name: Scan latest image
-        # The "latest" tag is published in this same workflow, so it must be
-        # scanned independently — gating only the versioned tag would let a
-        # CVE introduced between releases ride the mutable tag.
-        uses: aquasecurity/trivy-action@a9c7b0f06e461e9d4b4d1711f154ee024b8d7ab8 # v0.36.0
-        with:
-          image-ref: ghcr.io/misospace/foreman-dispatch-bridge:latest
-          format: sarif
-          output: trivy-latest.sarif
-          exit-code: "1"
-          severity: CRITICAL,HIGH
-          vuln-type: os,library
-          ignore-unfixed: true
-          hide-progress: true
-      - name: Upload Trivy versioned scan results to GitHub Security tab
+      - name: Upload Trivy scan results to GitHub Security tab
         # `if: always()` so the SARIF is published even when the scan step
         # failed, letting reviewers see the offending vulns in the Security
         # tab rather than only in the workflow log.
         uses: github/codeql-action/upload-sarif@5595ccaf912efad79be6eef63a5619ff05969be3 # v4.37.6
         if: always()
         with:
-          sarif_file: trivy-versioned.sarif
-      - name: Upload Trivy latest scan results to GitHub Security tab
-        uses: github/codeql-action/upload-sarif@5595ccaf912efad79be6eef63a5619ff05969be3 # v4.37.6
-        if: always()
-        with:
-          sarif_file: trivy-latest.sarif
+          sarif_file: trivy.sarif
       - name: Push image
         # Re-tag and push now that both Trivy scans have passed. We rebuild
         # instead of `docker push`-ing the loaded image so buildx metadata
