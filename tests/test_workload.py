@@ -414,3 +414,48 @@ def test_lane_escalation_still_outranks_the_repo_mapping():
 def test_absent_map_is_unchanged_behaviour():
     assert coder_agent_for("local", "node", {}, {"node": "coder-node", "*": "coder"}) == "coder-node"
     assert coder_agent_for("local", "generic", {}, {}) == CODER_AGENT
+
+
+# --- lane rotation ------------------------------------------------------------
+# A lane mapping may be a list: the lane's work splits across coders by
+# issue % len. Deterministic so retries land on the coder whose backend already
+# holds the prompt cache; availability is litellm-fallback's job, not routing's.
+
+def test_lane_list_splits_by_issue_number():
+    m = {"*": ["coder", "coder-strix"]}
+    assert coder_agent_for("local", "node", m, {}, issue_number=42) == "coder"
+    assert coder_agent_for("local", "node", m, {}, issue_number=43) == "coder-strix"
+
+
+def test_same_issue_always_gets_the_same_coder():
+    """Retries must not migrate: the coder's backend holds the issue's cache."""
+    m = {"*": ["coder", "coder-strix"]}
+    picks = {coder_agent_for("local", "go", m, {}, issue_number=7) for _ in range(5)}
+    assert len(picks) == 1
+
+
+def test_explicit_lane_list_also_rotates():
+    m = {"local": ["coder", "coder-strix"], "frontier": "coder-frontier"}
+    assert coder_agent_for("local", None, m, {}, issue_number=10) == "coder"
+    assert coder_agent_for("local", None, m, {}, issue_number=11) == "coder-strix"
+    assert coder_agent_for("frontier", None, m, {}, issue_number=11) == "coder-frontier"
+
+
+def test_single_string_mapping_unchanged():
+    assert coder_agent_for("local", None, {"*": "coder"}, {}, issue_number=99) == "coder"
+
+
+def test_empty_list_falls_through_to_default():
+    assert coder_agent_for("local", None, {"*": []}, {}, issue_number=1) == CODER_AGENT
+
+
+def test_missing_issue_number_still_resolves():
+    m = {"*": ["coder", "coder-strix"]}
+    assert coder_agent_for("local", None, m, {}) == "coder"
+
+
+def test_lane_list_survives_the_env_json_round_trip():
+    """The exact string home-ops will set."""
+    m = _parse_json_map('{"*": ["coder", "coder-strix"], "frontier": "coder-frontier"}')
+    assert coder_agent_for("local", None, m, {}, issue_number=8) == "coder"
+    assert coder_agent_for("local", None, m, {}, issue_number=9) == "coder-strix"

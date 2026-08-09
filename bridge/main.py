@@ -165,6 +165,7 @@ def run_once(
                 coder_agent=coder_agent_for(
                     item.lane, language, lane_coder_agents, base_coder_agents,
                     repo=item.repo, repo_coder_agents=repo_coder_agents,
+                    issue_number=item.issue_number,
                 ),
                 revision_coder_agent=revision_coder_agent_for(item.lane, revision_coder_agents),
                 verify_enabled=verify_enabled,

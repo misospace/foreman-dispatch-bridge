@@ -378,6 +378,7 @@ def reconcile_failures(
                 coder_agent_for(
                     item.lane, language, lane_coder_agents, base_coder_agents,
                     repo=item.repo, repo_coder_agents=repo_coder_agents,
+                    issue_number=item.issue_number,
                 ),
                 feedback=feedback,
                 verify_enabled=verify_enabled,
