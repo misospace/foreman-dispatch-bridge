@@ -9,7 +9,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 WORKDIR /app
 
 COPY requirements.txt /app/requirements.txt
-RUN python -m pip install --no-cache-dir --upgrade "setuptools>=78.1.1" \
+RUN python -m pip install --no-cache-dir --upgrade pip "setuptools>=78.1.1" \
     && python -m pip install --no-cache-dir -r /app/requirements.txt
 
 COPY --chown=65534:65534 bridge /app/bridge
