@@ -48,12 +48,15 @@ jobs:
         # covers versioned and latest alike.
         uses: aquasecurity/trivy-action@a9c7b0f06e461e9d4b4d1711f154ee024b8d7ab8 # v0.36.0
         with:
-          # v0.70.0 (the action's default) reports pip's VENDORED packages —
-          # pip/_vendor ships msgpack 1.1.2 and an SBOM declaring setuptools
-          # 70.3.0 — as installed, which blocked three releases. 0.73 scopes
-          # the python analyzer correctly.
           version: v0.73.0
           input: /tmp/bridge-image.tar
+          # pip/_vendor ships msgpack 1.1.2 and an SBOM declaring setuptools
+          # 70.3.0; trivy's TAR path reports them as installed packages (the
+          # daemon path does not, which is why local scans disagreed with CI —
+          # this blocked four releases). pip's vendored tree is pip upstream's
+          # surface, not this image's. Verified both directions on the same
+          # tar: without the skip trivy exits 1, with it 0.
+          skip-dirs: usr/local/lib/python3.14/site-packages/pip/_vendor
           format: sarif
           output: trivy.sarif
           # Gate the release on CRITICAL/HIGH vulns in the OS packages and
