@@ -127,10 +127,27 @@ def parse_repo_coder_agents(raw: Optional[str]) -> dict:
     return _parse_json_map(raw, "REPO_CODER_AGENTS")
 
 
+def _pick_coder(value, issue_number: Optional[int]):
+    """Resolve a lane mapping that may be one Agent name or a list of them.
+
+    A list splits the lane's work across coders by issue number
+    (`issue % len`): stateless, so it survives the CronJob's per-tick world;
+    even-ish; and deterministic — the same issue always lands on the same
+    coder, so a retry hits the backend that already holds its prompt cache.
+    Availability is NOT this function's job: a down model is covered by
+    litellm fallbacks at request time, not by routing around it here.
+    """
+    if isinstance(value, list):
+        if not value:
+            return None
+        return value[(issue_number or 0) % len(value)]
+    return value
+
+
 def coder_agent_for(
     lane: str, language: Optional[str], lane_coder_agents: dict,
     base_coder_agents: Optional[dict] = None, repo: Optional[str] = None,
-    repo_coder_agents: Optional[dict] = None,
+    repo_coder_agents: Optional[dict] = None, issue_number: Optional[int] = None,
 ) -> str:
     """Resolve a lane's coder Agent.
 
@@ -153,17 +170,20 @@ def coder_agent_for(
     lane_coder_agents = lane_coder_agents or {}
     base_coder_agents = base_coder_agents or {}
     repo_coder_agents = repo_coder_agents or {}
-    explicit = lane_coder_agents.get(lane)
+    explicit = _pick_coder(lane_coder_agents.get(lane), issue_number)
     if explicit:
         return explicit
-    by_repo = repo_coder_agents.get(repo) if repo else None
+    by_repo = _pick_coder(repo_coder_agents.get(repo), issue_number) if repo else None
     if by_repo:
         return by_repo
     if base_coder_agents:
-        by_lang = base_coder_agents.get(language) or base_coder_agents.get(LANE_CODER_WILDCARD)
+        by_lang = _pick_coder(
+            base_coder_agents.get(language) or base_coder_agents.get(LANE_CODER_WILDCARD),
+            issue_number,
+        )
         if by_lang:
             return by_lang
-    return lane_coder_agents.get(LANE_CODER_WILDCARD) or CODER_AGENT
+    return _pick_coder(lane_coder_agents.get(LANE_CODER_WILDCARD), issue_number) or CODER_AGENT
 
 
 def revision_coder_agent_for(lane: str, revision_coder_agents: dict) -> str:
