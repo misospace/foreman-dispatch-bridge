@@ -546,3 +546,54 @@ class TestListPrFixQueuedParallel:
         assert result == []
         assert started.is_set()
         assert completed.is_set()
+
+
+# ── token redaction in error messages (issue #35) ────────────────────────────
+
+
+def test_http_get_wraps_exception_args_with_redacted_token():
+    """_http_get must redact Bearer tokens from exception args before re-raising."""
+    import requests as req
+
+    def http_get(url, headers):
+        r = req.HTTPError("500 Server Error: Bearer eyJhbGciOiJIUzI1NiJ9.secret")
+        r.response = type("Response", (), {"status_code": 500})()
+        raise r
+
+    c = DispatchClient("http://d", "tok", http_get, lambda *a: {})
+    try:
+        c._http_get("http://d/api/test")
+        assert False, "should have raised"
+    except req.HTTPError as exc:
+        msg = str(exc)
+        assert "Bearer ***" in msg
+        assert "eyJhbGciOiJIUzI1NiJ9.secret" not in msg
+
+
+def test_http_post_wraps_exception_args_with_redacted_token():
+    """_http_post must redact Bearer tokens from exception args before re-raising."""
+    import requests as req
+
+    def http_post(url, headers, payload):
+        r = req.HTTPError("500 Server Error: Bearer eyJhbGciOiJIUzI1NiJ9.secret")
+        r.response = type("Response", (), {"status_code": 500})()
+        raise r
+
+    c = DispatchClient("http://d", "tok", lambda *a: {}, http_post)
+    try:
+        c._http_post("http://d/api/test", {})
+        assert False, "should have raised"
+    except req.HTTPError as exc:
+        msg = str(exc)
+        assert "Bearer ***" in msg
+        assert "eyJhbGciOiJIUzI1NiJ9.secret" not in msg
+
+
+def test_redact_token_does_not_touch_non_tokens():
+    """_redact_token should leave non-token strings unchanged."""
+    from bridge.claim import _redact_token
+
+    assert _redact_token("no token here") == "no token here"
+    assert _redact_token("Bearer ***") == "Bearer ***"  # already redacted
+    assert _redact_token("Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.secret") == \
+        "Authorization: Bearer ***"

@@ -7,6 +7,18 @@ from bridge.models import ClaimedItem
 
 logger = logging.getLogger("bridge.claim")
 
+# Regex patterns for token redaction in error messages.
+# Matches "Bearer <token>" and "Authorization: Bearer <token>" anywhere in a string.
+_TOKEN_RE = re.compile(
+    r'(Bearer\s+)([A-Za-z0-9_\-\.]+)',
+    re.IGNORECASE,
+)
+
+
+def _redact_token(text: str) -> str:
+    """Replace Bearer tokens with *** in *text* (used for error messages)."""
+    return _TOKEN_RE.sub(r"\1***", text)
+
 # The only issue states issue_state will report. Anything else is reported as
 # unknown (None), so a caller fails open instead of acting on a value it does not
 # understand.
@@ -81,9 +93,26 @@ class DispatchClient:
     def _headers(self) -> dict:
         return {"Authorization": f"Bearer {self._token}"}
 
+    # -- thin wrappers that redact the Bearer token from any exception before
+    #    re-raising, so tracebacks / error strings never expose real tokens.
+
+    def _http_get(self, url: str) -> object:
+        try:
+            return self._get(url, self._headers())
+        except Exception as exc:
+            exc.args = tuple(_redact_token(str(a)) for a in exc.args)
+            raise
+
+    def _http_post(self, url: str, payload: dict) -> Optional[object]:
+        try:
+            return self._post(url, self._headers(), payload)
+        except Exception as exc:
+            exc.args = tuple(_redact_token(str(a)) for a in exc.args)
+            raise
+
     def queue(self, agent_name: str, lane: str) -> list:
         url = f"{self._base}/api/agents/{agent_name}/queue?lane={lane}&includeClaimed=true"
-        data = self._get(url, self._headers())
+        data = self._http_get(url)
         return data if isinstance(data, list) else []
 
     def queues(self, agent_name: str, lanes: list) -> dict:
@@ -118,7 +147,7 @@ class DispatchClient:
             "agentName": agent_name,
         }
         # http_post returns None on 409 (already claimed by someone else).
-        return self._post(f"{self._base}/api/issues/claim", self._headers(), payload) is not None
+        return self._http_post(f"{self._base}/api/issues/claim", payload) is not None
 
     def claim_one(self, agent_name: str, lane: str) -> Optional[ClaimedItem]:
         """Claim the first queue candidate that can be claimed, skipping any whose
@@ -144,7 +173,7 @@ class DispatchClient:
             "classification": {"lane": lane, "confidence": "high", "reason": reason},
         }
         url = f"{self._base}/api/issues/{item.issue_id}/lane"
-        return self._post(url, self._headers(), payload) is not None
+        return self._http_post(url, payload) is not None
 
     def unclaim(self, item: ClaimedItem, agent_name: str) -> bool:
         """Release the bridge's claim so the issue is claimable again.
@@ -158,7 +187,7 @@ class DispatchClient:
             "agentName": agent_name,
         }
         try:
-            return self._post(f"{self._base}/api/issues/unclaim", self._headers(), payload) is not None
+            return self._http_post(f"{self._base}/api/issues/unclaim", payload) is not None
         except Exception as e:
             status = getattr(e, "response", None)
             if status and getattr(status, "status_code", None) == 400:
@@ -197,7 +226,7 @@ class DispatchClient:
 
         def _fetch_lane(lane: str) -> list:
             url = f"{self._base}/api/pr-fix-queue/queued?lane={lane}"
-            data = self._get(url, self._headers())
+            data = self._http_get(url)
             return data if isinstance(data, list) else []
 
         results = {}
@@ -220,7 +249,7 @@ class DispatchClient:
     def mark_pr_fix(self, repo: str, pr: int, status: str, note: str = "") -> bool:
         """Transition a PR-fix item's status (QUEUED/FIXED/BLOCKED/...)."""
         payload = {"repo": repo, "pr": pr, "status": status, "note": note}
-        return self._post(f"{self._base}/api/pr-fix-queue/mark", self._headers(), payload) is not None
+        return self._http_post(f"{self._base}/api/pr-fix-queue/mark", payload) is not None
 
     def issue_state(self, repo: str, number: int) -> Optional[str]:
         """Return the cached state of repo#number ("open"/"closed"), or None if unknown.
@@ -238,7 +267,7 @@ class DispatchClient:
         """
         query = urlencode({"repo": repo, "number": number})
         try:
-            data = self._get(f"{self._base}/api/issues/state?{query}", self._headers())
+            data = self._http_get(f"{self._base}/api/issues/state?{query}")
         except Exception as e:
             logger.warning(
                 "issue-state-lookup-failed",
@@ -269,7 +298,7 @@ class DispatchClient:
         url = f"{self._base}/api/issues/claimed?agentName={agent_name}"
         if status:
             url += f"&status={status}"
-        data = self._get(url, self._headers())
+        data = self._http_get(url)
         return data if isinstance(data, list) else []
 
     def update_status(self, item: dict, status: str, agent_name: str) -> bool:
@@ -289,4 +318,4 @@ class DispatchClient:
             "status": status,
             "agentName": agent_name,
         }
-        return self._post(f"{self._base}/api/issues/status", self._headers(), payload) is not None
+        return self._http_post(f"{self._base}/api/issues/status", payload) is not None

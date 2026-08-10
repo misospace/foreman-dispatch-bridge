@@ -1,5 +1,6 @@
 import logging
 import os
+import re
 import time
 from typing import Callable, Optional
 from kubernetes import client, config
@@ -33,6 +34,18 @@ from bridge.prfix import (
 from bridge.prune import prune_workloads
 from bridge.reconcile import reconcile_stranded_issues, release_stuck_claims
 from bridge.review_transition import transition_to_in_review
+
+# Token redaction for error messages.
+_TOKEN_RE = re.compile(
+    r'(Bearer\s+)([A-Za-z0-9_\-\.]+)',
+    re.IGNORECASE,
+)
+
+
+def _redact_token(text: str) -> str:
+    """Replace Bearer tokens with *** in *text* (used for error messages)."""
+    return _TOKEN_RE.sub(r"\1***", text)
+
 
 logger = logging.getLogger("bridge.main")
 
@@ -331,7 +344,7 @@ def _real_main() -> None:  # pragma: no cover - thin wiring, exercised in the cl
         except Exception as e:
             logger.warning(
                 "declared-escalation-read-failed",
-                extra={"workload": workload_name, "error": repr(e)},
+                extra={"workload": workload_name, "error": _redact_token(repr(e))},
             )
             return None
 
@@ -380,7 +393,7 @@ def _real_main() -> None:  # pragma: no cover - thin wiring, exercised in the cl
         except Exception as e:
             logger.warning(
                 "branch-evidence-lookup-failed",
-                extra={"workload": workload_name, "error": repr(e)},
+                extra={"workload": workload_name, "error": _redact_token(repr(e))},
             )
             return False
 
@@ -390,7 +403,7 @@ def _real_main() -> None:  # pragma: no cover - thin wiring, exercised in the cl
         except Exception as e:  # feedback is best-effort; never block a retry on it
             logger.warning(
                 "feedback-lookup-failed",
-                extra={"workload": workload_name, "error": repr(e)},
+                extra={"workload": workload_name, "error": _redact_token(repr(e))},
             )
             return ""
 
@@ -403,7 +416,7 @@ def _real_main() -> None:  # pragma: no cover - thin wiring, exercised in the cl
                 extra={
                     "repo": item.repo,
                     "issue_number": item.issue_number,
-                    "error": repr(e),
+                    "error": _redact_token(repr(e)),
                 },
             )
             return ""
@@ -470,7 +483,7 @@ def _real_main() -> None:  # pragma: no cover - thin wiring, exercised in the cl
                         "repo": repo,
                         "pr": pr,
                         "status": status,
-                        "error": repr(e),
+                        "error": _redact_token(repr(e)),
                     },
                 )
                 return False
@@ -504,7 +517,7 @@ def _real_main() -> None:  # pragma: no cover - thin wiring, exercised in the cl
             except Exception as e:
                 logger.warning(
                     "prfix-mergeable-check-failed",
-                    extra={"repo": repo, "pr": pr, "error": repr(e)},
+                    extra={"repo": repo, "pr": pr, "error": _redact_token(repr(e))},
                 )
                 return "checks_pending"
 
