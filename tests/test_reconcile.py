@@ -132,6 +132,27 @@ class TestReconcileStrandedIssues:
 
         assert results == []
 
+    def test_non_dict_item_is_skipped(self, dispatch):
+        """A non-dict element in the claimed list is logged and skipped, not
+        crashing the tick — matching select_candidates' isinstance guard."""
+        dispatch._claimed = [42, "string", None, _claimed(number=42)]
+        workload_names = set()
+
+        results = reconcile_stranded_issues(dispatch, "test-agent", workload_names)
+
+        assert len(results) == 1
+        assert "42" in results[0]
+
+    def test_non_integer_number_is_skipped(self, dispatch):
+        """A claimed item whose 'number' is not an integer is logged and skipped,
+        not crashing the tick with a ValueError."""
+        dispatch._claimed = [_claimed(number="abc")]
+        workload_names = set()
+
+        results = reconcile_stranded_issues(dispatch, "test-agent", workload_names)
+
+        assert results == []
+
     def test_workload_naming_uses_repo_and_number(self, dispatch):
         """Workload name is derived as wl-<owner-lower>-<repo-lower>-<number>
         matching bridge.workload.workload_name."""
