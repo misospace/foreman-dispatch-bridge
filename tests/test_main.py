@@ -258,7 +258,7 @@ def test_delete_workload_respects_timeout():
     mock_api.get_namespaced_custom_object.side_effect = fake_get
 
     # Use a small timeout so the test runs quickly
-    bridge.main.delete_workload(mock_api, "default", "test-wl", timeout=3)
+    bridge.main._delete_workload(mock_api, "default", "test-wl", timeout=3)
 
     # Should have polled at most 3 times (timeout value) before getting 404
     assert call_count <= 3
@@ -282,7 +282,7 @@ def test_delete_workload_raises_timeout():
 
     timeout = 2
     with pytest.raises(TimeoutError) as exc_info:
-        bridge.main.delete_workload(mock_api, "default", "test-wl", timeout=timeout)
+        bridge.main._delete_workload(mock_api, "default", "test-wl", timeout=timeout)
 
     assert call_count == timeout
     assert str(timeout) in str(exc_info.value)
