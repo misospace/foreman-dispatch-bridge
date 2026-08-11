@@ -37,32 +37,44 @@ def reconcile_stranded_issues(
         return results
 
     for item in claimed:
-        issue_number = item.get("number")
-        if issue_number is None:
-            continue
-
-        repo = item.get("repoFullName") or ""
-        ci = ClaimedItem(repo=repo, issue_number=int(issue_number), intent="", lane="")
-        wl_name = workload_name(ci)
-
-        if wl_name in workload_names:
-            continue
-
-        if item.get("hasOpenPr"):
-            logger.info(
-                "issue %d: in-progress with no Workload but has open PR — skipping",
-                issue_number,
+        if not isinstance(item, dict):
+            logger.warning(
+                "reconcile_stranded_issues: skipping non-dict claimed item: %r",
+                item,
             )
             continue
 
         try:
+            issue_number = item.get("number")
+            if issue_number is None:
+                continue
+
+            repo = item.get("repoFullName") or ""
+            ci = ClaimedItem(
+                repo=repo,
+                issue_number=int(issue_number),
+                intent="",
+                lane="",
+            )
+            wl_name = workload_name(ci)
+
+            if wl_name in workload_names:
+                continue
+
+            if item.get("hasOpenPr"):
+                logger.info(
+                    "issue %d: in-progress with no Workload but has open PR — skipping",
+                    issue_number,
+                )
+                continue
+
             dispatch.update_status(item, "ready", agent_name)
             msg = f"issue {issue_number}: reset to ready (no Workload, no open PR)"
             logger.info(msg)
             results.append(msg)
         except Exception:
             logger.exception(
-                "issue %d: failed to reset to ready", issue_number
+                "reconcile_stranded_issues: error processing claimed item %r", item
             )
 
     return results
