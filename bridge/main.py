@@ -1,3 +1,4 @@
+import functools
 import logging
 import os
 import re
@@ -54,7 +55,7 @@ ClaimOne = Callable[[str, str], Optional[ClaimedItem]]  # (agent_name, lane) -\u
 DELETE_WORKLOAD_TIMEOUT_S = int(os.environ.get("DELETE_WORKLOAD_TIMEOUT_S", "60"))
 
 
-def delete_workload(
+def _delete_workload(
     api: client.CustomObjectsApi,
     namespace: str,
     name: str,
@@ -302,31 +303,9 @@ def _real_main() -> None:  # pragma: no cover - thin wiring, exercised in the cl
             if ((wl.get("status") or {}).get("phase") or "") not in terminal
         )
 
-    def delete_workload(name: str) -> None:
-        # Foreground delete + poll: the retry recreates the same name, so the old
-        # object (and its owned AgenticTasks) must be fully gone first.
-        try:
-            api.delete_namespaced_custom_object(
-                group="foreman.llmkube.dev", version="v1alpha1",
-                namespace=namespace, plural="workloads", name=name,
-                body=client.V1DeleteOptions(propagation_policy="Foreground"),
-            )
-        except client.exceptions.ApiException as e:
-            if e.status == 404:  # already gone
-                return
-            raise
-        for _ in range(DELETE_WORKLOAD_TIMEOUT_S):
-            try:
-                api.get_namespaced_custom_object(
-                    group="foreman.llmkube.dev", version="v1alpha1",
-                    namespace=namespace, plural="workloads", name=name,
-                )
-            except client.exceptions.ApiException as e:
-                if e.status == 404:
-                    return
-                raise
-            time.sleep(1)
-        raise TimeoutError(f"workload {name} still terminating after {DELETE_WORKLOAD_TIMEOUT_S}s")
+    delete_workload = functools.partial(
+        _delete_workload, api, namespace, timeout=DELETE_WORKLOAD_TIMEOUT_S
+    )
 
     def list_workload_tasks(workload_name: str) -> list:
         resp = api.list_namespaced_custom_object(
