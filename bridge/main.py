@@ -13,6 +13,8 @@ from bridge.workload import (
     ISSUE_ID_ANNOTATION,
     build_workload,
     coder_agent_for,
+    coder_candidates,
+    coders_saturated,
     revision_coder_agent_for,
     gate_profile_for,
     parse_gate_profiles,
@@ -20,6 +22,7 @@ from bridge.workload import (
     parse_lane_coder_agents,
     parse_base_coder_agents,
     parse_repo_coder_agents,
+    parse_coder_agent_slots,
 )
 from bridge.retry import (
     reconcile_failures,
@@ -121,6 +124,8 @@ def run_once(
     max_in_progress: int = 0,
     verify_enabled: bool = True,
     self_go: list[str] | None = None,
+    agent_load: Optional[dict] = None,
+    agent_slots: Optional[dict] = None,
 ) -> list:
     """Claim one ready issue per lane and materialize a Workload for each. Returns per-lane outcomes.
 
@@ -149,12 +154,23 @@ def run_once(
     available capacity in one tick instead of one issue per tick. in_progress is
     the current count of active (non-terminal) bridge Workloads, supplied by the
     caller. Retries are not gated here (they re-run already-claimed work).
+
+    agent_slots (coder Agent -> capacity) makes coder selection capacity-aware:
+    a lane's work goes to the candidate with the most idle slots rather than to
+    whichever the issue number happens to hash onto. When every candidate for a
+    lane is already full, the lane does not claim at all this tick — claiming
+    would only park an issue on a saturated coder and hide it from the next
+    tick's routing. agent_load is the starting per-coder count; it is updated as
+    Workloads are created so later claims in the same tick see the fresh load.
+    Empty/absent agent_slots keeps the legacy issue-number split.
     """
     gate_profiles = gate_profiles or {}
     lane_coder_agents = lane_coder_agents or {}
     revision_coder_agents = revision_coder_agents or {}
     base_coder_agents = base_coder_agents or {}
     repo_coder_agents = repo_coder_agents or {}
+    agent_slots = agent_slots or {}
+    load = dict(agent_load or {})
     results = []
     for lane in lanes:
         created_here = 0
@@ -165,22 +181,32 @@ def run_once(
                 if created_here == 0:
                     results.append(f"{lane}:capped:{in_progress}/{max_in_progress}")
                 break
+            candidates = coder_candidates(lane, lane_coder_agents)
+            if coders_saturated(candidates, load, agent_slots):
+                # Every coder this lane can reach is full. Leave the issue
+                # unclaimed so the next tick can route it once a slot frees.
+                if created_here == 0:
+                    busy = ",".join(sorted(candidates))
+                    results.append(f"{lane}:coders-busy:{busy}")
+                break
             item = claim_one(agent_name, lane)
             if item is None:
                 if created_here == 0:
                     results.append(f"{lane}:empty")
                 break
             language = gate_profiles.get(item.repo, {}).get("language")
+            coder_agent = coder_agent_for(
+                item.lane, language, lane_coder_agents, base_coder_agents,
+                repo=item.repo, repo_coder_agents=repo_coder_agents,
+                issue_number=item.issue_number,
+                agent_load=load, agent_slots=agent_slots,
+            )
             manifest = build_workload(
                 item,
                 namespace,
                 gate_profile_for(item.repo, gate_profiles),
                 agent_name,
-                coder_agent=coder_agent_for(
-                    item.lane, language, lane_coder_agents, base_coder_agents,
-                    repo=item.repo, repo_coder_agents=repo_coder_agents,
-                    issue_number=item.issue_number,
-                ),
+                coder_agent=coder_agent,
                 revision_coder_agent=revision_coder_agent_for(item.lane, revision_coder_agents),
                 verify_enabled=verify_enabled,
                 self_go=self_go,
@@ -188,6 +214,7 @@ def run_once(
             create_workload(manifest)
             in_progress += 1
             created_here += 1
+            load[coder_agent] = load.get(coder_agent, 0) + 1
             results.append(f"{lane}:created:{manifest['metadata']['name']}")
     return results
 
@@ -294,14 +321,29 @@ def _real_main() -> None:  # pragma: no cover - thin wiring, exercised in the cl
             if (wl.get("status") or {}).get("phase") == "Failed"
         ]
 
-    def count_active_workloads() -> int:
-        # Non-terminal bridge Workloads = issues currently being worked. Drives
-        # the in-progress cap so claiming stops once the working set is full.
+    def active_workloads() -> list:
+        # Non-terminal bridge Workloads = issues currently being worked.
         terminal = {"Completed", "Failed"}
-        return sum(
-            1 for wl in list_bridge_workloads()
+        return [
+            wl for wl in list_bridge_workloads()
             if ((wl.get("status") or {}).get("phase") or "") not in terminal
-        )
+        ]
+
+    def count_active_workloads() -> int:
+        # Drives the in-progress cap so claiming stops once the working set is full.
+        return len(active_workloads())
+
+    def load_by_coder_agent() -> dict:
+        # Per-coder view of the same non-terminal set the cap already counts, so
+        # capacity-aware routing costs no extra API call and keeps no state
+        # between ticks. Workloads written before coderAgentRef was stamped
+        # contribute nothing, which reads as idle rather than as a wrong agent.
+        load: dict = {}
+        for wl in active_workloads():
+            name = ((wl.get("spec") or {}).get("coderAgentRef") or {}).get("name")
+            if name:
+                load[name] = load.get(name, 0) + 1
+        return load
 
     delete_workload = functools.partial(
         _delete_workload, api, namespace, timeout=DELETE_WORKLOAD_TIMEOUT_S
@@ -407,6 +449,15 @@ def _real_main() -> None:  # pragma: no cover - thin wiring, exercised in the cl
         )
         return dispatch.escalate(item, escalation_lane, reason, agent_name)
 
+    # A Workload's lane label froze when it was created, so a retry cannot see a
+    # lane that changed since. One pass over the queues gives every retry in this
+    # tick dispatch's current view.
+    try:
+        current_lane_for = dispatch.lane_index(agent_name, lanes)
+    except Exception as e:  # best-effort; falling back to the label is the old behavior
+        current_lane_for = {}
+        logger.warning("lane-index-failed", extra={"error": _redact_token(repr(e))})
+
     # Retry failed workloads first (so a re-run this tick uses the current config),
     # then claim new work.
     for line in reconcile_failures(
@@ -418,6 +469,7 @@ def _real_main() -> None:  # pragma: no cover - thin wiring, exercised in the cl
         base_coder_agents=base_coder_agents,
         repo_coder_agents=repo_coder_agents,
         lookup_issue_id=lookup_issue_id,
+        current_lane_for=current_lane_for,
         feedback_for=feedback_for,
         verify_enabled=verify_enabled,
         self_go=self_go,
@@ -432,6 +484,8 @@ def _real_main() -> None:  # pragma: no cover - thin wiring, exercised in the cl
     # instead of claiming the whole backlog at once (0 = uncapped).
     max_in_progress = int(os.environ.get("MAX_IN_PROGRESS", "0"))
     active = count_active_workloads() if max_in_progress else 0
+    coder_slots = parse_coder_agent_slots(os.environ.get("CODER_AGENT_SLOTS"))
+    coder_load = load_by_coder_agent() if coder_slots else {}
     for line in run_once(
         lanes, agent_name, dispatch.claim_one, create_workload, namespace,
         gate_profiles, lane_coder_agents, revision_coder_agents,
@@ -440,6 +494,7 @@ def _real_main() -> None:  # pragma: no cover - thin wiring, exercised in the cl
         in_progress=active, max_in_progress=max_in_progress,
         verify_enabled=verify_enabled,
         self_go=self_go,
+        agent_load=coder_load, agent_slots=coder_slots,
     ):
         logger.info(line)
 

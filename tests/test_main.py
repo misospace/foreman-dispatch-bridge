@@ -312,3 +312,68 @@ class TestDispatchUrlWarning:
         assert not any(
             "cleartext HTTP" in record.message for record in caplog.records
         )
+
+
+# --- capacity-aware dispatch ----------------------------------------------
+
+
+def test_lane_does_not_claim_when_every_coder_is_full():
+    # The one coder the lane can reach is full: leave the issue unclaimed so the
+    # next tick can route it, rather than parking it on a saturated coder.
+    created, claimed = [], []
+    item = ClaimedItem(repo="a/b", issue_number=3, intent="fix", lane="local")
+
+    def claim_one(agent_name, lane):
+        claimed.append(lane)
+        return item
+
+    res = run_once(["local"], "foreman/coder", claim_one, created.append,
+                   namespace="llm", lane_coder_agents={"*": ["coder"]},
+                   agent_load={"coder": 1}, agent_slots={"coder": 1})
+    assert created == []
+    assert claimed == []
+    assert res == ["local:coders-busy:coder"]
+
+
+def test_lane_claims_when_one_candidate_still_has_a_slot():
+    created = []
+    item = ClaimedItem(repo="a/b", issue_number=4, intent="fix", lane="local")
+    res = run_once(["local"], "foreman/coder", _claim_stub({"local": item}),
+                   created.append, namespace="llm",
+                   lane_coder_agents={"*": ["coder", "coder-frontier"]},
+                   agent_load={"coder": 1},
+                   agent_slots={"coder": 1, "coder-frontier": 4})
+    assert res[0] == "local:created:wl-a-b-4"
+    # Issue 4 would hash to coder, but coder is full.
+    assert created[0]["spec"]["coderAgentRef"]["name"] == "coder-frontier"
+
+
+def test_load_updates_within_a_tick_so_later_claims_see_it():
+    # Two claims in one lane, one slot each: the second must not reuse the coder
+    # the first just filled.
+    created = []
+    items = [
+        ClaimedItem(repo="a/b", issue_number=2, intent="fix", lane="local"),
+        ClaimedItem(repo="a/c", issue_number=4, intent="fix", lane="local"),
+    ]
+    served = iter(items)
+
+    def claim_one(agent_name, lane):
+        return next(served, None)
+
+    run_once(["local"], "foreman/coder", claim_one, created.append, namespace="llm",
+             lane_coder_agents={"*": ["coder", "coder-frontier"]},
+             agent_slots={"coder": 1, "coder-frontier": 1})
+    picked = [c["spec"]["coderAgentRef"]["name"] for c in created]
+    assert sorted(picked) == ["coder", "coder-frontier"]
+
+
+def test_no_slots_configured_keeps_legacy_behavior():
+    created = []
+    item = ClaimedItem(repo="a/b", issue_number=4, intent="fix", lane="local")
+    res = run_once(["local"], "foreman/coder", _claim_stub({"local": item}),
+                   created.append, namespace="llm",
+                   lane_coder_agents={"*": ["coder", "coder-frontier"]},
+                   agent_load={"coder": 99})
+    assert res[0] == "local:created:wl-a-b-4"
+    assert created[0]["spec"]["coderAgentRef"]["name"] == "coder"

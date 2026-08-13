@@ -199,6 +199,27 @@ def item_from_workload(wl: dict) -> ClaimedItem:
     )
 
 
+def refresh_lane(item: ClaimedItem, current_lane_for: Optional[dict]) -> ClaimedItem:
+    """Re-read the item's lane from dispatch's current view.
+
+    item_from_workload takes the lane off the Workload's label, which was
+    stamped when the Workload was created and never updated. A lane that
+    changed since — a manual de-escalation, or a groomer reclassification —
+    was therefore invisible to every retry, which kept rebuilding the Workload
+    with the coder of the lane it no longer belonged to.
+
+    No-ops when the lookup is absent or has nothing for this issue, so a
+    dispatch hiccup leaves the Workload's own lane in place rather than
+    blanking it.
+    """
+    if not current_lane_for:
+        return item
+    lane = current_lane_for.get((item.repo, item.issue_number))
+    if not lane or lane == item.lane:
+        return item
+    return replace(item, lane=lane)
+
+
 def reconcile_failures(
     agent_name: str,
     list_failed: ListFailed,
@@ -213,6 +234,7 @@ def reconcile_failures(
     base_coder_agents: Optional[dict] = None,
     repo_coder_agents: Optional[dict] = None,
     lookup_issue_id: Optional[LookupIssueId] = None,
+    current_lane_for: Optional[dict] = None,
     feedback_for: Optional[FeedbackFor] = None,
     verify_enabled: bool = True,
     self_go: list[str] | None = None,
@@ -300,7 +322,7 @@ def reconcile_failures(
                     extra={"workload": name, "error": repr(e)},
                 )
             if reason:
-                item_h = item_from_workload(wl)
+                item_h = refresh_lane(item_from_workload(wl), current_lane_for)
                 if not item_h.issue_id and lookup_issue_id:
                     item_h = replace(item_h, issue_id=lookup_issue_id(item_h) or "")
                 parked = False
@@ -324,7 +346,7 @@ def reconcile_failures(
                     extra={"workload": name, "reason": reason},
                 )
         if attempt >= max_attempts:
-            item = item_from_workload(wl)
+            item = refresh_lane(item_from_workload(wl), current_lane_for)
             if not item.issue_id and lookup_issue_id:
                 # Workloads created before the issue-id annotation (bridge <0.3.0)
                 # carry "" forever through retries; recover the id from the
@@ -352,7 +374,7 @@ def reconcile_failures(
             else:
                 results.append(f"{name}:giveup:{attempt}/{max_attempts}")
             continue
-        item = item_from_workload(wl)
+        item = refresh_lane(item_from_workload(wl), current_lane_for)
         # Collect the previous attempt's review findings / failure BEFORE the
         # delete (the tasks go with the Workload). A retry that knows why it
         # was rejected beats a blind identical re-run.

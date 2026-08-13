@@ -208,6 +208,29 @@ class DispatchClient:
                     return str(item.get("issueId") or item.get("id") or "")
         return ""
 
+    def lane_index(self, agent_name: str, lanes: list) -> dict:
+        """Map (repo, issue number) -> the lane dispatch currently has it in.
+
+        One pass over the same lane queues find_issue_id walks
+        (includeClaimed=true, so in-flight issues are visible). Retries read a
+        Workload's lane off its label, which froze at creation time; this is how
+        they see a lane that changed underneath them (a manual de-escalation, or
+        a groomer reclassification).
+        """
+        all_queues = self.queues(agent_name, lanes)
+        index: dict = {}
+        # Reverse lane order so the first lane listed wins on a duplicate, matching
+        # find_issue_id's first-match semantics.
+        for lane in reversed(lanes):
+            for item in all_queues.get(lane, []):
+                if not isinstance(item, dict):
+                    continue
+                repo = item.get("repoFullName")
+                number = int(_number(item) or 0)
+                if repo and number:
+                    index[(str(repo), number)] = lane
+        return index
+
     def escalate(self, item: ClaimedItem, lane: str, reason: str, agent_name: str) -> bool:
         """Move a given-up issue to the escalation lane and release the claim.
 

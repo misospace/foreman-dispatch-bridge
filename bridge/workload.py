@@ -127,27 +127,100 @@ def parse_repo_coder_agents(raw: Optional[str]) -> dict:
     return _parse_json_map(raw, "REPO_CODER_AGENTS")
 
 
-def _pick_coder(value, issue_number: Optional[int]):
+def parse_coder_agent_slots(raw: Optional[str]) -> dict:
+    """Parse the CODER_AGENT_SLOTS env var (JSON object: coder Agent -> slot count).
+
+    Empty or absent -> {}, which keeps the legacy issue-number split (see
+    _pick_coder). Set it to make selection capacity-aware. The "*" key is the
+    default for any agent not named explicitly:
+
+        {"coder": 1, "coder-frontier": 8, "*": 1}
+    """
+    return _parse_json_map(raw, "CODER_AGENT_SLOTS")
+
+
+def _slots_for(agent: str, slots: dict) -> int:
+    """This agent's concurrent-Workload capacity: explicit entry, else the "*"
+    default, else 1. A non-positive or non-integer value is treated as 1 so a
+    typo cannot silently take a coder out of rotation."""
+    raw = slots.get(agent, slots.get(LANE_CODER_WILDCARD, 1))
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return 1
+    return value if value > 0 else 1
+
+
+def free_slots(agent: str, load: dict, slots: dict) -> int:
+    """Idle capacity for one coder: its slots minus the Workloads it already holds."""
+    return _slots_for(agent, slots) - int(load.get(agent, 0) or 0)
+
+
+def coder_candidates(lane: str, lane_coder_agents: dict) -> list:
+    """The language-agnostic candidates for a lane: its explicit mapping, else the
+    wildcard. Normalized to a list so a single name and a list are handled alike.
+
+    Only the lane tier is resolvable before an issue is claimed — the repo and
+    language tiers need the claimed item — so this is what a pre-claim capacity
+    check can see.
+    """
+    lane_coder_agents = lane_coder_agents or {}
+    value = lane_coder_agents.get(lane)
+    if value is None:
+        value = lane_coder_agents.get(LANE_CODER_WILDCARD)
+    if value is None:
+        return []
+    return list(value) if isinstance(value, list) else [value]
+
+
+def coders_saturated(candidates: list, load: dict, slots: dict) -> bool:
+    """True when every candidate is already at capacity.
+
+    False when slots are unconfigured: without declared capacity there is no
+    basis to hold work back, so the legacy behavior stands.
+    """
+    if not slots or not candidates:
+        return False
+    return all(free_slots(a, load or {}, slots) <= 0 for a in candidates)
+
+
+def _pick_coder(value, issue_number: Optional[int], load: Optional[dict] = None,
+                slots: Optional[dict] = None):
     """Resolve a lane mapping that may be one Agent name or a list of them.
 
-    A list splits the lane's work across coders by issue number
-    (`issue % len`): stateless, so it survives the CronJob's per-tick world;
-    even-ish; and deterministic — the same issue always lands on the same
-    coder, so a retry hits the backend that already holds its prompt cache.
-    Availability is NOT this function's job: a down model is covered by
-    litellm fallbacks at request time, not by routing around it here.
+    With CODER_AGENT_SLOTS configured, a list resolves to the candidate with the
+    most idle capacity, so work lands on a coder that can start it now instead of
+    queueing behind a busy one. Candidates tied on free capacity fall back to the
+    legacy `issue % len` choice, which keeps a retry on the backend that already
+    holds its prompt cache.
+
+    Without slots configured this is the historical split: by issue number,
+    stateless (it survives the CronJob's per-tick world), even-ish, and
+    deterministic. That split is load-oblivious, so coders of very different
+    throughput still got an equal share — a single-slot local model and an
+    uncapped cloud proxy each took half a lane.
+
+    Model availability is still NOT this function's job: a down model is covered
+    by litellm fallbacks at request time. This routes on declared capacity, not
+    on health.
     """
-    if isinstance(value, list):
-        if not value:
-            return None
-        return value[(issue_number or 0) % len(value)]
-    return value
+    if not isinstance(value, list):
+        return value
+    if not value:
+        return None
+    if slots:
+        free = [free_slots(agent, load or {}, slots) for agent in value]
+        best = max(free)
+        tied = [agent for agent, f in zip(value, free) if f == best]
+        return tied[(issue_number or 0) % len(tied)]
+    return value[(issue_number or 0) % len(value)]
 
 
 def coder_agent_for(
     lane: str, language: Optional[str], lane_coder_agents: dict,
     base_coder_agents: Optional[dict] = None, repo: Optional[str] = None,
     repo_coder_agents: Optional[dict] = None, issue_number: Optional[int] = None,
+    agent_load: Optional[dict] = None, agent_slots: Optional[dict] = None,
 ) -> str:
     """Resolve a lane's coder Agent.
 
@@ -166,24 +239,37 @@ def coder_agent_for(
     Kept BELOW the lane tier deliberately: an escalation lane still overrides,
     so a repo-specific coder does not silently outrank the frontier tier. The
     consequence is that an escalated attempt loses the runtime again.
+
+    agent_load (coder -> Workloads it currently holds) and agent_slots (coder ->
+    capacity) make the choice within a tier's candidate list capacity-aware. They
+    do not reorder the tiers: a tier that resolves still wins outright, so a
+    busy repo-specific coder is never bypassed for a lane wildcard that lacks
+    the repo's runtime.
     """
     lane_coder_agents = lane_coder_agents or {}
     base_coder_agents = base_coder_agents or {}
     repo_coder_agents = repo_coder_agents or {}
-    explicit = _pick_coder(lane_coder_agents.get(lane), issue_number)
+    load = agent_load or {}
+    slots = agent_slots or {}
+    explicit = _pick_coder(lane_coder_agents.get(lane), issue_number, load, slots)
     if explicit:
         return explicit
-    by_repo = _pick_coder(repo_coder_agents.get(repo), issue_number) if repo else None
+    by_repo = (
+        _pick_coder(repo_coder_agents.get(repo), issue_number, load, slots) if repo else None
+    )
     if by_repo:
         return by_repo
     if base_coder_agents:
         by_lang = _pick_coder(
             base_coder_agents.get(language) or base_coder_agents.get(LANE_CODER_WILDCARD),
-            issue_number,
+            issue_number, load, slots,
         )
         if by_lang:
             return by_lang
-    return _pick_coder(lane_coder_agents.get(LANE_CODER_WILDCARD), issue_number) or CODER_AGENT
+    return (
+        _pick_coder(lane_coder_agents.get(LANE_CODER_WILDCARD), issue_number, load, slots)
+        or CODER_AGENT
+    )
 
 
 def revision_coder_agent_for(lane: str, revision_coder_agents: dict) -> str:
