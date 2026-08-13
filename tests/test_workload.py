@@ -8,6 +8,11 @@ from bridge.workload import (
     gate_profile_for,
     parse_self_go,
     coder_agent_for,
+    coder_candidates,
+    coders_saturated,
+    parse_coder_agent_slots,
+    _pick_coder,
+    _slots_for,
     CODER_AGENT,
 )
 
@@ -476,3 +481,88 @@ def test_repo_tier_rotates_too():
                            repo_coder_agents=m, issue_number=310) == "coder-godot"
     assert coder_agent_for("local", "generic", {}, {}, repo="misospace/windowstead",
                            repo_coder_agents=m, issue_number=311) == "coder-strix"
+
+
+# --- capacity-aware coder selection ---------------------------------------
+
+
+def test_parse_coder_agent_slots_empty_is_empty_dict():
+    assert parse_coder_agent_slots("") == {}
+    assert parse_coder_agent_slots(None) == {}
+
+
+def test_pick_coder_without_slots_is_legacy_issue_split():
+    # No slots configured: unchanged issue % len behavior.
+    agents = ["coder", "coder-frontier"]
+    assert _pick_coder(agents, 4) == "coder"
+    assert _pick_coder(agents, 5) == "coder-frontier"
+
+
+def test_pick_coder_prefers_the_agent_with_free_slots():
+    # coder is full, coder-frontier is idle: the issue number would have picked
+    # coder, capacity picks the one that can start now.
+    agents = ["coder", "coder-frontier"]
+    slots = {"coder": 1, "coder-frontier": 4}
+    assert _pick_coder(agents, 4, {"coder": 1}, slots) == "coder-frontier"
+
+
+def test_pick_coder_prefers_idle_local_over_busy_cloud():
+    agents = ["coder", "coder-frontier"]
+    slots = {"coder": 1, "coder-frontier": 4}
+    assert _pick_coder(agents, 5, {"coder-frontier": 4}, slots) == "coder"
+
+
+def test_pick_coder_ties_fall_back_to_issue_number():
+    # Equal free capacity: deterministic on issue number, so a retry lands on the
+    # backend that already holds its prompt cache.
+    agents = ["coder", "coder-frontier"]
+    slots = {"coder": 2, "coder-frontier": 2}
+    assert _pick_coder(agents, 4, {}, slots) == "coder"
+    assert _pick_coder(agents, 5, {}, slots) == "coder-frontier"
+
+
+def test_pick_coder_unlisted_agent_defaults_to_wildcard_then_one():
+    assert _slots_for("coder", {"coder": 3}) == 3
+    assert _slots_for("other", {"coder": 3, "*": 5}) == 5
+    assert _slots_for("other", {"coder": 3}) == 1
+
+
+def test_slots_for_rejects_bad_values_rather_than_benching_a_coder():
+    # A typo must not silently take a coder out of rotation.
+    assert _slots_for("coder", {"coder": 0}) == 1
+    assert _slots_for("coder", {"coder": -2}) == 1
+    assert _slots_for("coder", {"coder": "two"}) == 1
+
+
+def test_pick_coder_single_element_and_string_unchanged():
+    slots = {"coder": 1}
+    assert _pick_coder(["coder"], 7, {"coder": 9}, slots) == "coder"
+    assert _pick_coder("coder", 7, {"coder": 9}, slots) == "coder"
+    assert _pick_coder([], 7, {}, slots) is None
+
+
+def test_coder_candidates_resolves_lane_then_wildcard():
+    agents = {"*": ["coder"], "frontier": ["coder-frontier"]}
+    assert coder_candidates("frontier", agents) == ["coder-frontier"]
+    assert coder_candidates("local", agents) == ["coder"]
+    assert coder_candidates("local", {"local": "solo"}) == ["solo"]
+    assert coder_candidates("local", {}) == []
+
+
+def test_coders_saturated_only_when_every_candidate_is_full():
+    slots = {"coder": 1, "coder-frontier": 2}
+    assert coders_saturated(["coder"], {"coder": 1}, slots) is True
+    assert coders_saturated(["coder", "coder-frontier"], {"coder": 1}, slots) is False
+    # Unconfigured slots never hold work back.
+    assert coders_saturated(["coder"], {"coder": 99}, {}) is False
+    assert coders_saturated([], {}, slots) is False
+
+
+def test_coder_agent_for_picks_free_slot_within_the_lane_tier():
+    agents = {"*": ["coder", "coder-frontier"]}
+    slots = {"coder": 1, "coder-frontier": 4}
+    # Issue 4 would hash to coder; coder is full, so capacity wins.
+    assert coder_agent_for(
+        "local", None, agents, issue_number=4,
+        agent_load={"coder": 1}, agent_slots=slots,
+    ) == "coder-frontier"

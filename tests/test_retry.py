@@ -1,5 +1,6 @@
 import pytest
-from bridge.retry import attempt_of, item_from_workload, reconcile_failures
+from bridge.models import ClaimedItem
+from bridge.retry import attempt_of, item_from_workload, reconcile_failures, refresh_lane
 
 
 def _failed_wl(name, repo="misospace/dispatch", issue=7, attempt=None, lane="local", issue_id="id-7"):
@@ -604,3 +605,28 @@ def test_non_ascii_digit_names_yield_zero_rather_than_raising(tail):
     every remaining retry, not just this one."""
     wl = {"metadata": {"name": f"wl-a-b-{tail}"}, "spec": {"repo": "a/b"}}
     assert item_from_workload(wl).issue_number == 0
+
+
+# --- lane refresh ----------------------------------------------------------
+
+
+def test_refresh_lane_prefers_dispatch_over_the_frozen_label():
+    # The Workload label froze at creation; dispatch has since moved the issue.
+    item = ClaimedItem(repo="a/b", issue_number=38, intent="fix", lane="frontier")
+    assert refresh_lane(item, {("a/b", 38): "local"}).lane == "local"
+
+
+def test_refresh_lane_noops_without_a_lookup_or_a_match():
+    item = ClaimedItem(repo="a/b", issue_number=38, intent="fix", lane="frontier")
+    assert refresh_lane(item, None).lane == "frontier"
+    assert refresh_lane(item, {}).lane == "frontier"
+    assert refresh_lane(item, {("a/other", 1): "local"}).lane == "frontier"
+
+
+def test_refresh_lane_keeps_every_other_field():
+    item = ClaimedItem(repo="a/b", issue_number=38, intent="fix",
+                       lane="frontier", issue_id="abc123")
+    out = refresh_lane(item, {("a/b", 38): "local"})
+    assert (out.repo, out.issue_number, out.intent, out.issue_id) == (
+        "a/b", 38, "fix", "abc123",
+    )
