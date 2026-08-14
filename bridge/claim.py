@@ -234,11 +234,17 @@ class DispatchClient:
     def escalate(self, item: ClaimedItem, lane: str, reason: str, agent_name: str) -> bool:
         """Move a given-up issue to the escalation lane and release the claim.
 
-        Unclaim first, then lane: if set_lane fails the issue is at least
-        released (so something else can pick it up). If unclaim fails the
-        issue stays in its original lane — no partial escalation.
+        Set the lane first, release the claim last: this keeps the operation
+        atomic from the bridge's point of view. If ``set_lane`` fails the
+        issue is still claimed in its original lane (so reconcile_failures
+        will retry next tick). If ``unclaim`` fails after a successful lane
+        move, the issue is in the escalation lane and still claimed — the
+        next tick re-attempts the release rather than re-claiming into the
+        original lane with a stale deterministic Workload name.
         """
-        return self.unclaim(item, agent_name) and self.set_lane(item, lane, reason)
+        if not self.set_lane(item, lane, reason):
+            return False
+        return self.unclaim(item, agent_name)
 
     def list_pr_fix_queued(self, lanes: list) -> list:
         """List QUEUED PR-fix items across the given lanes (one GET per lane,
