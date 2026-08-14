@@ -4,7 +4,7 @@ import os
 import re
 import time
 import urllib.parse
-from typing import Callable, Optional
+from typing import Any, Callable, Dict, List, Optional
 from kubernetes import client, config
 from bridge.env import validate_env
 from bridge.logging_setup import configure as configure_logging
@@ -734,3 +734,185 @@ def _real_main() -> None:  # pragma: no cover - thin wiring, exercised in the cl
 
 if __name__ == "__main__":
     _real_main()
+
+
+# ---------------------------------------------------------------------------
+# BridgeRuntime: testable seam for the per-cycle k8s queries.
+# ---------------------------------------------------------------------------
+#
+# The closures in _real_main (count_active_workloads, list_terminal_candidates,
+# list_workload_tasks, etc.) all wrap a CustomObjectsApi + namespace pair. The
+# helpers below take those two as arguments and are exercised directly by
+# tests/test_bridge_runtime.py; BridgeRuntime is a thin wrapper that bundles
+# them up for _real_main to call.
+#
+# Phases that indicate a Workload no longer needs reconcile attention.
+_TERMINAL_PHASES = frozenset({"Succeeded", "Failed", "Cancelled", "Timeout"})
+
+
+def _list_workloads_by_label(
+    api: client.CustomObjectsApi,
+    namespace: str,
+    label_selector: str,
+) -> List[Dict[str, Any]]:
+    """Return all Workload items matching *label_selector* in *namespace*."""
+    response = api.list_namespaced_custom_object(
+        group="foreman.llmkube.dev",
+        version="v1alpha1",
+        namespace=namespace,
+        plural="workloads",
+        label_selector=label_selector,
+    )
+    return list(response.get("items", []))
+
+
+def _list_bridge_workloads(
+    api: client.CustomObjectsApi, namespace: str
+) -> List[Dict[str, Any]]:
+    """List Workloads labelled with ``created-by=dispatch-bridge``."""
+    return _list_workloads_by_label(api, namespace, "created-by=dispatch-bridge")
+
+
+def _list_failed_workloads(
+    api: client.CustomObjectsApi, namespace: str
+) -> List[Dict[str, Any]]:
+    """List Workloads that finished in a non-success terminal phase."""
+    failed: List[Dict[str, Any]] = []
+    for workload in _list_bridge_workloads(api, namespace):
+        phase = workload.get("status", {}).get("phase")
+        if phase in {"Failed", "Timeout", "Cancelled"}:
+            failed.append(workload)
+    return failed
+
+
+def _active_workloads(
+    api: client.CustomObjectsApi, namespace: str
+) -> List[Dict[str, Any]]:
+    """List Workloads that are still in progress (non-terminal phase)."""
+    active: List[Dict[str, Any]] = []
+    for workload in _list_bridge_workloads(api, namespace):
+        phase = workload.get("status", {}).get("phase")
+        if phase not in _TERMINAL_PHASES:
+            active.append(workload)
+    return active
+
+
+def _count_active_workloads(
+    api: client.CustomObjectsApi,
+    namespace: str,
+    *,
+    include_prfix: bool = False,
+    prfix_created_by: Optional[str] = None,
+) -> int:
+    """Count non-terminal bridge Workloads in *namespace*."""
+    workloads = _active_workloads(api, namespace)
+    if include_prfix and prfix_created_by:
+        for workload in _list_workloads_by_label(
+            api, namespace, f"created-by={prfix_created_by}"
+        ):
+            phase = workload.get("status", {}).get("phase")
+            if phase not in _TERMINAL_PHASES:
+                workloads.append(workload)
+    return len(workloads)
+
+
+def _load_by_coder_agent(
+    api: client.CustomObjectsApi, namespace: str
+) -> Dict[str, int]:
+    """Count active bridge Workloads grouped by coderAgentRef.name."""
+    load: Dict[str, int] = {}
+    for workload in _active_workloads(api, namespace):
+        ref = (
+            workload.get("spec", {})
+            .get("coderAgentRef", {})
+            .get("name")
+        )
+        if not ref:
+            continue
+        load[ref] = load.get(ref, 0) + 1
+    return load
+
+
+def _list_terminal_candidates(
+    api: client.CustomObjectsApi,
+    namespace: str,
+    prfix_created_by: str,
+) -> List[Dict[str, Any]]:
+    """Concatenate bridge + pr-fix Workloads for pruning.
+
+    The caller filters by phase before deleting. The function does not
+    deduplicate because Kubernetes CR names are globally unique.
+    """
+    bridge = _list_bridge_workloads(api, namespace)
+    prfix = _list_workloads_by_label(
+        api, namespace, f"created-by={prfix_created_by}"
+    )
+    return list(bridge) + list(prfix)
+
+
+def _list_workload_tasks(
+    api: client.CustomObjectsApi,
+    namespace: str,
+    workload_name: str,
+) -> List[Dict[str, Any]]:
+    """Return AgenticTask items belonging to *workload_name*."""
+    response = api.list_namespaced_custom_object(
+        group="foreman.llmkube.dev",
+        version="v1alpha1",
+        namespace=namespace,
+        plural="agentictasks",
+        label_selector=f"foreman.llmkube.dev/workload={workload_name}",
+    )
+    return list(response.get("items", []))
+
+
+class BridgeRuntime:
+    """Wires the bridge's per-cycle k8s queries into testable methods.
+
+    ``_real_main`` constructs a single instance and binds the closures
+    previously defined inline to its methods. Tests instantiate the
+    class directly with a fake API.
+    """
+
+    def __init__(
+        self,
+        api: client.CustomObjectsApi,
+        namespace: str,
+        prfix_created_by: str,
+    ) -> None:
+        self.api = api
+        self.namespace = namespace
+        self.prfix_created_by = prfix_created_by
+
+    def list_bridge_workloads(self) -> List[Dict[str, Any]]:
+        return _list_bridge_workloads(self.api, self.namespace)
+
+    def list_failed_workloads(self) -> List[Dict[str, Any]]:
+        return _list_failed_workloads(self.api, self.namespace)
+
+    def active_workloads(self) -> List[Dict[str, Any]]:
+        return _active_workloads(self.api, self.namespace)
+
+    def count_active_workloads(self, *, include_prfix: bool = False) -> int:
+        return _count_active_workloads(
+            self.api,
+            self.namespace,
+            include_prfix=include_prfix,
+            prfix_created_by=self.prfix_created_by,
+        )
+
+    def load_by_coder_agent(self) -> Dict[str, int]:
+        return _load_by_coder_agent(self.api, self.namespace)
+
+    def list_terminal_candidates(self) -> List[Dict[str, Any]]:
+        return _list_terminal_candidates(
+            self.api, self.namespace, self.prfix_created_by
+        )
+
+    def list_workload_tasks(self, workload_name: str) -> List[Dict[str, Any]]:
+        return _list_workload_tasks(self.api, self.namespace, workload_name)
+
+    def delete_workload(self, name: str) -> None:
+        _delete_workload(
+            self.api, self.namespace, name, timeout=DELETE_WORKLOAD_TIMEOUT_S
+        )
