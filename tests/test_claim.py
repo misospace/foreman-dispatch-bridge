@@ -192,7 +192,7 @@ def test_unclaim_non_400_error_still_raises():
 
 
 def test_escalate_succeeds_when_unclaim_400():
-    """unclaim 400 + set_lane success -> escalation succeeds (issue is released + re-laned)."""
+    """set_lane success + unclaim 400 -> escalation succeeds (issue is moved + release is a no-op)."""
     from bridge.models import ClaimedItem
     import requests as req
 
@@ -209,24 +209,85 @@ def test_escalate_succeeds_when_unclaim_400():
     c = DispatchClient("http://d", "tok", lambda u, h: [], http_post_mixed)
     item = ClaimedItem(repo="a/b", issue_number=7, intent="t", lane="local", issue_id="id-7")
     assert c.escalate(item, "frontier", "r", "foreman-coder") is True
-    assert calls == ["http://d/api/issues/unclaim", "http://d/api/issues/id-7/lane"]
+    assert calls == ["http://d/api/issues/id-7/lane", "http://d/api/issues/unclaim"]
 
 
-def test_escalate_stops_after_failed_unclaim():
+def test_escalate_stops_after_failed_set_lane():
+    """set_lane failure -> unclaim must NOT run; issue stays claimed in original lane."""
     from bridge.models import ClaimedItem
-    # First POST (unclaim) -> None (failure); set_lane must NOT run.
+    # First POST (set_lane) -> None (failure); unclaim must NOT run.
     c, posts = _client_recording_posts(responses=[None])
     item = ClaimedItem(repo="a/b", issue_number=7, intent="t", lane="local", issue_id="id-7")
     assert c.escalate(item, "frontier", "r", "foreman-coder") is False
     assert len(posts) == 1
 
 
-def test_escalate_unclaim_then_lane():
+def test_escalate_lane_then_unclaim():
+    """Atomic escalation: lane is set BEFORE the claim is released (issue #99)."""
     from bridge.models import ClaimedItem
     c, posts = _client_recording_posts(responses=[{}, {}])
     item = ClaimedItem(repo="a/b", issue_number=7, intent="t", lane="local", issue_id="id-7")
     assert c.escalate(item, "frontier", "r", "foreman-coder") is True
-    assert [u for u, _ in posts] == ["http://d/api/issues/unclaim", "http://d/api/issues/id-7/lane"]
+    assert [u for u, _ in posts] == ["http://d/api/issues/id-7/lane", "http://d/api/issues/unclaim"]
+
+
+def test_escalate_set_lane_failure_does_not_release_claim():
+    """Issue #99: a failed set_lane must not release the claim back to the original lane.
+
+    Previously escalate() did ``unclaim and set_lane``: if the unclaim succeeded
+    but set_lane failed, the issue was released into its ORIGINAL lane while
+    reconcile_failures kept a Failed tombstone. On the next tick the issue
+    could be re-claimed with the same deterministic Workload name that now
+    collides with the tombstone -- a 409 no-op leaves the issue claimed with
+    no backing Workload. The fix orders the calls so the release is the last
+    step: a failed set_lane leaves the issue still claimed in its original
+    lane.
+    """
+    from bridge.models import ClaimedItem
+
+    posts = []
+
+    def http_post(url, headers, payload):
+        posts.append((url, payload))
+        if url.endswith("/lane"):
+            # Simulate dispatch lane endpoint down/broken.
+            return None
+        # unclaim would never be reached; provide a sentinel so any call here
+        # fails the test loudly.
+        raise AssertionError(f"unclaim must not be called when set_lane fails; got {url}")
+
+    c = DispatchClient("http://d", "tok", lambda u, h: [], http_post)
+    item = ClaimedItem(repo="a/b", issue_number=7, intent="t", lane="local", issue_id="id-7")
+    assert c.escalate(item, "frontier", "r", "foreman-coder") is False
+    # Only the set_lane attempt was made; the issue is still claimed in the
+    # original lane (no unclaim POST, no release), so reconcile_failures can
+    # safely retry without leaving a re-claimable / stalled state.
+    assert len(posts) == 1
+    assert posts[0][0] == "http://d/api/issues/id-7/lane"
+
+
+def test_escalate_set_lane_exception_does_not_release_claim():
+    """Same invariant when set_lane raises instead of returning a falsy body."""
+    from bridge.models import ClaimedItem
+
+    posts = []
+
+    def http_post(url, headers, payload):
+        posts.append((url, payload))
+        if url.endswith("/lane"):
+            raise RuntimeError("dispatch lane endpoint down")
+        raise AssertionError(f"unclaim must not be called when set_lane raises; got {url}")
+
+    c = DispatchClient("http://d", "tok", lambda u, h: [], http_post)
+    item = ClaimedItem(repo="a/b", issue_number=7, intent="t", lane="local", issue_id="id-7")
+    import pytest
+    with pytest.raises(RuntimeError):
+        c.escalate(item, "frontier", "r", "foreman-coder")
+    # Bug class: if unclaim had already run, the issue would be released into
+    # its original lane with reconcile_failures keeping a Failed tombstone.
+    # The atomic ordering must keep the claim intact.
+    assert len(posts) == 1
+    assert posts[0][0] == "http://d/api/issues/id-7/lane"
 
 
 def test_find_issue_id_scans_lanes_and_matches_repo_number():
