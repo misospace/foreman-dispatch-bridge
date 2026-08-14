@@ -26,7 +26,7 @@ ENV_VAR_RE = re.compile(r'(?:os\.environ(?:_array)?\.get|os\.environ|os\.getenv)
 
 def _env_vars_read_by_bridge() -> set[str]:
     seen: set[str] = set()
-    for path in BRIDGE_DIR.glob("*.py"):
+    for path in BRIDGE_DIR.rglob("*.py"):
         text = path.read_text(encoding="utf-8")
         seen.update(ENV_VAR_RE.findall(text))
     return seen
@@ -34,12 +34,16 @@ def _env_vars_read_by_bridge() -> set[str]:
 
 def _env_vars_documented_in_readme() -> set[str]:
     text = README_PATH.read_text(encoding="utf-8")
-    # A "documented" entry is any back-tick-wrapped token that appears in
-    # the Configuration section between `## Configuration` and the next
-    # `## ` heading. We conservatively limit the slice to that range.
+    # A "documented" entry is a back-tick-wrapped token in a table row
+    # within the Configuration section, stopping at the next `## ` heading.
     config_match = re.search(r"^## Configuration.*?(?=^## |\Z)", text, re.MULTILINE | re.DOTALL)
     section = config_match.group(0) if config_match else text
-    return set(re.findall(r"`([A-Z][A-Z0-9_]+)`", section))
+    found: set[str] = set()
+    for line in section.splitlines():
+        if not line.lstrip().startswith("|"):
+            continue
+        found.update(re.findall(r"`([A-Z][A-Z0-9_]+)`", line))
+    return found
 
 
 def test_readme_documents_every_env_var_the_bridge_reads():
