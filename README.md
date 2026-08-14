@@ -36,6 +36,7 @@ issue per lane.
 | `GATEPROFILE_MAP` | *(empty)* | JSON `{repo: GateProfile}` with `"*"` wildcard |
 | `LANE_CODER_AGENTS` | *(empty)* | JSON `{lane: coderAgentName}` with `"*"` wildcard; wins over `BASE_CODER_AGENTS` |
 | `BASE_CODER_AGENTS` | *(empty)* | JSON `{language: coderAgentName}` with `"*"` wildcard; routes the base lane's coder by the repo's `GATEPROFILE_MAP` language |
+| `CODER_AGENT_SLOTS` | `{}` | JSON map `{coderAgent: slotCount}` capping each coder's in-flight Workloads; `"*"` wildcard covers unnamed agents. Empty keeps the legacy issue-number split. |
 | `ESCALATION_LANE` | *(empty = off)* | lane exhausted issues re-lane into |
 | `RETRY_MAX_ATTEMPTS` | `3` | attempts before escalate/tombstone |
 | `PR_FIX_ENABLED` | *(off)* | enable the PR-fix drain/reconcile loop |
