@@ -333,6 +333,26 @@ def test_branch_pushed_on_push_failed_so_the_wedge_self_heals():
     assert branch_pushed([_task(verdict="NO-GO", extra={"error": "non-fast-forward"})]) is True
 
 
+def test_branch_pushed_on_remote_branch_existence_only():
+    """#132: a Workload instance may die without recording any verdict (coder
+    Jobs killed at the deadline, agent restarts) but the branch reached the
+    remote. With no task-CR evidence, the only signal is the remote itself.
+    """
+    from bridge.retry import branch_pushed
+    # No tasks at all — the wasted-cycle case: an instance died leaving the
+    # branch on the remote but no AgenticTask verdict in the Workload's status.
+    assert branch_pushed([], remote_branch_exists=True) is True
+    # Local task-CR evidence is also absent (NO-GO without PUSH-FAILED) but the
+    # remote check still authorises overwrite.
+    assert branch_pushed(
+        [_task(verdict="NO-GO", extra={"error": "model timeout"})],
+        remote_branch_exists=True,
+    ) is True
+    # And the inverse: a clean local scan that says no does not override the
+    # remote saying yes.
+    assert branch_pushed([], remote_branch_exists=False) is False
+
+
 # --- closed-issue precondition -------------------------------------------------
 # A closed issue cannot be advanced, so neither a retry nor an escalation is worth
 # an attempt. Observed on wl-misospace-llmkube-images-38: Failed at attempt 1 for an

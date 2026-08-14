@@ -3,6 +3,7 @@ import logging
 import os
 import re
 import time
+import urllib.parse
 from typing import Callable, Optional
 from kubernetes import client, config
 from bridge.env import validate_env
@@ -274,9 +275,11 @@ def _real_main() -> None:  # pragma: no cover - thin wiring, exercised in the cl
     prune_completed_after_h = int(os.environ.get("PRUNE_COMPLETED_AFTER_HOURS", "6"))
     prune_failed_after_h = int(os.environ.get("PRUNE_FAILED_AFTER_HOURS", "48"))
 
-    def http_get(url, headers):
+    def http_get(url, headers, allow_404=False):
         from bridge.http_retry import http_get as _http_get
         r = _http_get(url, headers=headers)
+        if allow_404 and r.status_code == 404:
+            return r
         r.raise_for_status()
         return r.json()
 
@@ -404,13 +407,42 @@ def _real_main() -> None:  # pragma: no cover - thin wiring, exercised in the cl
         normal". Only an explicit "closed" cancels a retry."""
         return dispatch.issue_state(item.repo, item.issue_number)
 
-    def branch_pushed_for(workload_name: str) -> bool:
+    def branch_pushed_for(workload_name: str, branch: str, repo: str) -> bool:
         """Did this Workload's task branch reach the remote? Drives whether the
         retry may overwrite it. Best-effort: on lookup failure report False, which
         makes the retry cut a fresh branch and (if a stale ref exists) fail loudly
-        with PUSH-FAILED rather than force-push over work it cannot see."""
+        with PUSH-FAILED rather than force-push over work it cannot see.
+
+        Grounded evidence (#132): ask the remote ``GET /repos/{repo}/branches/{branch}``
+        first. A prior attempt of THIS workload must have pushed a deterministic
+        ``foreman/wl-<workload>/issue-<n>`` branch; if it exists, the next
+        retry may safely pair ``reviseFromBranch`` + ``allowOverwrite`` and skip
+        the wasted full cycle that the prior attempt spent on a
+        non-fast-forward push. On API failure fail closed (return False) and
+        fall through to the task-CR scan as corroboration only — the task-CR
+        scan alone misses the case where a Workload instance died without
+        recording any verdict (coder Jobs killed at the deadline, agent
+        restarts) but had already pushed.
+        """
+        tasks = list_workload_tasks(workload_name)
         try:
-            return branch_pushed(list_workload_tasks(workload_name))
+            url = (
+                f"https://api.github.com/repos/{repo}/branches/"
+                f"{urllib.parse.quote(branch, safe='/')}"
+            )
+            gh_headers = {
+                "Accept": "application/vnd.github+json",
+                "X-GitHub-Api-Version": "2022-11-28",
+            }
+            if github_token:
+                gh_headers["Authorization"] = f"Bearer {github_token}"
+            r = http_get(url, headers=gh_headers, allow_404=True)
+        except Exception:
+            r = None
+        if r is not None and getattr(r, "status_code", 0) == 200:
+            return True
+        try:
+            return branch_pushed(tasks, remote_branch_exists=False)
         except Exception as e:
             logger.warning(
                 "branch-evidence-lookup-failed",

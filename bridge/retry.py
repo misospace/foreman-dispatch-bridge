@@ -23,7 +23,7 @@ DeleteWorkload = Callable[[str], None]  # (name) -> None; blocks until the objec
 Escalate = Callable[[ClaimedItem], bool]  # (item) -> True when re-laned + unclaimed
 LookupIssueId = Callable[[ClaimedItem], str]   # (item) -> dispatch issue id, "" if not found
 FeedbackFor = Callable[[str], str]             # (workload name) -> retry feedback text, "" if none
-BranchPushedFor = Callable[[str], bool]        # (workload name) -> did its task branch reach the remote
+BranchPushedFor = Callable[[str, str, str], bool]  # (workload name, branch, repo) -> did its task branch reach the remote
 IssueStateFor = Callable[[ClaimedItem], Optional[str]]  # (item) -> "open"/"closed", None if unknown
 DeclaredEscalationFor = Callable[[str], Optional[str]]  # (workload name) -> declared reason or None
 
@@ -111,14 +111,17 @@ def declared_escalation(tasks: list) -> Optional[str]:
     return None
 
 
-def branch_pushed(tasks: list) -> bool:
-    """True when a failed Workload's tasks prove its task branch reached the remote.
-
-    The bridge has no GitHub credential (only DISPATCH_AGENT_TOKEN), so it cannot
-    ask the remote whether the branch exists. The Workload's own tasks carry the
-    answer, and ``retry`` already fetches them for feedback.
+def branch_pushed(tasks: list, remote_branch_exists: bool = False) -> bool:
+    """True when a failed Workload's task branch is known to have reached the remote.
 
     Evidence, any one of which is sufficient:
+      - ``remote_branch_exists`` (preferred when available): the deterministic
+        task branch ``foreman/wl-<workload>/issue-<n>`` is present on the
+        remote. A prior attempt of this same Workload must have pushed it.
+        This is what recovers the wasted-cycle class where a Workload instance
+        died without recording any verdict (coder Jobs killed at the deadline,
+        agent restarts) but had already pushed (#132). On API failure the
+        caller passes False and the task-CR scan below is the fallback.
       - ``pullRequestURL`` on any task: a PR exists, so the branch was pushed.
       - a review task ran: the reviewer fetches and checks out the branch, so it
         could not have produced a verdict without one.
@@ -131,6 +134,8 @@ def branch_pushed(tasks: list) -> bool:
     (which would hard-fail on a branch that was never pushed, LLMKube#1365) nor
     allowOverwrite (which would force-push base over real work, #101).
     """
+    if remote_branch_exists:
+        return True
     for t in tasks or []:
         spec = t.get("spec") or {}
         st = t.get("status") or {}
@@ -381,8 +386,11 @@ def reconcile_failures(
         feedback = feedback_for(name) if feedback_for else ""
         # Same reason as feedback: the tasks are deleted with the Workload, so the
         # branch evidence has to be read BEFORE the delete below.
+        task_branch = _branch_name(item)
         revise_from = (
-            _branch_name(item) if branch_pushed_for and branch_pushed_for(name) else ""
+            task_branch
+            if branch_pushed_for and branch_pushed_for(name, task_branch, item.repo)
+            else ""
         )
         # Per-workload isolation: a delete that wedges (e.g. a Workload whose
         # deletion never completes, LLMKube#949) or a create that races must
