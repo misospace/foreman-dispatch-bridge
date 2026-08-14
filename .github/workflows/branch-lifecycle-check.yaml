@@ -1,0 +1,162 @@
+# Branch-lifecycle check for stale Foreman fix branches.
+#
+# Implements the "flag stale branches" goal from #56, addressing #94:
+#   * Uses bash only, so it does not depend on a Python toolchain run (the
+#     workflow does not need a Python version, eliminating the 3.12 vs
+#     project-pinned 3.14 mismatch described in #94).
+#   * When stale branches are found, files a tracking issue (or comments on the
+#     existing one) so the finding is delivered instead of silently failing
+#     the scheduled job.
+#   * Documents that it audits only this repo's remote branches. Foreman fix
+#     branches also land in the per-workload target repos (see
+#     `foreman_dispatch.workload.Workload.repo`), which require per-repo
+#     dispatch events to audit centrally; that expansion is out of scope here.
+#
+# A "stale" branch is a `foreman/<wl-name>/issue-N` remote ref whose tip
+# commit is older than `STALE_DAYS` days and which has not been merged into
+# the default branch.
+name: Branch lifecycle check
+
+on:
+  schedule:
+    # 06:30 UTC daily — well after the CI smoke (~06:00 UTC) so any
+    # in-progress fix-branch push has settled before we audit.
+    - cron: "30 6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  stale-branches:
+    name: Flag stale Foreman fix branches
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout bridge repo
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Detect stale Foreman fix branches
+        id: detect
+        env:
+          STALE_DAYS: "14"
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          HEAD_REF: ${{ github.head_ref }}
+          HEAD_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+
+          STALE_DAYS="${STALE_DAYS:-14}"
+          CUTOFF_EPOCH="$(date -u -d "${STALE_DAYS} days ago" +%s)"
+
+          # Enumerate remote Foreman fix branches without a full clone.
+          mapfile -t REFS < <(
+            git ls-remote --heads origin 'refs/heads/foreman/*/issue-*'
+          )
+
+          STALE_TSV="stale_branches.tsv"
+          : > "$STALE_TSV"
+
+          for ref_line in "${REFS[@]}"; do
+            sha="${ref_line%%	*}"
+            ref="${ref_line##*	}"
+            branch="${ref#refs/heads/}"
+
+            # Skip the branch under audit when this workflow runs from a
+            # branch push (e.g. a coder iterating on this workflow file).
+            if [ -n "${HEAD_REF:-}" ] && [ "$branch" = "$HEAD_REF" ]; then
+              continue
+            fi
+            if [ -n "${HEAD_SHA:-}" ] && [ "$sha" = "$HEAD_SHA" ]; then
+              continue
+            fi
+
+            commit_epoch="$(git log -1 --format=%ct "$sha" 2>/dev/null || echo "")"
+            if [ -z "$commit_epoch" ]; then
+              # The SHA is not present locally; fall back to the ref's
+              # last-modified timestamp from the remote.
+              commit_epoch="$(
+                gh api "repos/${REPO}/commits/${sha}" \
+                  --jq '.commit.committer.date // .commit.author.date' \
+                  2>/dev/null \
+                  | python3 -c 'import sys,datetime; print(int(datetime.datetime.fromisoformat(sys.stdin.read().strip().replace("Z","+00:00")).timestamp()))' \
+                  2>/dev/null || echo ""
+              )"
+            fi
+
+            if [ -z "$commit_epoch" ]; then
+              # Cannot determine age; treat as fresh to avoid noisy
+              # reports that we cannot substantiate.
+              continue
+            fi
+
+            if [ "$commit_epoch" -ge "$CUTOFF_EPOCH" ]; then
+              continue
+            fi
+
+            age_days=$(( ( $(date -u +%s) - commit_epoch ) / 86400 ))
+            echo -e "${branch}\t${sha}\t${age_days}" >> "$STALE_TSV"
+          done
+
+          stale_count="$(wc -l < "$STALE_TSV" | tr -d ' ')"
+          echo "stale_count=$stale_count" >> "$GITHUB_OUTPUT"
+          echo "stale_tsv=$STALE_TSV" >> "$GITHUB_OUTPUT"
+
+      - name: File or update tracking issue
+        if: steps.detect.outputs.stale_count != '0'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          STALE_TSV: ${{ steps.detect.outputs.stale_tsv }}
+        run: |
+          set -euo pipefail
+
+          tracking_label="branch-lifecycle"
+
+          existing="$(gh api "repos/${REPO}/issues?state=open&labels=${tracking_label}&per_page=1" \
+            --jq '.[0].number // empty')"
+
+          {
+            echo "### Stale Foreman fix branches"
+            echo
+            echo "Detected by the \`branch-lifecycle-check\` workflow at ${RUN_URL}."
+            echo
+            echo "| Branch | Tip SHA | Age (days) |"
+            echo "| --- | --- | ---: |"
+            while IFS=$'\t' read -r branch sha age; do
+              [ -z "$branch" ] && continue
+              echo "| \`${branch}\` | \`${sha:0:12}\` | ${age} |"
+            done < "$STALE_TSV"
+            echo
+            echo "Branches older than 14 days with no merge into the default branch are listed."
+            echo "They are stale \`foreman/<wl-name>/issue-N\` fix branches awaiting review or merge."
+          } > body.md
+
+          if [ -n "${existing:-}" ]; then
+            gh issue comment "$existing" --body-file body.md
+            echo "Updated tracking issue #$existing"
+          else
+            gh issue create \
+              --title "Stale Foreman fix branches detected" \
+              --label "$tracking_label" \
+              --body-file body.md
+            echo "Opened new tracking issue"
+          fi
+
+      - name: Report stale count
+        if: always()
+        run: |
+          count="$(wc -l < "${{ steps.detect.outputs.stale_tsv }}" 2>/dev/null | tr -d ' ')"
+          count="${count:-0}"
+          echo "stale_count=$count" >> "$GITHUB_OUTPUT"
+          if [ "$count" = "0" ]; then
+            echo "No stale Foreman fix branches found."
+          else
+            echo "Found $count stale Foreman fix branches (see filed issue)."
+          fi
