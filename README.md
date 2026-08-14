@@ -42,6 +42,17 @@ issue per lane.
 | `PR_FIX_MAX_ATTEMPTS` | `3` | pr-fix attempts before BLOCKED/tombstone |
 | `GITHUB_TOKEN` | *(empty)* | used to check a PR's `mergeable_state` before marking a pr-fix FIXED (unauthenticated if unset) |
 | `VERIFY_ENABLED` | `true` | set to `false` to omit the verify step and rely on repository CI (requires Foreman >= 0.9.9). Older Foreman versions reject Workloads without the required `verifierAgentRef`. |
+| `VERDICT_SELF_GO` | *(empty)* | when set to a truthy value (`true`/`1`/`yes`/`on`) the bridge accepts terminal `pass`/`GO` verdicts directly; when empty/false the bridge requires an external reviewer and `self-Go` verdicts are treated as a NO-GO escalation. |
+| `MAX_IN_PROGRESS` | `0` | maximum concurrent in-progress Workloads per lane (0 = unlimited). |
+| `PRUNE_COMPLETED_AFTER_HOURS` | `6` | hours a Completed Workload is retained before the bridge deletes it. |
+| `PRUNE_FAILED_AFTER_HOURS` | `48` | hours a Failed Workload is retained before the bridge tombstones + deletes it. |
+| `REVISION_CODER_AGENTS` | *(empty)* | JSON `{repo: coderAgentName}` with `"*"` wildcard; selects the coder Agent used by the revision lane. |
+| `REPO_CODER_AGENTS` | *(empty)* | JSON `{repo: coderAgentName}` with `"*"` wildcard; selects the coder Agent used for issue-path Workloads on that repo. |
+| `CODER_AGENT_SLOTS` | *(empty)* | JSON `{key: int}` mapping lane/repo keys to the maximum number of coder Agent slots they can occupy; falls back to `1` per key. |
+| `PR_FIX_LANE_AGENTS` | *(empty)* | JSON `{lane: coderAgentName}` with `"*"` wildcard; selects the coder Agent used by the pr-fix lane (otherwise the normal coder selection applies). |
+| `DELETE_WORKLOAD_TIMEOUT_S` | `60` | seconds the bridge waits for a Workload delete to complete before timing out and proceeding. |
+| `LOG_FORMAT` | `json` | log format; `json` for structured logs, `plain` for human-readable. |
+| `LOG_LEVEL` | `info` | log level; one of `debug`, `info`, `warning`, `error`. |
 
 PR-fix retries **preserve** the pipeline shape set at creation — `rebuild_prfix_manifest`
 reuses the existing spec, so toggling this env variable after a PR-fix Workload exists
