@@ -348,3 +348,37 @@ class DispatchClient:
             "agentName": agent_name,
         }
         return self._http_post(f"{self._base}/api/issues/status", payload) is not None
+
+    def add_label(self, item: dict, label: str) -> bool:
+        """Add a label to an issue. Best-effort: failures do not raise."""
+        payload = {
+            "issueId": item.get("issueId") or item.get("id") or "",
+            "repoFullName": item.get("repoFullName"),
+            "issueNumber": int(item.get("number") or item.get("issueNumber") or 0),
+            "label": label,
+        }
+        return self._http_post(f"{self._base}/api/issues/label", payload) is not None
+
+    def remove_label(self, item: dict, label: str) -> bool:
+        """Remove a label from an issue. Best-effort: failures do not raise.
+
+        Wired by the groomer so a re-groomed issue clears its `needs-human`
+        marker once work is ready again.
+        """
+        payload = {
+            "issueId": item.get("issueId") or item.get("id") or "",
+            "repoFullName": item.get("repoFullName"),
+            "issueNumber": int(item.get("number") or item.get("issueNumber") or 0),
+            "label": label,
+        }
+        return self._http_post(f"{self._base}/api/issues/unlabel", payload) is not None
+
+    def post_comment(self, item: dict, body: str) -> bool:
+        """Post a comment on an issue. Best-effort: failures do not raise."""
+        payload = {
+            "issueId": item.get("issueId") or item.get("id") or "",
+            "repoFullName": item.get("repoFullName"),
+            "issueNumber": int(item.get("number") or item.get("issueNumber") or 0),
+            "body": body,
+        }
+        return self._http_post(f"{self._base}/api/issues/comment", payload) is not None

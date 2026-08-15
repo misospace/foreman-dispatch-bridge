@@ -54,6 +54,37 @@ def _redact_token(text: str) -> str:
 
 logger = logging.getLogger("bridge.main")
 
+# Single label that flags an issue as needing a human decision. Picked so the
+# operator's worklist is one query: `label:needs-human is:open` — see issue #142.
+NEEDS_HUMAN_LABEL = "needs-human"
+
+
+def _format_escalation_comment(item: "ClaimedItem", reason: str, branch: "str | None" = None) -> str:
+    """Render the comment body for a parked-for-human escalation.
+
+    NOTE: the body deliberately does NOT use an ``@foreman`` mention form,
+    even though one might seem helpful. ``foreman`` is a real GitHub account
+    belonging to a person with no connection to this project; writing
+    ``@foreman`` here would notify a stranger every time the loop parks
+    work, and this loop parks work often. The project name collides with
+    a real handle and must stay in plain text. If you are tempted to add
+    a mention here, don't — see issue #142.
+    """
+    lines = [
+        "**Needs a human decision**",
+        "",
+        reason,
+    ]
+    url = f"https://github.com/{item.repo}/issues/{item.issue_number}"
+    lines.append("")
+    lines.append(f"Issue: {url}")
+    if branch:
+        lines.append(f"Workload/branch: {branch}")
+    lines.append("")
+    lines.append("_Posted by the foreman-dispatch-bridge._")
+    return "\n".join(lines)
+
+
 ClaimOne = Callable[[str, str], Optional[ClaimedItem]]  # (agent_name, lane) -\u003e item | None
 
 DELETE_WORKLOAD_TIMEOUT_S = int(os.environ.get("DELETE_WORKLOAD_TIMEOUT_S", "60"))
@@ -392,10 +423,25 @@ def _real_main() -> None:  # pragma: no cover - thin wiring, exercised in the cl
             "number": item.issue_number,
         }
         ok = dispatch.update_status(payload, "backlog", agent_name)
+        label_applied = False
+        comment_posted = False
         if ok:
+            # Label and comment are independent best-effort operations: a
+            # comment failure must not lose the label that makes the issue
+            # findable on the operator's worklist. See issue #142.
+            label_applied = bool(dispatch.add_label(payload, NEEDS_HUMAN_LABEL))
+            comment_posted = bool(
+                dispatch.post_comment(payload, _format_escalation_comment(item, reason))
+            )
             logger.info(
                 "parked-for-human",
-                extra={"repo": item.repo, "number": item.issue_number, "reason": reason},
+                extra={
+                    "repo": item.repo,
+                    "number": item.issue_number,
+                    "reason": reason,
+                    "label_applied": label_applied,
+                    "comment_posted": comment_posted,
+                },
             )
         return bool(ok)
 

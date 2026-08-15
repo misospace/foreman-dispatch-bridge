@@ -11,12 +11,26 @@ class FakeDispatchClient:
     def __init__(self):
         self._claimed = []
         self._status_updates = []
+        self._label_changes = []
+        self._comments = []
 
     def list_claimed(self, agent_name):
         return self._claimed
 
     def update_status(self, item, status, agent_name):
         self._status_updates.append((item, status, agent_name))
+
+    def add_label(self, item, label):
+        self._label_changes.append(("add", item, label))
+        return True
+
+    def remove_label(self, item, label):
+        self._label_changes.append(("remove", item, label))
+        return True
+
+    def post_comment(self, item, body):
+        self._comments.append((item, body))
+        return True
 
 
 # ── Fixtures ────────────────────────────────────────────────────────────────
