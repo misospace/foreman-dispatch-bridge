@@ -566,6 +566,30 @@ def test_check_runs_lookup_failure_keeps_workload_alive():
     assert any("checks-pending" in r for r in results), results
 
 
+def test_check_pr_mergeable_returns_checks_pending_on_check_runs_failure():
+    """Direct unit check for #93: check-runs API failure must surface as
+    'checks_pending' (not fall through to a permissive verdict) so callers
+    never mark a PR FIXED off an unverified check-runs read.
+    """
+
+    def http_get(url, *, headers=None, **kwargs):
+        if "/pulls/" in url:
+            return {
+                "merged": False,
+                "state": "open",
+                "mergeable_state": "clean",
+                "head": {"sha": "abc123"},
+            }
+        raise RuntimeError("simulated check-runs 5xx")
+
+    from bridge.main import check_pr_mergeable
+
+    assert (
+        check_pr_mergeable("o/r", 93, http_get=http_get, github_token="")
+        == "checks_pending"
+    )
+
+
 def test_open_pr_still_retries_normally():
     """The guard must not swallow live work."""
     created = []
