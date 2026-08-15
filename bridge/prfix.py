@@ -193,60 +193,6 @@ FAILING_CONCLUSIONS = frozenset(
 PENDING_STATUSES = frozenset({"queued", "in_progress", "waiting", "pending", "requested"})
 
 
-def classify_pr_lifecycle(data) -> Optional[str]:
-    """Return "merged"/"closed" for a PR nothing can advance, else None.
-
-    Lives at module level, unlike the closure that calls it, so it is directly
-    testable — the callers all inject a fake pr_is_mergeable, which is how the
-    "failed" vs "failure" spelling bug survived in the closure until v0.6.19.
-
-    GitHub reports mergeable_state=unknown for a merged PR, which reads as
-    mergeable, so this must be checked BEFORE that field (#118).
-    """
-    if not isinstance(data, dict):
-        return None
-    if data.get("merged"):
-        return "merged"
-    if str(data.get("state") or "").lower() == "closed":
-        return "closed"
-    return None
-
-
-def classify_check_runs(check_runs) -> str:
-    """Classify a commit's check runs as "checks_failed", "checks_pending", or "ok".
-
-    An EMPTY set is "checks_pending", not "ok". No checks reported is not the
-    same as every check passing: during a GitHub Actions outage no run is ever
-    created, and treating that as success marked PR-fix workloads FIXED without
-    verifying anything. Dispatch then re-queued the still-unfixed PR, the drain
-    rebuilt the workload, and the coder force-pushed the branch again — six times
-    on misospace/dispatch#731 before anyone noticed. GitHub's own combined status
-    for such a commit is "pending", which is the answer this mirrors.
-
-    Lives at module level, unlike the closure it replaces, so both rules are
-    directly testable — the closure's callers all injected fakes, which is how
-    two defects survived in code that looked covered.
-    """
-    has_failed = False
-    has_pending = False
-    saw_any = False
-
-    for cr in check_runs or []:
-        saw_any = True
-        conclusion = str((cr or {}).get("conclusion") or "").lower()
-        status = str((cr or {}).get("status") or "").lower()
-        if conclusion in FAILING_CONCLUSIONS:
-            has_failed = True
-        elif status in PENDING_STATUSES or (not conclusion and status != "completed"):
-            has_pending = True
-
-    if has_failed:
-        return "checks_failed"
-    if has_pending or not saw_any:
-        return "checks_pending"
-    return "ok"
-
-
 _TERMINAL = ("Succeeded", "Completed", "Failed")
 
 # PR lifecycle states that no amount of coder work can advance.

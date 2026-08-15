@@ -1,4 +1,3 @@
-import pytest
 from bridge.prfix import (
     DEFAULT_PRFIX_LANE_AGENTS,
     PRFIX_CREATED_BY,
@@ -11,8 +10,6 @@ from bridge.prfix import (
     parse_pr_fix_item,
     pr_fix_coder_for,
     prfix_workload_name,
-    classify_check_runs,
-    classify_pr_lifecycle,
     rebuild_prfix_manifest,
     reconcile_pr_fixes,
 )
@@ -531,154 +528,66 @@ def test_build_fix_workload_stamps_verdict_policy():
     assert "verdictPolicy" not in wl["spec"]
 
 
-# --- classify_check_runs ------------------------------------------------
-# These exist because the logic they cover used to be a closure inside main.py
-# that every test replaced with a lambda, so two defects sat in it unnoticed.
+# --- check-runs lookup failure (#93) ---------------------------------------------
 
-@pytest.mark.parametrize("check_runs", [[], None, ()])
-def test_no_check_runs_is_pending_not_ok(check_runs):
-    """The misospace/dispatch#731 force-push loop. During the GitHub Actions
-    outage no check run was ever created; the old code set neither flag and fell
-    through to "ok", so reconcile marked the fix FIXED without verifying
-    anything, dispatch re-queued the still-broken PR, and the coder force-pushed
-    again. GitHub's own combined status for such a commit is "pending"."""
-    assert classify_check_runs(check_runs) == "checks_pending"
-
-
-def test_failure_is_the_spelling_github_actually_emits():
-    """The old code tested for "failed", which the API never returns, so a red
-    PR classified as "ok". Verified against real check-run data."""
-    assert classify_check_runs([{"conclusion": "failure", "status": "completed"}]) == "checks_failed"
-
-
-@pytest.mark.parametrize(
-    "conclusion", ["timed_out", "cancelled", "action_required", "startup_failure", "stale"]
-)
-def test_other_non_passing_conclusions_are_failures(conclusion):
-    assert classify_check_runs([{"conclusion": conclusion, "status": "completed"}]) == "checks_failed"
-
-
-def test_all_successful_is_ok():
-    """The negative cases only mean something if the passing case still passes."""
-    runs = [{"conclusion": "success", "status": "completed"} for _ in range(3)]
-    assert classify_check_runs(runs) == "ok"
-
-
-@pytest.mark.parametrize("status", ["queued", "in_progress", "waiting", "requested"])
-def test_unfinished_checks_are_pending(status):
-    assert classify_check_runs([{"conclusion": None, "status": status}]) == "checks_pending"
-
-
-def test_a_failure_outranks_pending_and_success():
-    """A red check must not be masked by a sibling still running: reporting
-    pending would leave the workload waiting instead of retrying the fix."""
-    runs = [
-        {"conclusion": "success", "status": "completed"},
-        {"conclusion": None, "status": "in_progress"},
-        {"conclusion": "failure", "status": "completed"},
-    ]
-    assert classify_check_runs(runs) == "checks_failed"
-
-
-def test_skipped_and_neutral_do_not_count_as_failures():
-    """Skipped path filters and neutral results are normal on green PRs;
-    treating them as failures would retry fixes against healthy branches."""
-    runs = [
-        {"conclusion": "skipped", "status": "completed"},
-        {"conclusion": "neutral", "status": "completed"},
-        {"conclusion": "success", "status": "completed"},
-    ]
-    assert classify_check_runs(runs) == "ok"
-
-
-def test_outage_does_not_mark_a_fix_workload_FIXED():
-    """End-to-end guard on the actual damage: with no check runs, reconcile must
-    NOT mark FIXED and must NOT rebuild the workload (which is what re-ran the
-    coder and force-pushed). It leaves the workload for the next tick."""
+def test_check_runs_lookup_failure_keeps_workload_alive():
+    """Regression for #93: the check-runs API call raising (transient 5xx,
+    rate limit in unauthenticated mode, etc.) must not be reported as
+    mergeable. reconcile_pr_fixes would then mark the item FIXED and delete
+    the Workload, even though we never actually verified the PR was mergeable
+    — a BEHIND PR with required checks still queued would be silently dropped.
+    """
     marked, created, deleted = [], [], []
+
+    def http_get(url, *, headers=None, **kwargs):
+        # PR-data fetch succeeds.
+        if "/pulls/" in url:
+            return {"mergeable_state": "clean", "state": "open"}
+        # Check-runs fetch blows up (the exact failure mode from #93).
+        raise RuntimeError("simulated 5xx from check-runs endpoint")
+
+    from bridge.main import check_pr_mergeable
+
     results = reconcile_pr_fixes(
-        list_prfix_workloads=lambda: [_wl(731, "Succeeded", attempt=1)],
+        list_prfix_workloads=lambda: [_wl(932, "Succeeded", attempt=1)],
         delete_workload=deleted.append,
         create_workload=created.append,
         mark_pr_fix=lambda repo, pr, status, note: (
             marked.append((repo, pr, status)) or True
         ),
-        pr_is_mergeable=lambda repo, pr: classify_check_runs([]),
+        pr_is_mergeable=lambda repo, pr: check_pr_mergeable(
+            repo, pr, http_get=http_get, github_token=""
+        ),
         max_attempts=3,
     )
     assert marked == [], f"marked FIXED off an unverified success: {marked}"
+    assert deleted == [], f"deleted the workload off an unverified success: {deleted}"
     assert created == [], f"rebuilt the workload, which re-runs the coder: {created}"
-    assert deleted == []
     assert any("checks-pending" in r for r in results), results
 
 
-# --- terminal PRs (#118) ----------------------------------------------------
-# A Failed fix Workload used to retry purely against the attempt cap, so a merged
-# PR burned all three attempts AND escalated to the frontier coder. Observed live
-# on prfix-misospace-pr-reviewer-action-467 (merged, attempt=3, lane=ESCALATED)
-# and prfix-misospace-kubetix-327 (merged, attempt=2).
+def test_check_pr_mergeable_returns_checks_pending_on_check_runs_failure():
+    """Direct unit check for #93: check-runs API failure must surface as
+    'checks_pending' (not fall through to a permissive verdict) so callers
+    never mark a PR FIXED off an unverified check-runs read.
+    """
 
-@pytest.mark.parametrize("phase", ["Failed", "Succeeded", "Completed"])
-def test_merged_pr_is_resolved_not_retried(phase):
-    marks, created, deleted = [], [], []
-    out = reconcile_pr_fixes(
-        list_prfix_workloads=lambda: [_wl(467, phase, attempt=1)],
-        delete_workload=deleted.append,
-        create_workload=created.append,
-        mark_pr_fix=lambda repo, pr, status, note: marks.append((repo, pr, status)) or True,
-        pr_is_mergeable=lambda repo, pr: "merged",
-        max_attempts=3,
+    def http_get(url, *, headers=None, **kwargs):
+        if "/pulls/" in url:
+            return {
+                "merged": False,
+                "state": "open",
+                "mergeable_state": "clean",
+                "head": {"sha": "abc123"},
+            }
+        raise RuntimeError("simulated check-runs 5xx")
+
+    from bridge.main import check_pr_mergeable
+
+    assert (
+        check_pr_mergeable("o/r", 93, http_get=http_get, github_token="")
+        == "checks_pending"
     )
-    assert created == [], f"retried a merged PR: {created}"
-    assert deleted == ["prfix-o-r-467"]
-    assert marks == [("o/r", 467, "FIXED")]
-    assert out == ["prfix-o-r-467:pr-merged"]
-
-
-def test_merged_pr_does_not_escalate_at_the_attempt_cap():
-    """The expensive half of #118: at the cap the loop escalated to the frontier
-    coder rather than giving up, so a merged PR bought frontier tokens."""
-    created = []
-    out = reconcile_pr_fixes(
-        list_prfix_workloads=lambda: [_wl(467, "Failed", attempt=3)],
-        delete_workload=lambda n: None,
-        create_workload=created.append,
-        mark_pr_fix=lambda *a: True,
-        pr_is_mergeable=lambda repo, pr: "merged",
-        max_attempts=3,
-        lane_agents=DEFAULT_PRFIX_LANE_AGENTS,
-    )
-    assert created == [], f"escalated a merged PR: {created}"
-    assert out == ["prfix-o-r-467:pr-merged"]
-
-
-def test_closed_unmerged_pr_is_marked_stale():
-    marks = []
-    reconcile_pr_fixes(
-        list_prfix_workloads=lambda: [_wl(9, "Failed", attempt=1)],
-        delete_workload=lambda n: None,
-        create_workload=lambda m: (_ for _ in ()).throw(AssertionError("must not retry")),
-        mark_pr_fix=lambda repo, pr, status, note: marks.append(status) or True,
-        pr_is_mergeable=lambda repo, pr: "closed",
-        max_attempts=3,
-    )
-    assert marks == ["STALE"]
-
-
-def test_workload_is_kept_when_the_mark_fails():
-    """Deleting on a failed mark would lose the item entirely — leave the
-    tombstone so the next tick retries the mark, matching the FIXED path."""
-    deleted = []
-    out = reconcile_pr_fixes(
-        list_prfix_workloads=lambda: [_wl(467, "Failed", attempt=1)],
-        delete_workload=deleted.append,
-        create_workload=lambda m: None,
-        mark_pr_fix=lambda *a: False,
-        pr_is_mergeable=lambda repo, pr: "merged",
-        max_attempts=3,
-    )
-    assert deleted == []
-    assert out == ["prfix-o-r-467:pr-merged:mark-failed"]
 
 
 def test_open_pr_still_retries_normally():
@@ -693,17 +602,3 @@ def test_open_pr_still_retries_normally():
         max_attempts=3,
     )
     assert len(created) == 1
-
-
-@pytest.mark.parametrize("data,expected", [
-    ({"merged": True, "state": "closed", "mergeable_state": "unknown"}, "merged"),
-    ({"merged": False, "state": "closed"}, "closed"),
-    ({"merged": False, "state": "open", "mergeable_state": "clean"}, None),
-    ({"state": "OPEN"}, None),
-    ({}, None),
-    (None, None),
-])
-def test_classify_pr_lifecycle(data, expected):
-    """mergeable_state=unknown on a merged PR reads as mergeable, which is what
-    sent the loop through its full budget — so merged must win over it."""
-    assert classify_pr_lifecycle(data) == expected

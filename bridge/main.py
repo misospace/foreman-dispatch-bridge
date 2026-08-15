@@ -33,8 +33,9 @@ from bridge.retry import (
     DEFAULT_MAX_ATTEMPTS,
 )
 from bridge.prfix import (
-    reconcile_pr_fixes, drain_pr_fixes, classify_check_runs, classify_pr_lifecycle,
+    reconcile_pr_fixes, drain_pr_fixes,
     DEFAULT_PRFIX_LANE_AGENTS, ACTIONABLE_LANES, PRFIX_CREATED_BY,
+    FAILING_CONCLUSIONS, PENDING_STATUSES,
 )
 from bridge.prune import prune_workloads
 from bridge.reconcile import reconcile_stranded_issues, release_stuck_claims
@@ -139,6 +140,101 @@ def _parse_bool_env(raw: str, default: bool = True) -> bool:
     if stripped.lower() in ("false", "0", "no"):
         return False
     return True
+
+
+def check_pr_mergeable(repo, pr, *, http_get, github_token) -> str:
+    """Return a mergeability status string.
+
+    Returns one of:
+        "ok"             – PR is mergeable
+        "dirty"          – new commits pushed
+        "conflicting"    – merge conflicts
+        "checks_failed"  – required checks failed / timed out / cancelled
+        "checks_pending" – checks still queued or in progress
+        "merged"         – PR is merged; nothing left to fix
+        "closed"         – PR closed unmerged; the item is stale
+
+    A lookup failure (PR-data fetch or check-runs fetch) is treated as *not*
+    mergeable: we return "checks_pending" so reconcile_pr_fixes just retries
+    under its attempt cap rather than falsely marking FIXED off an unverified
+    success (#93).
+    """
+    headers = {"Accept": "application/vnd.github+json"}
+    if github_token:
+        headers["Authorization"] = f"Bearer {github_token}"
+
+    # Fetch PR data for mergeable_state and head SHA
+    try:
+        data = http_get(f"https://api.github.com/repos/{repo}/pulls/{pr}", headers)
+    except Exception as e:
+        logger.warning(
+            "prfix-mergeable-check-failed",
+            extra={"repo": repo, "pr": pr, "error": _redact_token(repr(e))},
+        )
+        return "checks_pending"
+
+    if data.get("merged"):
+        return "merged"
+    if data.get("state") == "closed":
+        return "closed"
+
+    state = str((data or {}).get("mergeable_state") or "").lower()
+
+    if state == "dirty":
+        return "dirty"
+    if state == "conflicting":
+        return "conflicting"
+
+    # Treat unstable (required checks failed) as checks_failed
+    if state == "unstable":
+        return "checks_failed"
+    # blocked means required statuses are pending or other blockers
+    if state == "blocked":
+        return "checks_pending"
+
+    # Additionally verify check-runs on the head commit
+    try:
+        head_sha = (data or {}).get("head", {}).get("sha")
+        if head_sha:
+            check_runs_url = (
+                f"https://api.github.com/repos/{repo}/commits/"
+                f"{head_sha}/check-runs"
+            )
+            cr_data = http_get(check_runs_url, headers)
+            check_runs = (cr_data or {}).get("check_runs", [])
+
+            has_failed = False
+            has_pending = False
+            saw_any = False
+            for cr in check_runs or []:
+                saw_any = True
+                conclusion = str((cr or {}).get("conclusion") or "").lower()
+                status = str((cr or {}).get("status") or "").lower()
+                if conclusion in FAILING_CONCLUSIONS:
+                    has_failed = True
+                elif status in PENDING_STATUSES or (not conclusion and status != "completed"):
+                    has_pending = True
+
+            if has_failed:
+                return "checks_failed"
+            if has_pending or not saw_any:
+                if not check_runs:
+                    logger.info(
+                        "prfix-no-check-runs",
+                        extra={"repo": repo, "pr": pr, "sha": head_sha},
+                    )
+                return "checks_pending"
+    except Exception as exc:
+        logger.error(
+            "prfix-check-runs-error",
+            extra={"repo": repo, "pr": pr, "error": repr(exc)},
+        )
+        # A lookup failure is treated as not mergeable (conservative): #93
+        # reconcile_pr_fixes just retries under its attempt cap rather
+        # than falsely marking FIXED off an unverified success.
+        return "checks_pending"
+
+    return "ok"
 
 
 def run_once(
@@ -600,95 +696,16 @@ def _real_main() -> None:  # pragma: no cover - thin wiring, exercised in the cl
                 )
                 return False
 
-        # GitHub's own merge-state, not the fix workload's exit status, is the
-        # source of truth for "did this PR actually become mergeable". Only
-        # DIRTY/CONFLICTING block a FIXED mark; other states (CLEAN, UNSTABLE,
-        # BEHIND, BLOCKED, UNKNOWN, ...) count as mergeable. A lookup failure
-        # is treated as *not* mergeable (conservative): reconcile_pr_fixes
-        # just retries under its attempt cap rather than falsely marking
-        # FIXED off an unverified success, which is the bug this closes.
         def pr_is_mergeable(repo, pr) -> str:
-            """Return a mergeability status string.
-
-            Returns one of:
-                "ok"             – PR is mergeable
-                "dirty"          – new commits pushed
-                "conflicting"    – merge conflicts
-                "checks_failed"  – required checks failed / timed out / cancelled
-                "checks_pending" – checks still queued or in progress
-                "merged"         – PR is merged; nothing left to fix
-                "closed"         – PR closed unmerged; the item is stale
-            """
-            headers = {"Accept": "application/vnd.github+json"}
-            if github_token:
-                headers["Authorization"] = f"Bearer {github_token}"
-
-            # Fetch PR data for mergeable_state and head SHA
-            try:
-                data = http_get(f"https://api.github.com/repos/{repo}/pulls/{pr}", headers)
-            except Exception as e:
-                logger.warning(
-                    "prfix-mergeable-check-failed",
-                    extra={"repo": repo, "pr": pr, "error": _redact_token(repr(e))},
-                )
-                return "checks_pending"
-
-            # A merged or closed PR cannot be advanced by anything the loop does.
-            # Checked before mergeable_state because GitHub reports
-            # mergeable_state=unknown for a merged PR, which reads as mergeable and
-            # sent the fix loop through its full attempt budget — including the
-            # escalation to the frontier coder — against work that had already
-            # landed (#118).
-            lifecycle = classify_pr_lifecycle(data)
-            if lifecycle:
-                return lifecycle
-
-            state = str((data or {}).get("mergeable_state") or "").lower()
-
-            # Existing guards for dirty/conflicting
-            if state == "dirty":
-                return "dirty"
-            if state == "conflicting":
-                return "conflicting"
-
-            # Treat unstable (required checks failed) as checks_failed
-            if state == "unstable":
-                return "checks_failed"
-            # blocked means required statuses are pending or other blockers
-            if state == "blocked":
-                return "checks_pending"
-
-            # Additionally verify check-runs on the head commit
-            try:
-                head_sha = (data or {}).get("head", {}).get("sha")
-                if head_sha:
-                    check_runs_url = (
-                        f"https://api.github.com/repos/{repo}/commits/"
-                        f"{head_sha}/check-runs"
-                    )
-                    cr_data = http_get(check_runs_url, headers)
-                    check_runs = (cr_data or {}).get("check_runs", [])
-
-                    verdict = classify_check_runs(check_runs)
-                    if verdict != "ok":
-                        if not check_runs:
-                            logger.info(
-                                "prfix-no-check-runs",
-                                extra={"repo": repo, "pr": pr, "sha": head_sha},
-                            )
-                        return verdict
-            except Exception as exc:
-                logger.error(
-                    "prfix-check-runs-error",
-                    extra={"repo": repo, "pr": pr, "error": repr(exc)},
-                )
-                # If we can't reach the API, fall through to "ok" (optimistic)
-
-            return "ok"
+            return check_pr_mergeable(
+                repo, pr, http_get=http_get, github_token=github_token
+            )
 
         for line in reconcile_pr_fixes(
             list_prfix_workloads, delete_workload, create_workload,
-            mark_pr_fix, pr_is_mergeable=pr_is_mergeable, max_attempts=pr_fix_max_attempts,
+            mark_pr_fix,
+            pr_is_mergeable=pr_is_mergeable,
+            max_attempts=pr_fix_max_attempts,
             lane_agents=pr_fix_lane_agents,
         ):
             logger.info(line)
