@@ -69,6 +69,10 @@ def reconcile_stranded_issues(
                 continue
 
             dispatch.update_status(item, "ready", agent_name)
+            # If the issue was previously parked for a human, clear the marker
+            # so the operator's `label:needs-human is:open` worklist stays
+            # accurate. Best-effort: a label failure must not block the reset.
+            dispatch.remove_label(item, "needs-human")
             msg = f"issue {issue_number}: reset to ready (no Workload, no open PR)"
             logger.info(msg)
             results.append(msg)
