@@ -17,6 +17,11 @@ logger = logging.getLogger("bridge.retry")
 # How many total coder attempts before the bridge stops retrying a Workload and
 # leaves it as a Failed tombstone for human triage. Override via env.
 DEFAULT_MAX_ATTEMPTS = 3
+# Executor errors (model 403, network drop) are infrastructure failures,
+# not rejections by the model. Retrying them must not consume the verdict
+# budget reserved for genuine NO-GO/INCOMPLETE responses, but it must
+# still be bounded so a permanently broken backend cannot loop forever.
+INFRA_MAX_ATTEMPTS = 3
 
 ListFailed = Callable[[], list]         # () -> list of Failed Workload manifests (dicts)
 DeleteWorkload = Callable[[str], None]  # (name) -> None; blocks until the object is gone
@@ -162,6 +167,24 @@ def attempt_of(wl: dict) -> int:
         return 1
 
 
+def task_failed_with_executor_error(wl: dict) -> bool:
+    """Return True if any task in the Workload has a Completed condition with reason=ExecutorError.
+
+    An ExecutorError on a Completed condition means the request never
+    reached the agent (model 403, network drop, etc.), so the failure
+    is an infrastructure problem — not a real rejection from the model.
+    Such a failure must not consume the verdict retry budget, because
+    the agent has not actually passed judgment on the work yet.
+    """
+    status = wl.get("status") or {}
+    task_statuses = status.get("taskStatuses") or []
+    for ts in task_statuses:
+        for cond in (ts.get("conditions") or []):
+            if cond.get("type") == "Completed" and cond.get("reason") == "ExecutorError":
+                return True
+    return False
+
+
 def _issue_from_name(name: str) -> int:
     """Recover the issue number from a Workload name (`wl-<owner>-<repo>-<n>`).
 
@@ -247,6 +270,7 @@ def reconcile_failures(
     issue_state_for: Optional[IssueStateFor] = None,
     declared_escalation_for: Optional[DeclaredEscalationFor] = None,
     park_for_human: Optional[Callable[[ClaimedItem, str], bool]] = None,
+    infra_max_attempts: int = INFRA_MAX_ATTEMPTS,
 ) -> list:
     """Retry Failed bridge Workloads, bounded by max_attempts.
 
@@ -265,6 +289,13 @@ def reconcile_failures(
         groomer won't re-serve it into a loop; a human triages from the
         lingering Workload.
 
+    A Workload whose task failed with `reason: ExecutorError` on its Completed
+    condition is treated as an infrastructure failure (the request never
+    reached the agent). Such Workloads retry against a separate budget
+    (`infra_max_attempts`) without incrementing the verdict counter, so a
+    transient 403 or network drop does not consume the budget reserved for
+    genuine rejections.
+
     Returns per-Workload outcome strings.
     """
     lane_coder_agents = lane_coder_agents or {}
@@ -274,6 +305,11 @@ def reconcile_failures(
     for wl in list_failed():
         name = (wl.get("metadata") or {}).get("name") or "?"
         attempt = attempt_of(wl)
+        # An ExecutorError on a task's Completed condition means the request
+        # never reached the agent (model 403, network drop, etc.) — so the
+        # failure is an infrastructure problem and must not consume the
+        # verdict retry budget. Such Workloads get their own budget below.
+        is_infra = task_failed_with_executor_error(wl)
 
         # A closed issue cannot be advanced by anything we do here, so neither a
         # retry nor an escalation is worth an attempt. Checked before the
@@ -350,6 +386,14 @@ def reconcile_failures(
                     "human-escalation-not-parked",
                     extra={"workload": name, "reason": reason},
                 )
+        if is_infra and attempt >= infra_max_attempts:
+            # Infra-error retries have their own budget so a permanently
+            # broken backend cannot loop forever. Leave the Failed tombstone
+            # in place — escalating to the frontier lane would only pay for
+            # a stronger model to hit the same 403. A human triages from the
+            # lingering Workload.
+            results.append(f"{name}:giveup-infra:{attempt}/{infra_max_attempts}")
+            continue
         if attempt >= max_attempts:
             item = refresh_lane(item_from_workload(wl), current_lane_for)
             if not item.issue_id and lookup_issue_id:
@@ -380,6 +424,12 @@ def reconcile_failures(
                 results.append(f"{name}:giveup:{attempt}/{max_attempts}")
             continue
         item = refresh_lane(item_from_workload(wl), current_lane_for)
+        # Backfill issue-id BEFORE the delete so the rebuilt Workload carries
+        # it (matches the escalation branch's behaviour). Workloads created
+        # before the issue-id annotation (bridge <0.3.0) carry "" forever
+        # through retries without this.
+        if not item.issue_id and lookup_issue_id:
+            item = replace(item, issue_id=lookup_issue_id(item) or "")
         # Collect the previous attempt's review findings / failure BEFORE the
         # delete (the tasks go with the Workload). A retry that knows why it
         # was rejected beats a blind identical re-run.
@@ -399,12 +449,16 @@ def reconcile_failures(
         try:
             delete_workload(name)
             language = gate_profiles.get(item.repo, {}).get("language")
+            # Infra errors are not real rejections — the request never reached
+            # the agent — so a retry against the same backend must not spend
+            # the verdict budget. Real verdicts increment as before.
+            next_attempt = attempt + 1 if not is_infra else attempt
             manifest = build_workload(
                 item,
                 namespace,
                 gate_profile_for(item.repo, gate_profiles),
                 agent_name,
-                attempt + 1,
+                next_attempt,
                 coder_agent_for(
                     item.lane, language, lane_coder_agents, base_coder_agents,
                     repo=item.repo, repo_coder_agents=repo_coder_agents,
@@ -419,5 +473,8 @@ def reconcile_failures(
         except Exception as e:
             results.append(f"{name}:retry-error:{e}")
             continue
-        results.append(f"{name}:retry:{attempt + 1}/{max_attempts}")
+        if is_infra:
+            results.append(f"{name}:retry-infra:{attempt}/{infra_max_attempts}")
+        else:
+            results.append(f"{name}:retry:{attempt + 1}/{max_attempts}")
     return results
