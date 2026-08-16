@@ -21,7 +21,7 @@ OPTIONAL_VARS: Dict[str, str] = {
     "DISPATCH_LANES": "local,cloud,frontier",
     "FOREMAN_NAMESPACE": "llm",
     "GATEPROFILE_MAP": "",
-    "RETRY_MAX_ATTEMPTS": "5",
+    "RETRY_MAX_ATTEMPTS": "3",
     "LANE_CODER_AGENTS": "",
     "REVISION_CODER_AGENTS": "",
     "BASE_CODER_AGENTS": "",

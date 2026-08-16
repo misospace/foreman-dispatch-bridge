@@ -1,6 +1,14 @@
 import pytest
 from bridge.models import ClaimedItem
-from bridge.retry import attempt_of, item_from_workload, reconcile_failures, refresh_lane
+from bridge.retry import (
+    DEFAULT_MAX_ATTEMPTS,
+    INFRA_MAX_ATTEMPTS,
+    attempt_of,
+    item_from_workload,
+    reconcile_failures,
+    refresh_lane,
+)
+from bridge.workload import ATTEMPT_ANNOTATION, ISSUE_ID_ANNOTATION
 
 
 def _failed_wl(name, repo="misospace/dispatch", issue=7, attempt=None, lane="local", issue_id="id-7"):
@@ -650,3 +658,134 @@ def test_refresh_lane_keeps_every_other_field():
     assert (out.repo, out.issue_number, out.intent, out.issue_id) == (
         "a/b", 38, "fix", "abc123",
     )
+
+
+# --- ExecutorError retry path: infra failures must not consume the verdict
+# budget. See bridge/retry.py reconcile_failures for the full semantics. ---
+
+
+def _failed_wl_with_executor_error(name, attempt, issue_id="iss-9"):
+    """A Failed Workload whose task died with Completed.reason=ExecutorError.
+
+    Mirrors the production shape observed on 2026-08-16: the agent never
+    ran (model 403 / network drop), so the only Completed condition on any
+    task has reason=ExecutorError, not a verdict.
+    """
+    ann = {ATTEMPT_ANNOTATION: str(attempt)}
+    if issue_id:
+        ann[ISSUE_ID_ANNOTATION] = issue_id
+    return {
+        "metadata": {"name": name, "annotations": ann},
+        "status": {
+            "taskStatuses": [
+                {
+                    "conditions": [
+                        {
+                            "type": "Completed",
+                            "status": "False",
+                            "reason": "ExecutorError",
+                        }
+                    ]
+                }
+            ]
+        },
+    }
+
+
+def test_task_failed_with_executor_error_true_when_a_task_died_with_it():
+    from bridge.retry import task_failed_with_executor_error
+    wl = _failed_wl_with_executor_error("w-1", attempt=1)
+    assert task_failed_with_executor_error(wl) is True
+
+
+def test_task_failed_with_executor_error_false_for_a_real_verdict_rejection():
+    from bridge.retry import task_failed_with_executor_error
+    wl = _failed_wl(name="w-2", attempt=1)
+    assert task_failed_with_executor_error(wl) is False
+
+
+def test_task_failed_with_executor_error_false_when_no_task_statuses():
+    from bridge.retry import task_failed_with_executor_error
+    # A workload with no status yet must not be misclassified as infra.
+    assert task_failed_with_executor_error({"metadata": {"name": "x"}}) is False
+
+
+def test_reconcile_retries_executor_error_without_incrementing_attempt():
+    # An ExecutorError retry must not spend the verdict budget — the new
+    # Workload is rebuilt at the same attempt annotation so a transient
+    # 403 cannot push the workload past max_attempts.
+    wl = _failed_wl_with_executor_error("w-infra-1", attempt=1)
+    rec = _Recorder([wl])
+    out = _reconcile(rec)
+    assert any("retry-infra:1/" in line for line in out), out
+    # The rebuilt Workload keeps the same attempt annotation (no increment).
+    created = rec.created[-1]
+    ann = created["metadata"]["annotations"]
+    assert ann[ATTEMPT_ANNOTATION] == "1"
+    # The verdict retry line ("retry:N/M") must NOT be reported — this is
+    # what criterion 4 of #155 requires: retry:N/M is reserved for counted
+    # attempts.
+    assert not any("retry:1/" in line for line in out), out
+
+
+def test_reconcile_executor_error_does_not_escalate_or_give_up_prematurely():
+    # At attempt=max_attempts the verdict path would give up or escalate to
+    # the frontier lane, but an ExecutorError is not a verdict — it must
+    # keep retrying (infra-retry without incrementing attempt) until its
+    # own infra cap is hit. Re-using the same attempt annotation means a
+    # transient infra error at attempt=max_attempts-1 keeps the workload
+    # alive without burning the verdict budget.
+    # attempt 1, infra cap 3: still under the infra cap, must retry.
+    wl = _failed_wl_with_executor_error("w-infra-2", attempt=1)
+    rec = _Recorder([wl])
+    out = _reconcile(rec)
+    assert any("retry-infra:" in line for line in out), out
+    assert not any("giveup:" in line for line in out), out
+    assert not any("escalated:" in line for line in out), out
+    # Infra cap is reached exactly when attempt == INFRA_MAX_ATTEMPTS, so
+    # the failed workload should give up cleanly without consuming the
+    # verdict counter (attempt stays at INFRA_MAX_ATTEMPTS, not at
+    # DEFAULT_MAX_ATTEMPTS+1).
+    wl_cap = _failed_wl_with_executor_error(
+        "w-infra-cap", attempt=INFRA_MAX_ATTEMPTS,
+    )
+    rec2 = _Recorder([wl_cap])
+    out2 = _reconcile(rec2)
+    assert any(f"giveup-infra:{INFRA_MAX_ATTEMPTS}/{INFRA_MAX_ATTEMPTS}" in line for line in out2), out2
+
+
+def test_reconcile_executor_error_gives_up_after_infra_cap():
+    # The infra budget is bounded so a permanently broken backend cannot
+    # loop forever. Once it is hit, the Failed tombstone is left in place
+    # and the result line is giveup-infra:N/M.
+    wl = _failed_wl_with_executor_error(
+        "w-infra-3", attempt=INFRA_MAX_ATTEMPTS,
+    )
+    rec = _Recorder([wl])
+    out = _reconcile(rec)
+    assert any(
+        f"giveup-infra:{INFRA_MAX_ATTEMPTS}/{INFRA_MAX_ATTEMPTS}" in line
+        for line in out
+    ), out
+    # Nothing was deleted and nothing was created: the tombstone stays.
+    assert rec.deleted == []
+    assert rec.created == []
+
+
+def test_reconcile_verdict_failure_still_increments_attempt():
+    # Real NO-GO/INCOMPLETE verdicts must continue to spend the budget —
+    # this issue changes nothing for them.
+    wl = _failed_wl(name="w-verdict-1", attempt=1)
+    rec = _Recorder([wl])
+    out = _reconcile(rec)
+    assert any("retry:2/" in line for line in out), out
+    created = rec.created[-1]
+    assert created["metadata"]["annotations"][ATTEMPT_ANNOTATION] == "2"
+
+
+def test_env_documents_default_max_attempts_in_sync_with_retry_default():
+    # bridge/env.py:24 documents RETRY_MAX_ATTEMPTS as "3", matching
+    # DEFAULT_MAX_ATTEMPTS in bridge/retry.py. Disagreement here was
+    # what made the 2026-08-16 incident harder to diagnose.
+    from bridge.env import OPTIONAL_VARS
+    assert OPTIONAL_VARS["RETRY_MAX_ATTEMPTS"] == str(DEFAULT_MAX_ATTEMPTS)
