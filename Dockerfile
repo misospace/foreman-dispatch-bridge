@@ -15,9 +15,17 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 # Drop this layer once the base ships the fix, i.e. when
 #   docker run --rm <base-digest> dpkg-query -W -f='${Version}\n' util-linux
 # reports 2.41.5-0+deb13u1 or newer. At that point it is a no-op costing build time.
+# Versions are pinned so this layer is deterministic: a bare `apt-get install`
+# would resolve against whatever the mirror holds at build time, which is the
+# same reproducibility hole that argues against a blanket `apt-get upgrade`.
+# If Debian supersedes these, the build fails loudly rather than drifting, which
+# is the reminder to check whether the base has caught up and this can go.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends --only-upgrade \
-        util-linux bsdutils login mount \
+        util-linux=2.41.5-0+deb13u1 \
+        bsdutils=1:2.41.5-0+deb13u1 \
+        mount=2.41.5-0+deb13u1 \
+        login=1:4.16.0-2+really2.41.5-0+deb13u1 \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
