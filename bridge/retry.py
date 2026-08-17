@@ -158,6 +158,37 @@ def branch_pushed(tasks: list, remote_branch_exists: bool = False) -> bool:
     return False
 
 
+def _park_exhausted_factory(
+    park_for_human: Optional[Callable[[ClaimedItem, str], bool]],
+    current_lane_for: Optional[dict],
+    lookup_issue_id: Optional[LookupIssueId],
+) -> Callable[[dict, str], bool]:
+    """Build the _park_exhausted closure used by the giveup branches.
+
+    Parking is best-effort: a failure here must not abort the reconcile pass,
+    because the remaining Workloads and the downstream claim/pr-fix passes
+    still need to run. The tombstone is left in place either way, so a failed
+    park degrades to today's behaviour rather than losing the work.
+    """
+
+    def _park_exhausted(wl: dict, reason: str) -> bool:
+        if park_for_human is None:
+            return False
+        try:
+            item = refresh_lane(item_from_workload(wl), current_lane_for)
+            if not item.issue_id and lookup_issue_id:
+                item = replace(item, issue_id=lookup_issue_id(item) or "")
+            return bool(park_for_human(item, reason))
+        except Exception:
+            logger.exception(
+                "park-exhausted-failed",
+                extra={"workload": (wl.get("metadata") or {}).get("name")},
+            )
+            return False
+
+    return _park_exhausted
+
+
 def attempt_of(wl: dict) -> int:
     """Read the attempt counter off a Workload; absent/garbage -> 1."""
     ann = (wl.get("metadata") or {}).get("annotations") or {}
@@ -285,9 +316,10 @@ def reconcile_failures(
         lane and builds a fresh Workload with that lane's coder Agent. If the
         escalate call fails, keep the tombstone so the next tick retries it.
       - attempt >= max_attempts otherwise (already escalated, or no hook): leave
-        it as a Failed tombstone (no action). The issue stays claimed so the
-        groomer won't re-serve it into a loop; a human triages from the
-        lingering Workload.
+        it as a Failed tombstone AND park the issue (status/backlog +
+        needs-human) so a human can actually find it. The tombstone alone is
+        not a worklist: a claimed issue with an exhausted Workload is invisible
+        on the board and holds a slot against MAX_IN_PROGRESS until the prune.
 
     A Workload whose task failed with `reason: ExecutorError` on its Completed
     condition is treated as an infrastructure failure (the request never
@@ -302,6 +334,9 @@ def reconcile_failures(
     base_coder_agents = base_coder_agents or {}
     repo_coder_agents = repo_coder_agents or {}
     results = []
+    _park_exhausted = _park_exhausted_factory(
+        park_for_human, current_lane_for, lookup_issue_id
+    )
     for wl in list_failed():
         name = (wl.get("metadata") or {}).get("name") or "?"
         attempt = attempt_of(wl)
@@ -392,6 +427,16 @@ def reconcile_failures(
             # in place — escalating to the frontier lane would only pay for
             # a stronger model to hit the same 403. A human triages from the
             # lingering Workload.
+            #
+            # Park the issue as well, or "a human triages" never happens: the
+            # issue stays claimed at status/in-progress with no Workload that
+            # will ever run again, invisible on the board and holding a slot
+            # against MAX_IN_PROGRESS until the 48h prune. Parking moves it to
+            # backlog with needs-human so it appears on the operator worklist.
+            _park_exhausted(
+                wl, f"infra failure after {attempt} attempts (e.g. model 403 "
+                "or network error that never reached the agent)",
+            )
             results.append(f"{name}:giveup-infra:{attempt}/{infra_max_attempts}")
             continue
         if attempt >= max_attempts:
@@ -421,6 +466,13 @@ def reconcile_failures(
             if escalated:
                 results.append(f"{name}:escalated:{item.lane or '?'}->{escalation_lane}")
             else:
+                # Same reasoning as the infra branch: without parking, an
+                # unescalatable exhausted Workload pins its issue in-progress
+                # forever.
+                _park_exhausted(
+                    wl, f"exhausted {attempt} attempts with no escalation lane "
+                    "available",
+                )
                 results.append(f"{name}:giveup:{attempt}/{max_attempts}")
             continue
         item = refresh_lane(item_from_workload(wl), current_lane_for)

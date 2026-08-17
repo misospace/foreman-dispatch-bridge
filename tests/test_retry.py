@@ -789,3 +789,85 @@ def test_env_documents_default_max_attempts_in_sync_with_retry_default():
     # what made the 2026-08-16 incident harder to diagnose.
     from bridge.env import OPTIONAL_VARS
     assert OPTIONAL_VARS["RETRY_MAX_ATTEMPTS"] == str(DEFAULT_MAX_ATTEMPTS)
+
+
+# --- exhausted Workloads must park their issue -------------------------------
+# A Failed Workload at the attempt cap is never retried and never deleted, so
+# without parking the issue stays claimed at status/in-progress with nothing
+# that will ever run behind it: invisible on the board, and holding a slot
+# against MAX_IN_PROGRESS until the 48h prune. On 2026-08-17 fourteen issues
+# were pinned this way and needed manual `kubectl delete workload` to recover.
+
+
+def _parks():
+    """Return (hook, recorded) where recorded collects (item, reason) pairs."""
+    recorded: list = []
+
+    def park(item, reason):
+        recorded.append((item, reason))
+        return True
+
+    return park, recorded
+
+
+def test_infra_giveup_parks_the_issue():
+    park, parked = _parks()
+    wl = _failed_wl_with_executor_error("w-infra-park", attempt=INFRA_MAX_ATTEMPTS)
+    rec = _Recorder([wl])
+    out = _reconcile(rec, park_for_human=park)
+    assert any("giveup-infra:" in line for line in out), out
+    assert len(parked) == 1, parked
+    assert "infra failure" in parked[0][1]
+    # The tombstone is still left in place for triage.
+    assert rec.deleted == []
+    assert rec.created == []
+
+
+def test_verdict_giveup_parks_when_escalation_is_unavailable():
+    park, parked = _parks()
+    rec = _Recorder([_failed_wl("wl-a-b-7", attempt=3)])
+    out = _reconcile(rec, park_for_human=park)  # no escalate hook wired
+    assert out == ["wl-a-b-7:giveup:3/3"]
+    assert len(parked) == 1, parked
+    assert "exhausted 3 attempts" in parked[0][1]
+    assert rec.deleted == []
+
+
+def test_escalated_workloads_are_not_parked():
+    # Escalation is the healthy path: the issue moves to the frontier lane and
+    # is re-claimed there. Parking it would strand work that has somewhere to go.
+    park, parked = _parks()
+    rec = _Recorder([_failed_wl("wl-a-b-7", attempt=3)])
+    out = _reconcile(
+        rec, park_for_human=park,
+        escalate=lambda item: True, escalation_lane="frontier",
+    )
+    assert any("escalated:" in line for line in out), out
+    assert parked == []
+
+
+def test_under_cap_retries_are_not_parked():
+    # A Workload with budget left is retried, not parked.
+    park, parked = _parks()
+    rec = _Recorder([_failed_wl("wl-a-b-7", attempt=1)])
+    out = _reconcile(rec, park_for_human=park)
+    assert any("retry:2/" in line for line in out), out
+    assert parked == []
+
+
+def test_park_failure_does_not_abort_the_pass():
+    # Parking is best-effort: a raising hook must not lose the remaining
+    # Workloads or the giveup result line.
+    def boom(item, reason):
+        raise RuntimeError("dispatch 500")
+
+    rec = _Recorder([_failed_wl("wl-a-b-7", attempt=3)])
+    out = _reconcile(rec, park_for_human=boom)
+    assert out == ["wl-a-b-7:giveup:3/3"]
+
+
+def test_no_park_hook_is_tolerated():
+    # park_for_human is optional; omitting it keeps the pre-existing behaviour.
+    rec = _Recorder([_failed_wl("wl-a-b-7", attempt=3)])
+    out = _reconcile(rec)
+    assert out == ["wl-a-b-7:giveup:3/3"]
