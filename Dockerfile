@@ -6,6 +6,20 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1
 
+# TEMPORARY (remove me): CVE-2026-53615 is a HIGH in util-linux 2.41-5, which the
+# pinned python:3.14-slim base still ships. Debian fixed it in 2.41.5-0+deb13u1,
+# but the upstream image has not rebuilt against that snapshot, so the release
+# Trivy gate fails on nine packages that all come from this one source. Pull the
+# fixed packages straight from Debian until the base catches up.
+#
+# Drop this layer once the base ships the fix, i.e. when
+#   docker run --rm <base-digest> dpkg-query -W -f='${Version}\n' util-linux
+# reports 2.41.5-0+deb13u1 or newer. At that point it is a no-op costing build time.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends --only-upgrade \
+        util-linux bsdutils login mount \
+    && rm -rf /var/lib/apt/lists/*
+
 WORKDIR /app
 
 COPY requirements.txt /app/requirements.txt
