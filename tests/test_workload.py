@@ -13,6 +13,7 @@ from bridge.workload import (
     parse_coder_agent_slots,
     _pick_coder,
     _slots_for,
+    filter_fix_first,
     CODER_AGENT,
 )
 
@@ -566,3 +567,111 @@ def test_coder_agent_for_picks_free_slot_within_the_lane_tier():
         "local", None, agents, issue_number=4,
         agent_load={"coder": 1}, agent_slots=slots,
     ) == "coder-frontier"
+
+
+# Issue #134: fix-first work-stealing. The fix coder's participation in the
+# issue rotation is conditional on its fix backlog. With fix work in flight
+# (load > 0) or no free slot, the agent is excluded; with both clear, it
+# steals issues like any other coder. Non-fix-first agents are unaffected.
+
+
+def test_filter_fix_first_drops_agent_with_load():
+    out = filter_fix_first(
+        ["coder", "coder-frontier"],
+        fix_first_agents={"coder"},
+        agent_load={"coder": 1},
+    )
+    assert out == ["coder-frontier"]
+
+
+def test_filter_fix_first_keeps_agent_with_no_load():
+    out = filter_fix_first(
+        ["coder", "coder-frontier"],
+        fix_first_agents={"coder"},
+        agent_load={"coder": 0},
+    )
+    assert out == ["coder", "coder-frontier"]
+
+
+def test_filter_fix_first_drops_agent_at_capacity():
+    # coder has 1 slot, 1 fix in flight → free_slots == 0, so the fix path
+    # stays uncontended; coder-frontier still has 4 free and is kept.
+    out = filter_fix_first(
+        ["coder", "coder-frontier"],
+        fix_first_agents={"coder"},
+        agent_load={"coder": 1},
+        agent_slots={"coder": 1, "coder-frontier": 4},
+    )
+    assert out == ["coder-frontier"]
+
+
+def test_filter_fix_first_keeps_agent_with_free_slot():
+    out = filter_fix_first(
+        ["coder", "coder-frontier"],
+        fix_first_agents={"coder"},
+        agent_load={"coder": 0},
+        agent_slots={"coder": 1, "coder-frontier": 4},
+    )
+    # coder has 0 load and 1 free slot, so it qualifies.
+    assert out == ["coder", "coder-frontier"]
+
+
+def test_filter_fix_first_no_op_without_config():
+    candidates = ["coder", "coder-frontier"]
+    # No fix_first_agents set: the function is a transparent pass-through.
+    assert filter_fix_first(candidates) == candidates
+    assert filter_fix_first(candidates, fix_first_agents=None) == candidates
+    # Non-fix-first agents are never filtered, even with high load.
+    assert filter_fix_first(
+        candidates, fix_first_agents={"someone-else"},
+        agent_load={"coder": 99},
+    ) == candidates
+
+
+def test_filter_fix_first_drops_all_fix_first_when_busy():
+    # If every fix-first agent has fix work, the rotation falls back to the
+    # empty list — the saturation gate should not count a parked fix coder
+    # as a "coder busy" against a fresh issue claim.
+    out = filter_fix_first(
+        ["coder"],
+        fix_first_agents={"coder"},
+        agent_load={"coder": 1},
+    )
+    assert out == []
+
+
+def test_coder_candidates_applies_fix_first_filter():
+    agents = {"*": ["coder", "coder-frontier"]}
+    # Without the filter, both candidates come back.
+    assert coder_candidates("local", agents) == ["coder", "coder-frontier"]
+    # With fix work on coder, only coder-frontier is in the rotation.
+    out = coder_candidates(
+        "local", agents,
+        agent_load={"coder": 1},
+        fix_first_agents={"coder"},
+    )
+    assert out == ["coder-frontier"]
+
+
+def test_pick_coder_skips_fix_first_with_load():
+    # Deterministic offset lands on coder; the fix-first filter must drop it
+    # because it has fix work in flight, even though issue_number would
+    # otherwise pick it. coder-frontier picks up the work.
+    out = _pick_coder(
+        ["coder", "coder-frontier"],
+        issue_number=0,
+        load={"coder": 1},
+        fix_first_agents={"coder"},
+    )
+    assert out == "coder-frontier"
+
+
+def test_coder_agent_for_applies_fix_first_filter():
+    agents = {"*": ["coder", "coder-frontier"]}
+    # Issue 0 hashes to "coder"; with fix work in flight, it must be skipped.
+    out = coder_agent_for(
+        "local", None, agents, issue_number=0,
+        agent_load={"coder": 1},
+        fix_first_agents={"coder"},
+    )
+    assert out == "coder-frontier"
