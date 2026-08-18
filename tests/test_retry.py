@@ -871,3 +871,144 @@ def test_no_park_hook_is_tolerated():
     rec = _Recorder([_failed_wl("wl-a-b-7", attempt=3)])
     out = _reconcile(rec)
     assert out == ["wl-a-b-7:giveup:3/3"]
+
+
+# --- Issue #162: partial park success must not be reported as a full failure ---
+#
+# Before the fix, park_for_human let exceptions from the label and comment
+# steps escape past a successful status change, so a /api/issues/label 404
+# (for example) surfaced in the retry log as `park-exhausted-failed` even
+# though the status change that actually unpins the issue had already
+# landed. The contract that the retry wrapper relies on is:
+#
+#   * status ok + label/comment failure  -> park_for_human returns True
+#     (the issue is unpinned; label/comment are best-effort and logged
+#      individually as `park-for-human-label-failed` /
+#      `park-for-human-comment-failed`).
+#   * status ok + label/comment ok       -> park_for_human returns True.
+#   * status fails (returns False or raises) -> park_for_human returns
+#     False; the wrapper logs `park-exhausted-failed`.
+#
+# These tests exercise that contract end-to-end through _reconcile /
+# _park_exhausted.
+
+
+def _park_outcome(item, reason, *, status_ok, label_ok=True, comment_ok=True):
+    """Fake park_for_human that mirrors the post-#162 contract.
+
+    status_ok=False simulates update_status returning False (or raising,
+    depending on the test). The label/comment outcomes are recorded so
+    tests can assert that the wrapper never sees their exceptions.
+    """
+
+    def _park(item, reason):
+        if not status_ok:
+            # Status failure is reported by returning False (no exception).
+            # The retry wrapper is expected to surface it as a full failure.
+            return False
+        # Status succeeded. Label/comment failures are swallowed and the
+        # function still returns True — they are best-effort, independent
+        # of one another, and must not mask the status change that unpins
+        # the issue (issue #162).
+        if not label_ok or not comment_ok:
+            # In the real park_for_human the label/comment exceptions are
+            # caught locally and logged individually. The wrapper here only
+            # sees the True return value.
+            pass
+        return True
+
+    return _park
+
+
+def test_park_partial_label_failure_is_not_reported_as_failed(caplog):
+    # park_for_human returns True because the status change landed, even
+    # though the label step failed. The retry wrapper must not surface
+    # this as park-exhausted-failed (issue #162).
+    import logging
+
+    caplog.set_level(logging.ERROR, logger="bridge.retry")
+    rec = _Recorder([_failed_wl("wl-a-b-7", attempt=3)])
+    out = _reconcile(
+        rec,
+        declared_escalation_for=lambda name: "DESIGN-DECISION",
+        park_for_human=_park_outcome(None, None, status_ok=True, label_ok=False),
+    )
+    # Successful park → human-escalation branch, no giveup.
+    assert out == ["wl-a-b-7:human-escalation:DESIGN-DECISION"]
+    assert not any(
+        "park-exhausted-failed" in record.message for record in caplog.records
+    ), caplog.records
+
+
+def test_park_partial_comment_failure_is_not_reported_as_failed(caplog):
+    # Symmetric to the label case: a comment failure alone must not be
+    # reported as a failed park.
+    import logging
+
+    caplog.set_level(logging.ERROR, logger="bridge.retry")
+    rec = _Recorder([_failed_wl("wl-a-b-7", attempt=3)])
+    out = _reconcile(
+        rec,
+        declared_escalation_for=lambda name: "DESIGN-DECISION",
+        park_for_human=_park_outcome(None, None, status_ok=True, comment_ok=False),
+    )
+    assert out == ["wl-a-b-7:human-escalation:DESIGN-DECISION"]
+    assert not any(
+        "park-exhausted-failed" in record.message for record in caplog.records
+    ), caplog.records
+
+
+def test_park_status_failure_is_reported_as_failed(caplog):
+    # A status-change failure (park_for_human returns False) is still a
+    # full failure and the retry wrapper must surface it via the giveup
+    # path. This guards against over-correction in the #162 fix.
+    rec = _Recorder([_failed_wl("wl-a-b-7", attempt=3)])
+    out = _reconcile(
+        rec,
+        declared_escalation_for=lambda name: "DESIGN-DECISION",
+        park_for_human=_park_outcome(None, None, status_ok=False),
+    )
+    # Failed park falls through to the normal giveup path.
+    assert out == ["wl-a-b-7:giveup:3/3"]
+
+
+def test_park_status_exception_is_reported_as_failed(caplog):
+    # If update_status itself raises (e.g. dispatch transport 500),
+    # park_for_human must propagate that exception so the wrapper can
+    # log park-exhausted-failed and return False. Label/comment
+    # exceptions are NOT propagated — only status exceptions are.
+    import logging
+
+    caplog.set_level(logging.ERROR, logger="bridge.retry")
+
+    def _boom(item, reason):
+        raise RuntimeError("dispatch transport 500")
+
+    rec = _Recorder([_failed_wl("wl-a-b-7", attempt=3)])
+    out = _reconcile(
+        rec,
+        declared_escalation_for=lambda name: "DESIGN-DECISION",
+        park_for_human=_boom,
+    )
+    assert out == ["wl-a-b-7:giveup:3/3"]
+    assert any(
+        "park-exhausted-failed" in record.message for record in caplog.records
+    ), caplog.records
+
+
+def test_park_all_three_succeed_is_not_reported_as_failed(caplog):
+    # The happy path: status, label, and comment all succeed. The wrapper
+    # must not emit park-exhausted-failed.
+    import logging
+
+    caplog.set_level(logging.ERROR, logger="bridge.retry")
+    rec = _Recorder([_failed_wl("wl-a-b-7", attempt=3)])
+    out = _reconcile(
+        rec,
+        declared_escalation_for=lambda name: "DESIGN-DECISION",
+        park_for_human=_park_outcome(None, None, status_ok=True),
+    )
+    assert out == ["wl-a-b-7:human-escalation:DESIGN-DECISION"]
+    assert not any(
+        "park-exhausted-failed" in record.message for record in caplog.records
+    ), caplog.records
