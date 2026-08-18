@@ -41,6 +41,7 @@ issue per lane.
 | `RETRY_MAX_ATTEMPTS` | `3` | attempts before escalate/tombstone |
 | `PR_FIX_ENABLED` | *(off)* | enable the PR-fix drain/reconcile loop |
 | `PR_FIX_MAX_ATTEMPTS` | `3` | pr-fix attempts before BLOCKED/tombstone |
+| `FIX_FIRST_AGENTS` | *(empty)* | JSON list `["coder"]` (or comma-separated names) of agents that only join the issue rotation when their fix lane is idle (no fix work in flight, a free slot). Fixes stay first-priority on an uncontended slot. See issue #134. |
 | `GITHUB_TOKEN` | *(empty)* | used to check a PR's `mergeable_state` before marking a pr-fix FIXED (unauthenticated if unset) |
 | `VERIFY_ENABLED` | `true` | set to `false` to omit the verify step and rely on repository CI (requires Foreman >= 0.9.9). Older Foreman versions reject Workloads without the required `verifierAgentRef`. |
 | `VERDICT_SELF_GO` | _(unset)_ | Comma-separated lanes whose terminal Workload verdict the bridge is allowed to auto-mark `selfGo` (recommended for use with `foreman dispatch run --wait`) |

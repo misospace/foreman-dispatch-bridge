@@ -156,13 +156,57 @@ def free_slots(agent: str, load: dict, slots: dict) -> int:
     return _slots_for(agent, slots) - int(load.get(agent, 0) or 0)
 
 
-def coder_candidates(lane: str, lane_coder_agents: dict) -> list:
+def filter_fix_first(
+    candidates: list,
+    fix_first_agents: Optional[set] = None,
+    agent_load: Optional[dict] = None,
+    agent_slots: Optional[dict] = None,
+) -> list:
+    """Drop fix-first agents that still have fix work or a full slot.
+
+    Fix-first agents opt into the issue rotation only when their fix lane is
+    idle: no held Workloads on the fix path and a free capacity slot. An
+    agent with active fix work would otherwise split its single slot between
+    an in-flight fix and a fresh issue, and the fix path is supposed to keep
+    that slot uncontended.
+
+    Non-fix-first agents pass through. A fix-first agent with no declared
+    slots only needs load == 0 to qualify — the slot count guard is skipped
+    rather than refusing it for missing capacity config.
+    """
+    if not fix_first_agents or not candidates:
+        return list(candidates)
+    load = agent_load or {}
+    slots = agent_slots or {}
+    kept = []
+    for agent in candidates:
+        if agent not in fix_first_agents:
+            kept.append(agent)
+            continue
+        if int(load.get(agent, 0) or 0) > 0:
+            continue
+        if slots and free_slots(agent, load, slots) <= 0:
+            continue
+        kept.append(agent)
+    return kept
+
+
+def coder_candidates(
+    lane: str, lane_coder_agents: dict,
+    agent_load: Optional[dict] = None,
+    agent_slots: Optional[dict] = None,
+    fix_first_agents: Optional[set] = None,
+) -> list:
     """The language-agnostic candidates for a lane: its explicit mapping, else the
     wildcard. Normalized to a list so a single name and a list are handled alike.
 
     Only the lane tier is resolvable before an issue is claimed — the repo and
     language tiers need the claimed item — so this is what a pre-claim capacity
     check can see.
+
+    fix_first_agents (an optional set of agent names) opts those agents out of
+    the issue rotation while they still hold fix work or have a full slot, so
+    the fix path's single slot stays uncontended. See issue #134.
     """
     lane_coder_agents = lane_coder_agents or {}
     value = lane_coder_agents.get(lane)
@@ -170,7 +214,8 @@ def coder_candidates(lane: str, lane_coder_agents: dict) -> list:
         value = lane_coder_agents.get(LANE_CODER_WILDCARD)
     if value is None:
         return []
-    return list(value) if isinstance(value, list) else [value]
+    base = list(value) if isinstance(value, list) else [value]
+    return filter_fix_first(base, fix_first_agents, agent_load, agent_slots)
 
 
 def coders_saturated(candidates: list, load: dict, slots: dict) -> bool:
@@ -185,7 +230,8 @@ def coders_saturated(candidates: list, load: dict, slots: dict) -> bool:
 
 
 def _pick_coder(value, issue_number: Optional[int], load: Optional[dict] = None,
-                slots: Optional[dict] = None):
+                slots: Optional[dict] = None,
+                fix_first_agents: Optional[set] = None):
     """Resolve a lane mapping that may be one Agent name or a list of them.
 
     With CODER_AGENT_SLOTS configured, a list resolves to the candidate with the
@@ -203,11 +249,31 @@ def _pick_coder(value, issue_number: Optional[int], load: Optional[dict] = None,
     Model availability is still NOT this function's job: a down model is covered
     by litellm fallbacks at request time. This routes on declared capacity, not
     on health.
+
+    fix_first_agents (an optional set of agent names) opts fix-first agents out
+    while they still hold fix work or have a full slot, so the fix lane's
+    single slot stays uncontended. A fix-first agent that has dropped out is
+    skipped in the capacity ranking and the deterministic tie-break, so it
+    cannot win via a saturated fallback either. See issue #134.
     """
     if not isinstance(value, list):
         return value
     if not value:
         return None
+    if fix_first_agents:
+        # Drop the fix-first agents that still have fix work or no free slot.
+        # Without a fix-first_agents config this is a no-op.
+        kept = []
+        for agent in value:
+            if agent in fix_first_agents:
+                if (load or {}).get(agent, 0) > 0:
+                    continue
+                if slots and free_slots(agent, load or {}, slots) <= 0:
+                    continue
+            kept.append(agent)
+        if not kept:
+            return None
+        value = kept
     if slots:
         free = [free_slots(agent, load or {}, slots) for agent in value]
         best = max(free)
@@ -221,6 +287,7 @@ def coder_agent_for(
     base_coder_agents: Optional[dict] = None, repo: Optional[str] = None,
     repo_coder_agents: Optional[dict] = None, issue_number: Optional[int] = None,
     agent_load: Optional[dict] = None, agent_slots: Optional[dict] = None,
+    fix_first_agents: Optional[set] = None,
 ) -> str:
     """Resolve a lane's coder Agent.
 
@@ -251,11 +318,17 @@ def coder_agent_for(
     repo_coder_agents = repo_coder_agents or {}
     load = agent_load or {}
     slots = agent_slots or {}
-    explicit = _pick_coder(lane_coder_agents.get(lane), issue_number, load, slots)
+    explicit = _pick_coder(
+        lane_coder_agents.get(lane), issue_number, load, slots,
+        fix_first_agents=fix_first_agents,
+    )
     if explicit:
         return explicit
     by_repo = (
-        _pick_coder(repo_coder_agents.get(repo), issue_number, load, slots) if repo else None
+        _pick_coder(
+            repo_coder_agents.get(repo), issue_number, load, slots,
+            fix_first_agents=fix_first_agents,
+        ) if repo else None
     )
     if by_repo:
         return by_repo
@@ -263,11 +336,15 @@ def coder_agent_for(
         by_lang = _pick_coder(
             base_coder_agents.get(language) or base_coder_agents.get(LANE_CODER_WILDCARD),
             issue_number, load, slots,
+            fix_first_agents=fix_first_agents,
         )
         if by_lang:
             return by_lang
     return (
-        _pick_coder(lane_coder_agents.get(LANE_CODER_WILDCARD), issue_number, load, slots)
+        _pick_coder(
+            lane_coder_agents.get(LANE_CODER_WILDCARD), issue_number, load, slots,
+            fix_first_agents=fix_first_agents,
+        )
         or CODER_AGENT
     )
 

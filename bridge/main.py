@@ -1,4 +1,5 @@
 import functools
+import json
 import logging
 import os
 import re
@@ -142,6 +143,38 @@ def _parse_bool_env(raw: str, default: bool = True) -> bool:
     return True
 
 
+def _parse_fix_first_agents(raw: Optional[str]) -> set:
+    """Parse the FIX_FIRST_AGENTS env var into a set of agent names.
+
+    Accepts a JSON list (`["coder", "fixer"]`), a comma-separated string
+    (`coder,fixer`), whitespace-separated names, or a single bare name
+    (`coder`). Empty/missing returns an empty set, so callers can pass the
+    result through unconditionally and treat an unset env as the historical
+    "every coder is always in the rotation" behavior.
+
+    Unparseable JSON falls back to a comma/whitespace split, which is what
+    an operator is most likely to have typed in a Deployment.
+    """
+    if not raw:
+        return set()
+    text = raw.strip()
+    if not text:
+        return set()
+    # Try JSON first: it is the documented form in the issue sketch.
+    if text.startswith("["):
+        try:
+            parsed = json.loads(text)
+            if isinstance(parsed, list):
+                return {str(name).strip() for name in parsed if str(name).strip()}
+        except (ValueError, TypeError):
+            pass
+    # Fall back to a delimiter split. Comma is the most common operator
+    # form; whitespace is the loose reading for "coder fixer" or
+    # newline-separated lists.
+    parts = [p.strip().strip('"\'') for p in re.split(r"[,\s]+", text) if p.strip()]
+    return {p for p in parts if p}
+
+
 def check_pr_mergeable(repo, pr, *, http_get, github_token) -> str:
     """Return a mergeability status string.
 
@@ -263,6 +296,7 @@ def run_once(
     self_go: list[str] | None = None,
     agent_load: Optional[dict] = None,
     agent_slots: Optional[dict] = None,
+    fix_first_agents: Optional[set] = None,
 ) -> list:
     """Claim one ready issue per lane and materialize a Workload for each. Returns per-lane outcomes.
 
@@ -318,7 +352,11 @@ def run_once(
                 if created_here == 0:
                     results.append(f"{lane}:capped:{in_progress}/{max_in_progress}")
                 break
-            candidates = coder_candidates(lane, lane_coder_agents)
+            candidates = coder_candidates(
+                lane, lane_coder_agents,
+                agent_load=load, agent_slots=agent_slots,
+                fix_first_agents=fix_first_agents,
+            )
             if coders_saturated(candidates, load, agent_slots):
                 # Every coder this lane can reach is full. Leave the issue
                 # unclaimed so the next tick can route it once a slot frees.
@@ -337,6 +375,7 @@ def run_once(
                 repo=item.repo, repo_coder_agents=repo_coder_agents,
                 issue_number=item.issue_number,
                 agent_load=load, agent_slots=agent_slots,
+                fix_first_agents=fix_first_agents,
             )
             manifest = build_workload(
                 item,
@@ -697,6 +736,11 @@ def _real_main() -> None:  # pragma: no cover - thin wiring, exercised in the cl
     active = count_active_workloads() if max_in_progress else 0
     coder_slots = parse_coder_agent_slots(os.environ.get("CODER_AGENT_SLOTS"))
     coder_load = load_by_coder_agent() if coder_slots else {}
+    # Fix-first work-stealing (issue #134): named agents are removed from the
+    # issue rotation while they still hold fix work or have a full slot, so
+    # the fix lane's single slot stays uncontended. A JSON list ["coder"] or
+    # a comma-separated "coder,fixer" both parse to {"coder"} (etc.).
+    fix_first_agents = _parse_fix_first_agents(os.environ.get("FIX_FIRST_AGENTS"))
     for line in run_once(
         lanes, agent_name, dispatch.claim_one, create_workload, namespace,
         gate_profiles, lane_coder_agents, revision_coder_agents,
@@ -706,6 +750,7 @@ def _real_main() -> None:  # pragma: no cover - thin wiring, exercised in the cl
         verify_enabled=verify_enabled,
         self_go=self_go,
         agent_load=coder_load, agent_slots=coder_slots,
+        fix_first_agents=fix_first_agents,
     ):
         logger.info(line)
 
