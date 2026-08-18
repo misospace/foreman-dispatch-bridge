@@ -185,12 +185,13 @@ def check_pr_mergeable(repo, pr, *, http_get, github_token) -> str:
     if state == "conflicting":
         return "conflicting"
 
-    # Treat unstable (required checks failed) as checks_failed
-    if state == "unstable":
-        return "checks_failed"
-    # blocked means required statuses are pending or other blockers
-    if state == "blocked":
-        return "checks_pending"
+    # For unstable/blocked, distinguish a failing check (fixable by a coder)
+    # from a non-check blocker (awaiting review, etc.) by looking at the
+    # check-runs on the head commit. Returning early on "blocked" with
+    # "checks_pending" without consulting check-runs caused #163: a PR with
+    # mergeStateStatus=BLOCKED caused by a failing check was misread as a
+    # pending-checks state, burned three attempts, and was abandoned.
+    inspect_blockers = state in ("unstable", "blocked")
 
     # Additionally verify check-runs on the head commit
     try:
@@ -217,13 +218,13 @@ def check_pr_mergeable(repo, pr, *, http_get, github_token) -> str:
 
             if has_failed:
                 return "checks_failed"
-            if has_pending or not saw_any:
-                if not check_runs:
-                    logger.info(
-                        "prfix-no-check-runs",
-                        extra={"repo": repo, "pr": pr, "sha": head_sha},
-                    )
+            if has_pending:
                 return "checks_pending"
+            if not saw_any:
+                logger.info(
+                    "prfix-no-check-runs",
+                    extra={"repo": repo, "pr": pr, "sha": head_sha},
+                )
     except Exception as exc:
         logger.error(
             "prfix-check-runs-error",
@@ -233,6 +234,14 @@ def check_pr_mergeable(repo, pr, *, http_get, github_token) -> str:
         # reconcile_pr_fixes just retries under its attempt cap rather
         # than falsely marking FIXED off an unverified success.
         return "checks_pending"
+
+    # If mergeable_state is "unstable" or "blocked" with no failing check
+    # to blame (no failing check, no pending check, no checks at all), the
+    # PR is blocked for a non-check reason (e.g. awaiting required review,
+    # merge queue not ready). The coder cannot resolve this; do not burn
+    # retry attempts on it. (#163)
+    if inspect_blockers:
+        return "blocked"
 
     return "ok"
 
