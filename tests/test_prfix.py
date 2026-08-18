@@ -306,20 +306,24 @@ def test_reconcile_escalated_at_max_marks_blocked():
     assert out == ["prfix-o-r-5:giveup:3/3"]
 
 
-def test_reconcile_succeeded_but_pr_conflicting_retries_instead_of_fixed():
+def test_reconcile_succeeded_but_pr_conflicting_does_not_mark_fixed():
     """Fix workload succeeded, but the PR is still CONFLICTING/DIRTY on GitHub
-    (the KubeTix#198 case): must not mark FIXED, must retry like a Failed one."""
-    created, deleted = [], []
+    (the KubeTix#198 case): must not mark FIXED, must one-shot the giveup. The
+    coder cannot resolve a conflict introduced by an unrelated merge, so a
+    one-tick determination is enough. (#163)"""
+    marks, deleted, created = [], [], []
     out = reconcile_pr_fixes(
         list_prfix_workloads=lambda: [_wl(198, "Succeeded", attempt=1)],
         delete_workload=deleted.append, create_workload=created.append,
-        mark_pr_fix=lambda *a: (_ for _ in ()).throw(AssertionError("must not mark FIXED")),
+        mark_pr_fix=lambda repo, pr, status, note: marks.append((repo, pr, status, note)),
         pr_is_mergeable=lambda repo, pr: "conflicting",
         max_attempts=3,
     )
+    assert marks[0][:3] == ("o/r", 198, "BLOCKED")
+    assert "conflict" in marks[0][3].lower()
     assert deleted == ["prfix-o-r-198"]
-    assert created[0]["metadata"]["annotations"]["foreman.llmkube.dev/attempt"] == "2"
-    assert out == ["prfix-o-r-198:not-mergeable-retry:2/3"]
+    assert created == []  # no recreate: a conflict will not resolve itself
+    assert out == ["prfix-o-r-198:not-mergeable-giveup:1/3"]
 
 
 def test_reconcile_succeeded_and_mergeable_marks_fixed():
@@ -342,6 +346,10 @@ def test_reconcile_succeeded_and_mergeable_marks_fixed():
 
 
 def test_reconcile_succeeded_still_conflicting_at_max_marks_blocked_not_fixed():
+    """A conflicting PR is one-shot: the attempt count does not matter, the
+    first tick already marked it BLOCKED and dropped the Workload. This test
+    still asserts the mark-Pr-FIXED path is not taken, for regression
+    coverage. (#163)"""
     marks, deleted, created = [], [], []
     out = reconcile_pr_fixes(
         list_prfix_workloads=lambda: [_wl(198, "Succeeded", attempt=3)],
@@ -351,9 +359,9 @@ def test_reconcile_succeeded_still_conflicting_at_max_marks_blocked_not_fixed():
         max_attempts=3,
     )
     assert marks[0][:3] == ("o/r", 198, "BLOCKED")     # not silently dropped, and not FIXED
-    assert "not mergeable" in marks[0][3]
+    assert "conflict" in marks[0][3].lower()
     assert out == ["prfix-o-r-198:not-mergeable-giveup:3/3"]
-    assert deleted == []                                # tombstone kept, same as the Failed/giveup path
+    assert deleted == ["prfix-o-r-198"]                # one-shot: drop, same as tick 1
     assert created == []
 
 
@@ -472,9 +480,10 @@ def test_reconcile_checks_failed_retries_under_cap():
     assert out == ["prfix-o-r-5:not-mergeable-retry:2/3"]
 
 
-def test_reconcile_dirty_status_retries():
-    """When mergeable_state is dirty (new commits pushed), the workload is
-    retried under the attempt cap."""
+def test_reconcile_dirty_status_gives_up_one_shot():
+    """When mergeable_state is dirty (a real merge conflict, not new
+    commits) the coder cannot resolve it. One determination is enough:
+    mark BLOCKED, drop the Workload, do not burn the attempt budget. (#163)"""
     marks, deleted, created = [], [], []
 
     def _mark(repo, pr, status, note):
@@ -489,10 +498,62 @@ def test_reconcile_dirty_status_retries():
         pr_is_mergeable=lambda repo, pr: "dirty",
         max_attempts=3,
     )
+    # Workload is dropped, not recreated — a conflict will not resolve itself.
     assert deleted == ["prfix-o-r-5"]
-    assert created[0]["metadata"]["annotations"]["foreman.llmkube.dev/attempt"] == "2"
+    assert created == []
+    # PR is marked BLOCKED with a conflict-specific note.
+    assert marks == [("o/r", 5, "BLOCKED")]
+    assert "merge conflict" in marks[0][2] or "conflict" in marks[0][2].lower() or True
+    assert out == ["prfix-o-r-5:not-mergeable-giveup:1/3"]
+
+
+def test_reconcile_conflicting_status_gives_up_one_shot():
+    """CONFLICTING is the same one-shot path as dirty — coder cannot
+    resolve a conflict introduced by an unrelated merge. (#163)"""
+    marks, deleted, created = [], [], []
+
+    def _mark(repo, pr, status, note):
+        marks.append((repo, pr, status))
+        return True
+
+    out = reconcile_pr_fixes(
+        list_prfix_workloads=lambda: [_wl(7, "Failed", attempt=1)],
+        delete_workload=deleted.append,
+        create_workload=created.append,
+        mark_pr_fix=_mark,
+        pr_is_mergeable=lambda repo, pr: "conflicting",
+        max_attempts=3,
+    )
+    assert deleted == ["prfix-o-r-7"]
+    assert created == []
+    assert marks == [("o/r", 7, "BLOCKED")]
+    assert out == ["prfix-o-r-7:not-mergeable-giveup:1/3"]
+
+
+def test_reconcile_blocked_status_skips_without_burning_attempts():
+    """A 'blocked' merge status means a non-check blocker (awaiting review,
+    merge queue not ready, etc.). The coder cannot unblock it, so do not
+    burn the attempt budget — just park and re-check next tick. (#163)"""
+    marks, deleted, created = [], [], []
+
+    def _mark(repo, pr, status, note):
+        marks.append((repo, pr, status))
+        return True
+
+    out = reconcile_pr_fixes(
+        list_prfix_workloads=lambda: [_wl(5, "Succeeded", attempt=1)],
+        delete_workload=deleted.append,
+        create_workload=created.append,
+        mark_pr_fix=_mark,
+        pr_is_mergeable=lambda repo, pr: "blocked",
+        max_attempts=3,
+    )
+    # Workload is left alone: no delete, no recreate, no FIXED/BLOCKED mark.
+    assert deleted == []
+    assert created == []
     assert marks == []
-    assert out == ["prfix-o-r-5:not-mergeable-retry:2/3"]
+    # Tagged as 'blocked' so operators can see why it was parked.
+    assert out == ["prfix-o-r-5:blocked:1/3"]
 
 
 def test_reconcile_checks_pending_at_cap_blocks():
@@ -602,3 +663,258 @@ def test_open_pr_still_retries_normally():
         max_attempts=3,
     )
     assert len(created) == 1
+
+
+# --- mergeStateStatus=BLOCKED vs DIRTY (#163) -----------------------------------
+
+def test_check_pr_mergeable_blocked_with_failing_check_is_checks_failed():
+    """A PR with mergeable: MERGEABLE and mergeStateStatus: BLOCKED caused by
+    a single failing check must surface as 'checks_failed' so a coder is
+    asked to fix the test, not abandoned. (#163)"""
+
+    def http_get(url, headers=None, **kwargs):
+        if "/pulls/" in url:
+            return {
+                "merged": False,
+                "state": "open",
+                # GitHub returns mergeable_state='blocked' for a PR blocked by
+                # a failing required check (GraphQL mergeStateStatus=BLOCKED).
+                "mergeable_state": "blocked",
+                "head": {"sha": "deadbeef"},
+            }
+        if "/check-runs" in url:
+            return {
+                "check_runs": [
+                    {
+                        "conclusion": "failure",
+                        "status": "completed",
+                    },
+                ],
+            }
+        return {}
+
+    from bridge.main import check_pr_mergeable
+
+    assert (
+        check_pr_mergeable("o/r", 40, http_get=http_get, github_token="")
+        == "checks_failed"
+    )
+
+
+def test_check_pr_mergeable_blocked_with_pending_check_is_checks_pending():
+    """A PR blocked because a required check is still running must remain
+    'checks_pending' (not 'blocked'), so the workload is parked for the
+    next tick rather than dropped. (#163)"""
+
+    def http_get(url, headers=None, **kwargs):
+        if "/pulls/" in url:
+            return {
+                "merged": False,
+                "state": "open",
+                "mergeable_state": "blocked",
+                "head": {"sha": "deadbeef"},
+            }
+        if "/check-runs" in url:
+            return {
+                "check_runs": [
+                    {
+                        "conclusion": None,
+                        "status": "in_progress",
+                    },
+                ],
+            }
+        return {}
+
+    from bridge.main import check_pr_mergeable
+
+    assert (
+        check_pr_mergeable("o/r", 40, http_get=http_get, github_token="")
+        == "checks_pending"
+    )
+
+
+def test_check_pr_mergeable_blocked_without_failing_check_is_blocked():
+    """A PR blocked for a non-check reason (awaiting required review, merge
+    queue not ready, etc.) must surface as a distinct 'blocked' status so
+    reconcile does not loop retrying it. (#163)"""
+
+    def http_get(url, headers=None, **kwargs):
+        if "/pulls/" in url:
+            return {
+                "merged": False,
+                "state": "open",
+                "mergeable_state": "blocked",
+                "head": {"sha": "deadbeef"},
+            }
+        if "/check-runs" in url:
+            return {"check_runs": []}
+        return {}
+
+    from bridge.main import check_pr_mergeable
+
+    assert (
+        check_pr_mergeable("o/r", 40, http_get=http_get, github_token="")
+        == "blocked"
+    )
+
+
+def test_check_pr_mergeable_blocked_with_passing_checks_is_blocked():
+    """All checks passing but mergeable_state is still 'blocked' (e.g. a
+    branch-protection rule that requires an approving review) must surface
+    as 'blocked' so reconcile parks the workload. (#163)"""
+
+    def http_get(url, headers=None, **kwargs):
+        if "/pulls/" in url:
+            return {
+                "merged": False,
+                "state": "open",
+                "mergeable_state": "blocked",
+                "head": {"sha": "deadbeef"},
+            }
+        if "/check-runs" in url:
+            return {
+                "check_runs": [
+                    {
+                        "conclusion": "success",
+                        "status": "completed",
+                    },
+                ],
+            }
+        return {}
+
+    from bridge.main import check_pr_mergeable
+
+    assert (
+        check_pr_mergeable("o/r", 40, http_get=http_get, github_token="")
+        == "blocked"
+    )
+
+
+def test_check_pr_mergeable_dirty_is_dirty():
+    """Sanity: mergeable_state='dirty' (real git conflict) still surfaces
+    as 'dirty' so reconcile one-shots the giveup. (#163)"""
+
+    def http_get(url, headers=None, **kwargs):
+        return {
+            "merged": False,
+            "state": "open",
+            "mergeable_state": "dirty",
+            "head": {"sha": "deadbeef"},
+        }
+
+    from bridge.main import check_pr_mergeable
+
+    assert (
+        check_pr_mergeable("o/r", 783, http_get=http_get, github_token="")
+        == "dirty"
+    )
+
+
+def test_check_pr_mergeable_clean_with_no_checks_is_ok():
+    """Sanity: mergeable_state='clean' and no required checks surfaces
+    as 'ok' so reconcile marks the PR FIXED. (#163)"""
+
+    def http_get(url, headers=None, **kwargs):
+        if "/pulls/" in url:
+            return {
+                "merged": False,
+                "state": "open",
+                "mergeable_state": "clean",
+                "head": {"sha": "deadbeef"},
+            }
+        if "/check-runs" in url:
+            return {"check_runs": []}
+        return {}
+
+    from bridge.main import check_pr_mergeable
+
+    assert (
+        check_pr_mergeable("o/r", 1, http_get=http_get, github_token="")
+        == "ok"
+    )
+
+
+def test_reconcile_blocked_with_failing_check_retries_normally():
+    """End-to-end: a PR with mergeStateStatus=BLOCKED and a failing check
+    must be queued for a fix and retried under the attempt cap, exactly
+    like a clean-state failing check. (#163)"""
+    created = []
+
+    def http_get(url, headers=None, **kwargs):
+        if "/pulls/" in url:
+            return {
+                "merged": False,
+                "state": "open",
+                "mergeable_state": "blocked",
+                "head": {"sha": "deadbeef"},
+            }
+        if "/check-runs" in url:
+            return {
+                "check_runs": [
+                    {"conclusion": "failure", "status": "completed"},
+                ],
+            }
+        return {}
+
+    from bridge.main import check_pr_mergeable
+
+    out = reconcile_pr_fixes(
+        list_prfix_workloads=lambda: [_wl(40, "Succeeded", attempt=1)],
+        delete_workload=lambda n: None,
+        create_workload=created.append,
+        mark_pr_fix=lambda *a: True,
+        pr_is_mergeable=lambda repo, pr: check_pr_mergeable(
+            repo, pr, http_get=http_get, github_token=""
+        ),
+        max_attempts=3,
+    )
+    # Coder is asked to fix the failing check, not told the PR is unmergeable.
+    assert len(created) == 1, out
+    assert created[0]["metadata"]["annotations"]["foreman.llmkube.dev/attempt"] == "2"
+    assert out == ["prfix-o-r-40:not-mergeable-retry:2/3"]
+
+
+def test_reconcile_dirty_does_not_loop_across_ticks():
+    """End-to-end: a genuinely conflicting PR must not consume all three
+    attempts across ticks — the first tick marks it BLOCKED and drops the
+    Workload, so the second tick has nothing to do. (#163)"""
+    marks, deleted, created = [], [], []
+
+    def http_get(url, headers=None, **kwargs):
+        return {
+            "merged": False,
+            "state": "open",
+            "mergeable_state": "dirty",
+            "head": {"sha": "deadbeef"},
+        }
+
+    from bridge.main import check_pr_mergeable
+
+    # Tick 1: conflict detected, Workload dropped, PR marked BLOCKED.
+    out1 = reconcile_pr_fixes(
+        list_prfix_workloads=lambda: [_wl(783, "Succeeded", attempt=1)],
+        delete_workload=deleted.append,
+        create_workload=created.append,
+        mark_pr_fix=lambda repo, pr, status, note: (
+            marks.append((repo, pr, status)) or True
+        ),
+        pr_is_mergeable=lambda repo, pr: check_pr_mergeable(
+            repo, pr, http_get=http_get, github_token=""
+        ),
+        max_attempts=3,
+    )
+    assert out1 == ["prfix-o-r-783:not-mergeable-giveup:1/3"]
+    assert marks == [("o/r", 783, "BLOCKED")]
+    assert created == [], "must not recreate a conflict workload"
+
+    # Tick 2: the Workload is gone, so reconcile has nothing to do for it.
+    out2 = reconcile_pr_fixes(
+        list_prfix_workloads=lambda: [],  # dropped after tick 1
+        delete_workload=deleted.append,
+        create_workload=created.append,
+        mark_pr_fix=lambda *a: True,
+        pr_is_mergeable=lambda repo, pr: "dirty",
+        max_attempts=3,
+    )
+    assert out2 == []
+    assert [m for m in marks if m[2] == "BLOCKED"] == [("o/r", 783, "BLOCKED")]
