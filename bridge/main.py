@@ -524,11 +524,39 @@ def _real_main() -> None:  # pragma: no cover - thin wiring, exercised in the cl
         if ok:
             # Label and comment are independent best-effort operations: a
             # comment failure must not lose the label that makes the issue
-            # findable on the operator's worklist. See issue #142.
-            label_applied = bool(dispatch.add_label(payload, NEEDS_HUMAN_LABEL))
-            comment_posted = bool(
-                dispatch.post_comment(payload, _format_escalation_comment(item, reason))
-            )
+            # findable on the operator's worklist. See issue #142. Their
+            # exceptions must not propagate past a successful status change
+            # either — otherwise the retry wrapper would log the whole park
+            # as failed even though the status change that actually unpins
+            # the issue already landed (issue #162).
+            try:
+                label_applied = bool(
+                    dispatch.add_label(payload, NEEDS_HUMAN_LABEL)
+                )
+            except Exception:
+                logger.exception(
+                    "park-for-human-label-failed",
+                    extra={
+                        "repo": item.repo,
+                        "number": item.issue_number,
+                        "reason": reason,
+                    },
+                )
+            try:
+                comment_posted = bool(
+                    dispatch.post_comment(
+                        payload, _format_escalation_comment(item, reason)
+                    )
+                )
+            except Exception:
+                logger.exception(
+                    "park-for-human-comment-failed",
+                    extra={
+                        "repo": item.repo,
+                        "number": item.issue_number,
+                        "reason": reason,
+                    },
+                )
             logger.info(
                 "parked-for-human",
                 extra={
