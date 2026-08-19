@@ -48,6 +48,22 @@ def _extract_pr_url(tasks: list) -> str:
     return ""
 
 
+def _workload_all_already_resolved(wl: dict) -> bool:
+    """Return True if any task carries a Completed condition with reason=AllAlreadyResolved.
+
+    A Workload that ends AllAlreadyResolved has no PR by definition (no fix was
+    attempted), so it can never take the in-review path. Without this check it
+    lands in skip:no-pr and strands its issue in status/in-progress forever,
+    permanently consuming a MAX_IN_PROGRESS claim slot.
+    """
+    status = wl.get("status") or {}
+    for ts in status.get("taskStatuses") or []:
+        for cond in ts.get("conditions") or []:
+            if cond.get("type") == "Completed" and cond.get("reason") == "AllAlreadyResolved":
+                return True
+    return False
+
+
 def _item_from_workload(wl: dict) -> dict:
     """Build the identity dict update_status consumes."""
     spec = wl.get("spec") or {}
@@ -90,6 +106,16 @@ def transition_to_in_review(
         tasks = list_workload_tasks(name)
         pr_url = _extract_pr_url(tasks)
         if not pr_url:
+            if _workload_all_already_resolved(wl):
+                # The work already exists on main; the honest destination is
+                # status/done, which releases the in-progress claim.
+                item = _item_from_workload(wl)
+                try:
+                    update_status(item, "done", agent_name)
+                    results.append(f"{name}:done:already-resolved")
+                except Exception as e:
+                    results.append(f"{name}:error:{e}")
+                continue
             results.append(f"{name}:skip:no-pr")
             continue
 
