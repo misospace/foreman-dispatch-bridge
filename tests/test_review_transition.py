@@ -22,6 +22,22 @@ def _wl(name, phase="Completed", attempt="2", issue_id="iss-42",
     }
 
 
+def _wl_already_resolved(name, **kwargs):
+    """A Completed Workload whose task carries a Completed condition with
+    reason=AllAlreadyResolved — no fix attempted, so no PR by definition."""
+    wl = _wl(name, **kwargs)
+    wl["status"]["taskStatuses"] = [
+        {
+            "name": "code-42",
+            "conditions": [
+                {"type": "Completed", "reason": "AllAlreadyResolved",
+                 "message": "1 issue(s) already resolved at run time (no fix attempted)"},
+            ],
+        }
+    ]
+    return wl
+
+
 def _task(kind, verdict="GO", pr_url=None):
     status = {"phase": "Succeeded", "verdict": verdict}
     result = {}
@@ -70,6 +86,52 @@ class TestTransitionToInReview:
         )
         assert updated == []
         assert any("skip" in line for line in out)
+
+    def test_transitions_already_resolved_workload_to_done(self):
+        """A Completed Workload with reason=AllAlreadyResolved and no PR →
+        status/done, releasing the in-progress claim (#169)."""
+        updated = []
+        out = transition_to_in_review(
+            list_workloads=lambda: [_wl_already_resolved("wl-a-b-42")],
+            list_workload_tasks=lambda name: [_task("issue-fix", pr_url=None)],
+            update_status=lambda item, status, agent: updated.append((item, status, agent)),
+            agent_name="foreman-coder",
+        )
+        assert len(updated) == 1
+        item, status, agent = updated[0]
+        assert status == "done"
+        assert agent == "foreman-coder"
+        assert item["issueId"] == "iss-42"
+        assert item["repoFullName"] == "misospace/foreman-dispatch-bridge"
+        assert item["number"] == 42
+        assert any("done" in line for line in out)
+
+    def test_already_resolved_with_pr_still_goes_in_review(self):
+        """The PR path wins: a Workload that has a PR transitions to
+        in-review even if a task also carries the AllAlreadyResolved reason."""
+        updated = []
+        wl = _wl_already_resolved("wl-a-b-42")
+        out = transition_to_in_review(
+            list_workloads=lambda: [wl],
+            list_workload_tasks=lambda name: [_task("review", pr_url="https://github.com/a/b/pull/42")],
+            update_status=lambda item, status, agent: updated.append((item, status, agent)),
+            agent_name="foreman-coder",
+        )
+        assert len(updated) == 1
+        assert updated[0][1] == "in-review"
+        assert any("in-review" in line for line in out)
+
+    def test_already_resolved_update_status_failure_is_caught(self):
+        """A failed update_status on the already-resolved path is logged, not fatal."""
+        def fail_update(item, status, agent):
+            raise RuntimeError("API down")
+        out = transition_to_in_review(
+            list_workloads=lambda: [_wl_already_resolved("wl-a-b-42")],
+            list_workload_tasks=lambda name: [_task("issue-fix", pr_url=None)],
+            update_status=fail_update,
+            agent_name="foreman-coder",
+        )
+        assert any("error" in line.lower() for line in out)
 
     def test_skips_non_completed_workload(self):
         """A Dispatched (in-flight) Workload → skip (not done yet)."""
