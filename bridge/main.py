@@ -405,6 +405,187 @@ def _check_dispatch_url(base_url: str) -> None:
         )
 
 
+# ---------------------------------------------------------------------------
+# Shared per-coder-load helpers.
+# ---------------------------------------------------------------------------
+#
+# These are defined before _real_main because the production load_by_coder_agent
+# closure delegates to them and _real_main runs at module load (the if __name__
+# block) — anything it calls must already be bound. They double as the testable
+# seam exercised by tests/test_bridge_runtime.py and bundled by BridgeRuntime.
+#
+# Phases that indicate a Workload no longer needs reconcile attention.
+_TERMINAL_PHASES = frozenset({"Succeeded", "Failed", "Cancelled", "Timeout"})
+
+# Phases at which an AgenticTask is done. "Completed" is task-terminal even
+# while its enclosing Workload is still reconciling.
+_TASK_TERMINAL_PHASES = frozenset(
+    {"Succeeded", "Failed", "Cancelled", "Timeout", "Completed"}
+)
+
+# Label linking an AgenticTask back to the Workload that owns it.
+_TASK_WORKLOAD_LABEL = "foreman.llmkube.dev/workload"
+
+
+def _list_workloads_by_label(
+    api: client.CustomObjectsApi,
+    namespace: str,
+    label_selector: str,
+) -> List[Dict[str, Any]]:
+    """Return all Workload items matching *label_selector* in *namespace*."""
+    response = api.list_namespaced_custom_object(
+        group="foreman.llmkube.dev",
+        version="v1alpha1",
+        namespace=namespace,
+        plural="workloads",
+        label_selector=label_selector,
+    )
+    return list(response.get("items", []))
+
+
+def _list_bridge_workloads(
+    api: client.CustomObjectsApi, namespace: str
+) -> List[Dict[str, Any]]:
+    """List Workloads labelled with ``created-by=dispatch-bridge``."""
+    return _list_workloads_by_label(api, namespace, "created-by=dispatch-bridge")
+
+
+def _list_agentic_tasks_by_workload(
+    api: client.CustomObjectsApi, namespace: str
+) -> Optional[Dict[str, List[Dict[str, Any]]]]:
+    """List AgenticTasks once and group them by their Workload label.
+
+    ``None`` means the task list could not be resolved. Callers use that result
+    to fail closed and keep every coder ref busy for the tick.
+    """
+    try:
+        response = api.list_namespaced_custom_object(
+            group="foreman.llmkube.dev",
+            version="v1alpha1",
+            namespace=namespace,
+            plural="agentictasks",
+            label_selector=_TASK_WORKLOAD_LABEL,
+        )
+        items = response.get("items", [])
+        if not isinstance(items, list):
+            return None
+        grouped: Dict[str, List[Dict[str, Any]]] = {}
+        for task in items:
+            if not isinstance(task, dict):
+                return None
+            metadata = task.get("metadata") or {}
+            labels = metadata.get("labels") or {}
+            if not isinstance(metadata, dict) or not isinstance(labels, dict):
+                return None
+            workload_name = labels.get(_TASK_WORKLOAD_LABEL)
+            if not workload_name:
+                return None
+            if not isinstance(task.get("spec"), dict):
+                return None
+            if not isinstance(task.get("status"), dict):
+                return None
+            grouped.setdefault(workload_name, []).append(task)
+        return grouped
+    except Exception:
+        return None
+
+
+def _coder_agent_name(workload: Dict[str, Any]) -> Optional[str]:
+    """Return a Workload's coder ref, or None when it cannot be resolved."""
+    spec = workload.get("spec") or {}
+    if not isinstance(spec, dict):
+        return None
+    ref = spec.get("coderAgentRef") or {}
+    if not isinstance(ref, dict):
+        return None
+    return ref.get("name")
+
+
+def _active_workloads(
+    api: client.CustomObjectsApi, namespace: str
+) -> List[Dict[str, Any]]:
+    """List Workloads that are still in progress (non-terminal phase)."""
+    active: List[Dict[str, Any]] = []
+    for workload in _list_bridge_workloads(api, namespace):
+        phase = (workload.get("status") or {}).get("phase")
+        if phase not in _TERMINAL_PHASES:
+            active.append(workload)
+    return active
+
+
+def _coder_still_busy(tasks: List[Dict[str, Any]]) -> bool:
+    """Fail-closed busy check for one Workload's tasks (#180).
+
+    Returns ``True`` (busy) unless the Workload has at least one ``issue-fix``
+    task and every one of them is in a terminal phase — a running review task
+    does NOT keep the coder busy. Task-list parsing rejects missing labels and
+    malformed objects before this helper runs; missing or unknown issue-fix
+    phases remain busy here.
+    """
+    issue_fix: List[Dict[str, Any]] = []
+    for task in tasks:
+        spec = task.get("spec")
+        if not isinstance(spec, dict):
+            return True
+        if spec.get("kind") != "issue-fix":
+            continue
+        status = task.get("status")
+        if not isinstance(status, dict):
+            return True
+        issue_fix.append(task)
+    if not issue_fix:
+        return True
+    return any(
+        task["status"].get("phase") not in _TASK_TERMINAL_PHASES
+        for task in issue_fix
+    )
+
+
+def _load_by_coder_agent(
+    api: client.CustomObjectsApi,
+    namespace: str,
+    *,
+    workloads: Optional[List[Dict[str, Any]]] = None,
+) -> Dict[str, int]:
+    """Count active bridge Workloads grouped by coderAgentRef.name.
+
+    A Workload keeps counting toward an agent's load until its ``issue-fix``
+    task(s) all reach a terminal phase; a running review no longer holds the
+    coder busy (#180). Bridge Workloads are listed once and AgenticTasks are
+    listed once (selector ``foreman.llmkube.dev/workload``) then grouped in
+    memory by that metadata label, so capacity-aware routing never becomes a
+    per-Workload task query. Fails closed: a missing/unknown task phase, a task
+    missing the workload label, a Workload with no ``issue-fix`` task, or a
+    task-list exception all count the coder ref as busy. Workloads written
+    before coderAgentRef was stamped contribute nothing.
+    """
+    def _refs(workloads: List[Dict[str, Any]]) -> Dict[str, int]:
+        load: Dict[str, int] = {}
+        for workload in workloads:
+            ref = _coder_agent_name(workload)
+            if ref:
+                load[ref] = load.get(ref, 0) + 1
+        return load
+
+    workloads = _active_workloads(api, namespace) if workloads is None else workloads
+    tasks_by_workload = _list_agentic_tasks_by_workload(api, namespace)
+    if tasks_by_workload is None:
+        return _refs(workloads)
+
+    load: Dict[str, int] = {}
+    for workload in workloads:
+        ref = _coder_agent_name(workload)
+        if not ref:
+            continue
+        metadata = workload.get("metadata") or {}
+        wl_name = metadata.get("name") if isinstance(metadata, dict) else None
+        if not isinstance(wl_name, str) or _coder_still_busy(
+            tasks_by_workload.get(wl_name, [])
+        ):
+            load[ref] = load.get(ref, 0) + 1
+    return load
+
+
 def _real_main() -> None:  # pragma: no cover - thin wiring, exercised in the cluster
     from bridge.claim import DispatchClient
 
@@ -513,15 +694,13 @@ def _real_main() -> None:  # pragma: no cover - thin wiring, exercised in the cl
 
     def load_by_coder_agent() -> dict:
         # Per-coder view of the same non-terminal set the cap already counts, so
-        # capacity-aware routing costs no extra API call and keeps no state
-        # between ticks. Workloads written before coderAgentRef was stamped
-        # contribute nothing, which reads as idle rather than as a wrong agent.
-        load: dict = {}
-        for wl in active_workloads():
-            name = ((wl.get("spec") or {}).get("coderAgentRef") or {}).get("name")
-            if name:
-                load[name] = load.get(name, 0) + 1
-        return load
+        # capacity-aware routing matches the working set. Delegates to the shared
+        # _load_by_coder_agent helper while preserving this closure's existing
+        # workload-phase semantics; see that docstring for the fail-closed
+        # task semantics (#180).
+        return _load_by_coder_agent(
+            api, namespace, workloads=active_workloads()
+        )
 
     delete_workload = functools.partial(
         _delete_workload, api, namespace, timeout=DELETE_WORKLOAD_TIMEOUT_S
@@ -891,33 +1070,6 @@ if __name__ == "__main__":
 # tests/test_bridge_runtime.py; BridgeRuntime is a thin wrapper that bundles
 # them up for _real_main to call.
 #
-# Phases that indicate a Workload no longer needs reconcile attention.
-_TERMINAL_PHASES = frozenset({"Succeeded", "Failed", "Cancelled", "Timeout"})
-
-
-def _list_workloads_by_label(
-    api: client.CustomObjectsApi,
-    namespace: str,
-    label_selector: str,
-) -> List[Dict[str, Any]]:
-    """Return all Workload items matching *label_selector* in *namespace*."""
-    response = api.list_namespaced_custom_object(
-        group="foreman.llmkube.dev",
-        version="v1alpha1",
-        namespace=namespace,
-        plural="workloads",
-        label_selector=label_selector,
-    )
-    return list(response.get("items", []))
-
-
-def _list_bridge_workloads(
-    api: client.CustomObjectsApi, namespace: str
-) -> List[Dict[str, Any]]:
-    """List Workloads labelled with ``created-by=dispatch-bridge``."""
-    return _list_workloads_by_label(api, namespace, "created-by=dispatch-bridge")
-
-
 def _list_failed_workloads(
     api: client.CustomObjectsApi, namespace: str
 ) -> List[Dict[str, Any]]:
@@ -928,18 +1080,6 @@ def _list_failed_workloads(
         if phase in {"Failed", "Timeout", "Cancelled"}:
             failed.append(workload)
     return failed
-
-
-def _active_workloads(
-    api: client.CustomObjectsApi, namespace: str
-) -> List[Dict[str, Any]]:
-    """List Workloads that are still in progress (non-terminal phase)."""
-    active: List[Dict[str, Any]] = []
-    for workload in _list_bridge_workloads(api, namespace):
-        phase = workload.get("status", {}).get("phase")
-        if phase not in _TERMINAL_PHASES:
-            active.append(workload)
-    return active
 
 
 def _count_active_workloads(
@@ -959,23 +1099,6 @@ def _count_active_workloads(
             if phase not in _TERMINAL_PHASES:
                 workloads.append(workload)
     return len(workloads)
-
-
-def _load_by_coder_agent(
-    api: client.CustomObjectsApi, namespace: str
-) -> Dict[str, int]:
-    """Count active bridge Workloads grouped by coderAgentRef.name."""
-    load: Dict[str, int] = {}
-    for workload in _active_workloads(api, namespace):
-        ref = (
-            workload.get("spec", {})
-            .get("coderAgentRef", {})
-            .get("name")
-        )
-        if not ref:
-            continue
-        load[ref] = load.get(ref, 0) + 1
-    return load
 
 
 def _list_terminal_candidates(

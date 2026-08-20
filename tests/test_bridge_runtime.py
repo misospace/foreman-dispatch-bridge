@@ -57,7 +57,10 @@ class FakeAPI:
     def _consume_error(self, name: str) -> None:
         queued = self.errors.get(name)
         if queued:
-            status, message = queued.pop(0)
+            entry = queued.pop(0)
+            if entry is None:
+                return
+            status, message = entry
             raise ApiException(status=status, reason=message)
 
     def delete_namespaced_custom_object(self, **kwargs: Any) -> Any:
@@ -81,9 +84,24 @@ class FakeAPI:
         self.sleep_calls += 1
 
 
-def _workload(name: str, phase: str) -> dict:
+def _workload(name: str, phase: str, *, coder: str | None = None) -> dict:
+    spec: Dict[str, Any] = {}
+    if coder:
+        spec = {"coderAgentRef": {"name": coder}}
     return {
         "metadata": {"name": name, "labels": {"created-by": "dispatch-bridge"}},
+        "spec": spec,
+        "status": {"phase": phase},
+    }
+
+
+def _task(name: str, workload: str, *, kind: str = "issue-fix", phase: str) -> dict:
+    return {
+        "metadata": {
+            "name": name,
+            "labels": {"foreman.llmkube.dev/workload": workload},
+        },
+        "spec": {"kind": kind},
         "status": {"phase": phase},
     }
 
@@ -233,34 +251,208 @@ class TestCountActiveWorkloads:
 
 
 class TestLoadByCoderAgent:
+    def test_counts_running_issue_fix(self) -> None:
+        # An active Workload with a non-terminal issue-fix task is busy.
+        api = FakeAPI(
+            responses={
+                "list_namespaced_custom_object": [
+                    {"items": [_workload("a", "Running", coder="coder-py")]},
+                    {"items": [_task("t1", "a", phase="Running")]},
+                ]
+            }
+        )
+        assert _load_by_coder_agent(api, "ns") == {"coder-py": 1}
+
+    def test_terminal_issue_fix_with_running_review_frees_slot(self) -> None:
+        # A terminal issue-fix task plus a running review does NOT hold the
+        # coder busy: only issue-fix tasks count, and only while non-terminal.
+        api = FakeAPI(
+            responses={
+                "list_namespaced_custom_object": [
+                    {"items": [_workload("a", "Running", coder="coder-py")]},
+                    {
+                        "items": [
+                            _task("t1", "a", kind="issue-fix", phase="Succeeded"),
+                            _task("t2", "a", kind="review", phase="Running"),
+                        ]
+                    },
+                ]
+            }
+        )
+        assert _load_by_coder_agent(api, "ns") == {}
+
+    def test_no_tasks_counts_busy(self) -> None:
+        # A Workload with no matching task fails closed and stays busy.
+        api = FakeAPI(
+            responses={
+                "list_namespaced_custom_object": [
+                    {"items": [_workload("a", "Running", coder="coder-py")]},
+                    {"items": []},
+                ]
+            }
+        )
+        assert _load_by_coder_agent(api, "ns") == {"coder-py": 1}
+
+    def test_api_error_counts_busy(self) -> None:
+        # A task-list exception fails closed: every active ref is busy.
+        api = FakeAPI(
+            errors={"list_namespaced_custom_object": [None, (500, "boom")]},
+            responses={
+                "list_namespaced_custom_object": [
+                    {"items": [_workload("a", "Running", coder="coder-py")]}
+                ]
+            },
+        )
+        assert _load_by_coder_agent(api, "ns") == {"coder-py": 1}
+
+    def test_missing_task_label_counts_busy(self) -> None:
+        # A task missing the workload label fails closed: every active ref busy.
+        api = FakeAPI(
+            responses={
+                "list_namespaced_custom_object": [
+                    {"items": [_workload("a", "Running", coder="coder-py")]},
+                    {
+                        "items": [
+                            {
+                                "metadata": {"name": "t1"},
+                                "spec": {"kind": "issue-fix"},
+                                "status": {"phase": "Succeeded"},
+                            }
+                        ]
+                    },
+                ]
+            }
+        )
+        assert _load_by_coder_agent(api, "ns") == {"coder-py": 1}
+
+    def test_unknown_issue_fix_phase_counts_busy(self) -> None:
+        # An issue-fix task in an unknown phase fails closed and stays busy.
+        api = FakeAPI(
+            responses={
+                "list_namespaced_custom_object": [
+                    {"items": [_workload("a", "Running", coder="coder-py")]},
+                    {"items": [_task("t1", "a", phase="Unknown")]},
+                ]
+            }
+        )
+        assert _load_by_coder_agent(api, "ns") == {"coder-py": 1}
+
+    def test_missing_issue_fix_phase_counts_busy(self) -> None:
+        # A missing phase fails closed and keeps the coder busy.
+        api = FakeAPI(
+            responses={
+                "list_namespaced_custom_object": [
+                    {"items": [_workload("a", "Running", coder="coder-py")]},
+                    {
+                        "items": [
+                            {
+                                "metadata": {
+                                    "labels": {"foreman.llmkube.dev/workload": "a"}
+                                },
+                                "spec": {"kind": "issue-fix"},
+                                "status": {},
+                            }
+                        ]
+                    },
+                ]
+            }
+        )
+        assert _load_by_coder_agent(api, "ns") == {"coder-py": 1}
+
+    def test_review_only_task_counts_busy(self) -> None:
+        # A review-only workload has no resolvable issue-fix task, so it is busy.
+        api = FakeAPI(
+            responses={
+                "list_namespaced_custom_object": [
+                    {"items": [_workload("a", "Running", coder="coder-py")]},
+                    {"items": [_task("t1", "a", kind="review", phase="Running")]},
+                ]
+            }
+        )
+        assert _load_by_coder_agent(api, "ns") == {"coder-py": 1}
+
+    def test_mixed_terminality_counts_busy(self) -> None:
+        # One terminal issue-fix task still leaves the coder busy when another
+        # issue-fix task is still running (all must be terminal).
+        api = FakeAPI(
+            responses={
+                "list_namespaced_custom_object": [
+                    {"items": [_workload("a", "Running", coder="coder-py")]},
+                    {
+                        "items": [
+                            _task("t1", "a", phase="Succeeded"),
+                            _task("t2", "a", phase="Running"),
+                        ]
+                    },
+                ]
+            }
+        )
+        assert _load_by_coder_agent(api, "ns") == {"coder-py": 1}
+
+    def test_uses_workload_label_selector(self) -> None:
+        api = FakeAPI(
+            responses={
+                "list_namespaced_custom_object": [
+                    {"items": []},
+                    {"items": []},
+                ]
+            }
+        )
+        _load_by_coder_agent(api, "ns")
+        task_calls = [
+            c for c in api.calls if c.kwargs.get("plural") == "agentictasks"
+        ]
+        assert len(task_calls) == 1
+        assert task_calls[0].kwargs["label_selector"] == "foreman.llmkube.dev/workload"
+
+    def test_single_task_list_call(self) -> None:
+        # Both workloads' tasks come from the one AgenticTask list call.
+        api = FakeAPI(
+            responses={
+                "list_namespaced_custom_object": [
+                    {
+                        "items": [
+                            _workload("a", "Running", coder="coder-py"),
+                            _workload("b", "Running", coder="coder-go"),
+                        ]
+                    },
+                    {
+                        "items": [
+                            _task("t1", "a", phase="Running"),
+                            _task("t2", "b", phase="Running"),
+                        ]
+                    },
+                ]
+            }
+        )
+        assert _load_by_coder_agent(api, "ns") == {
+            "coder-py": 1,
+            "coder-go": 1,
+        }
+        task_calls = [
+            c for c in api.calls if c.kwargs.get("plural") == "agentictasks"
+        ]
+        assert len(task_calls) == 1
+
     def test_groups_active_workloads(self) -> None:
         api = FakeAPI(
             responses={
                 "list_namespaced_custom_object": [
                     {
                         "items": [
-                            {
-                                "metadata": {"name": "a"},
-                                "spec": {"coderAgentRef": {"name": "coder-py"}},
-                                "status": {"phase": "Running"},
-                            },
-                            {
-                                "metadata": {"name": "b"},
-                                "spec": {"coderAgentRef": {"name": "coder-py"}},
-                                "status": {"phase": "Running"},
-                            },
-                            {
-                                "metadata": {"name": "c"},
-                                "spec": {"coderAgentRef": {"name": "coder-go"}},
-                                "status": {"phase": "Running"},
-                            },
-                            {
-                                "metadata": {"name": "d"},
-                                "spec": {},
-                                "status": {"phase": "Running"},
-                            },
+                            _workload("a", "Running", coder="coder-py"),
+                            _workload("b", "Running", coder="coder-py"),
+                            _workload("c", "Running", coder="coder-go"),
+                            _workload("d", "Running"),
                         ]
-                    }
+                    },
+                    {
+                        "items": [
+                            _task("t1", "a", phase="Running"),
+                            _task("t2", "b", phase="Running"),
+                            _task("t3", "c", phase="Running"),
+                        ]
+                    },
                 ]
             }
         )
@@ -273,15 +465,8 @@ class TestLoadByCoderAgent:
         api = FakeAPI(
             responses={
                 "list_namespaced_custom_object": [
-                    {
-                        "items": [
-                            {
-                                "metadata": {"name": "a"},
-                                "spec": {"coderAgentRef": {"name": "coder-py"}},
-                                "status": {"phase": "Succeeded"},
-                            },
-                        ]
-                    }
+                    {"items": [_workload("a", "Succeeded", coder="coder-py")]},
+                    {"items": [_task("t1", "a", phase="Running")]},
                 ]
             }
         )
@@ -454,13 +639,14 @@ class TestBridgeRuntime:
                 "list_namespaced_custom_object": [
                     {
                         "items": [
-                            {
-                                "metadata": {"name": "a"},
-                                "spec": {"coderAgentRef": {"name": "coder-py"}},
-                                "status": {"phase": "Running"},
-                            }
+                            _workload("a", "Running", coder="coder-py"),
                         ]
-                    }
+                    },
+                    {
+                        "items": [
+                            _task("t1", "a", phase="Running"),
+                        ]
+                    },
                 ]
             }
         )
