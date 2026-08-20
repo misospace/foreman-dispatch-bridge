@@ -36,7 +36,7 @@ from bridge.retry import (
 from bridge.prfix import (
     reconcile_pr_fixes, drain_pr_fixes,
     DEFAULT_PRFIX_LANE_AGENTS, ACTIONABLE_LANES, PRFIX_CREATED_BY,
-    FAILING_CONCLUSIONS, PENDING_STATUSES,
+    FAILING_CONCLUSIONS, PENDING_STATUSES, failure_signature,
 )
 from bridge.prune import prune_workloads
 from bridge.reconcile import reconcile_stranded_issues, release_stuck_claims
@@ -962,12 +962,33 @@ def _real_main() -> None:  # pragma: no cover - thin wiring, exercised in the cl
                 repo, pr, http_get=http_get, github_token=github_token
             )
 
+        # Build a one-per-tick {repo, pr} -> failure-signature map so the
+        # reconcile path can compare the *current* failure surface against
+        # the signature stored on each fix Workload's annotation (#133).
+        # We snapshot the queued PR-fix items once and reuse across all
+        # failed workloads in this tick; this stays stateless across ticks
+        # because the signature itself is persisted on the Workload.
+        pr_fix_signatures = {}
+        try:
+            for item in dispatch.list_pr_fix_queued(list(ACTIONABLE_LANES)) or []:
+                repo = item.get("repo")
+                pr = item.get("pr")
+                if repo is None or pr is None:
+                    continue
+                pr_fix_signatures[(repo, pr)] = failure_signature(item)
+        except Exception as exc:
+            logger.warning("pr-fix-signature-snapshot-failed", extra={"error": str(exc)})
+
+        def get_pr_fix_signature(repo, pr) -> str:
+            return pr_fix_signatures.get((repo, pr), "")
+
         for line in reconcile_pr_fixes(
             list_prfix_workloads, delete_workload, create_workload,
             mark_pr_fix,
             pr_is_mergeable=pr_is_mergeable,
             max_attempts=pr_fix_max_attempts,
             lane_agents=pr_fix_lane_agents,
+            get_pr_fix_signature=get_pr_fix_signature,
         ):
             logger.info(line)
 

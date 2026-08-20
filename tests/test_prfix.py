@@ -7,12 +7,19 @@ from bridge.prfix import (
     assemble_fix_prompt,
     build_fix_workload,
     drain_pr_fixes,
+    failure_signature,
     parse_pr_fix_item,
     pr_fix_coder_for,
     prfix_workload_name,
     rebuild_prfix_manifest,
     reconcile_pr_fixes,
 )
+from bridge.workload import (
+    ATTEMPT_ANNOTATION,
+    PROGRESS_ANNOTATION,
+    SIGNATURE_ANNOTATION,
+)
+from types import SimpleNamespace
 
 
 def _item(**kw):
@@ -918,3 +925,158 @@ def test_reconcile_dirty_does_not_loop_across_ticks():
     )
     assert out2 == []
     assert [m for m in marks if m[2] == "BLOCKED"] == [("o/r", 783, "BLOCKED")]
+
+
+# ---------------------------------------------------------------------------
+# Issue #133: signature-aware attempt budgeting
+# ---------------------------------------------------------------------------
+
+
+def _wl_with_sig(repo, pr, attempt, sig, lane="NORMAL", name="prfix", phase="Failed"):
+    return {
+        "metadata": {
+            "name": name,
+            "annotations": {
+                ATTEMPT_ANNOTATION: str(attempt),
+                SIGNATURE_ANNOTATION: sig,
+                PRFIX_REPO_ANNOTATION: repo,
+                PRFIX_PR_ANNOTATION: str(pr),
+            },
+            "labels": {"lane": lane},
+        },
+        "spec": {},
+        "status": {"phase": phase},
+    }
+
+
+def test_failure_signature_stable_across_whitespace():
+    item = SimpleNamespace(
+        type="CI_FAILURE",
+        feedback=["mix test failed: foo == 1   expected", "traceback line 2"],
+    )
+    item2 = SimpleNamespace(
+        type="CI_FAILURE",
+        feedback=["mix test failed: foo == 1 expected\n", "traceback line 2"],
+    )
+    assert failure_signature(item) == failure_signature(item2)
+
+
+def test_failure_signature_distinguishes_by_first_line():
+    a = SimpleNamespace(type="CI_FAILURE", feedback=["lint failed: unused import"])
+    b = SimpleNamespace(type="CI_FAILURE", feedback=["mix test failed: bad arith"])
+    assert failure_signature(a) != failure_signature(b)
+
+
+def test_progress_signature_resets_attempt_and_increments_progress():
+    """A retry whose failure signature *differs* from the prior attempt's
+    counts as progress: ATTEMPT_ANNOTATION resets to 1 and a separate
+    PROGRESS_ANNOTATION ticks. Per-tier attempt budget (3) is preserved for
+    the thrashing case."""
+    wl = _wl_with_sig("o/r", 7, attempt=2, sig="ci_failure::old")
+
+    created = []
+
+    def create(manifest):
+        created.append(manifest)
+
+    out = reconcile_pr_fixes(
+        lambda: [wl],
+        lambda n: True,
+        create,
+        mark_pr_fix=lambda *a, **kw: True,
+        pr_is_mergeable=lambda repo, pr: "checks_failed",
+        max_attempts=3,
+        progress_max_attempts=8,
+        get_pr_fix_signature=lambda repo, pr: "ci_failure::new",
+    )
+    assert len(created) == 1
+    ann = created[0]["metadata"]["annotations"]
+    assert ann[ATTEMPT_ANNOTATION] == "1"
+    assert ann[SIGNATURE_ANNOTATION] == "ci_failure::new"
+    assert ann[PROGRESS_ANNOTATION] == "1"
+    assert any("retry-progress" in line for line in out)
+
+
+def test_same_signature_still_decrements_attempt_budget():
+    """The same-failure wall keeps the legacy per-tier attempt budget."""
+    wl = _wl_with_sig("o/r", 9, attempt=2, sig="ci_failure::same")
+
+    created = []
+
+    def create(manifest):
+        created.append(manifest)
+
+    out = reconcile_pr_fixes(
+        lambda: [wl],
+        lambda n: True,
+        create,
+        mark_pr_fix=lambda *a, **kw: True,
+        pr_is_mergeable=lambda repo, pr: "checks_failed",
+        max_attempts=3,
+        get_pr_fix_signature=lambda repo, pr: "ci_failure::same",
+    )
+    ann = created[0]["metadata"]["annotations"]
+    assert ann[ATTEMPT_ANNOTATION] == "3"
+    # Same signature: progress counter must NOT have ticked.
+    assert ann.get(PROGRESS_ANNOTATION) is None
+    assert any("retry:3/3" in line for line in out)
+
+
+def test_progress_runaway_bound_marks_blocked():
+    """Once the *progressing* budget is exhausted, mark the fix BLOCKED."""
+    wl = _wl_with_sig("o/r", 11, attempt=1, sig="ci_failure::a")
+    wl["metadata"]["annotations"][PROGRESS_ANNOTATION] = "8"
+
+    marks = []
+
+    out = reconcile_pr_fixes(
+        lambda: [wl],
+        lambda n: True,
+        lambda m: True,
+        mark_pr_fix=lambda *a, **kw: marks.append((a, kw)),
+        pr_is_mergeable=lambda repo, pr: "checks_failed",
+        max_attempts=3,
+        progress_max_attempts=8,
+        get_pr_fix_signature=lambda repo, pr: "ci_failure::b",
+    )
+    assert any("progress-giveup" in line for line in out)
+    assert any(m[0][2] == "BLOCKED" for m in marks)
+
+
+def test_no_signature_falls_back_to_legacy_budget():
+    """When the caller can't provide a current failure signature (e.g. the
+    feed isn't reachable from the reconcile path), we must keep the legacy
+    attempt-count budget rather than treating 'unknown' as 'progress'."""
+    wl = _wl_with_sig("o/r", 13, attempt=2, sig="")  # no prior baseline
+
+    created = []
+
+    def create(manifest):
+        created.append(manifest)
+
+    reconcile_pr_fixes(
+        lambda: [wl],
+        lambda n: True,
+        create,
+        mark_pr_fix=lambda *a, **kw: True,
+        pr_is_mergeable=lambda repo, pr: "checks_failed",
+        max_attempts=3,
+        get_pr_fix_signature=lambda repo, pr: "",  # no signal
+    )
+    ann = created[0]["metadata"]["annotations"]
+    assert ann[ATTEMPT_ANNOTATION] == "3"
+    assert ann.get(PROGRESS_ANNOTATION) is None
+
+
+def test_rebuild_manifest_persists_signature_annotation():
+    from bridge.prfix import rebuild_prfix_manifest
+    wl = _wl_with_sig("o/r", 15, attempt=1, sig="prior")
+    rebuilt = rebuild_prfix_manifest(wl, attempt=2, signature="fresh")
+    assert rebuilt["metadata"]["annotations"][SIGNATURE_ANNOTATION] == "fresh"
+    assert rebuilt["metadata"]["annotations"][ATTEMPT_ANNOTATION] == "2"
+
+    # Empty signature preserves the prior baseline (so reconcile can still
+    # compare against it on the next tick).
+    rebuilt2 = rebuild_prfix_manifest(wl, attempt=3, signature="")
+    assert rebuilt2["metadata"]["annotations"][SIGNATURE_ANNOTATION] == "prior"
+    assert rebuilt2["metadata"]["annotations"][ATTEMPT_ANNOTATION] == "3"
