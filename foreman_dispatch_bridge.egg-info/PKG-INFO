@@ -1,0 +1,5 @@
+Metadata-Version: 2.4
+Name: foreman-dispatch-bridge
+Version: 0.1.0
+Summary: Foreman dispatch bridge — claims issues from the Dispatch API and materialises Kubernetes Workloads for coder agents.
+Requires-Python: >=3.13
