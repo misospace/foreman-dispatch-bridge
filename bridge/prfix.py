@@ -2,8 +2,8 @@ from dataclasses import dataclass
 from typing import Optional
 
 from bridge.workload import (
-    CODER_AGENT, VERIFIER_AGENT, ATTEMPT_ANNOTATION, LANE_CODER_WILDCARD,
-    gate_profile_for,
+    CODER_AGENT, VERIFIER_AGENT, ATTEMPT_ANNOTATION, SIGNATURE_ANNOTATION,
+    PROGRESS_ANNOTATION, LANE_CODER_WILDCARD, gate_profile_for,
 )
 
 # Lane values dispatch assigns to a PR-fix item. NEEDS_HUMAN is never actioned
@@ -84,6 +84,31 @@ PRFIX_CREATED_BY = "dispatch-bridge-prfix"
 PRFIX_REPO_ANNOTATION = "foreman.llmkube.dev/prfix-repo"
 PRFIX_PR_ANNOTATION = "foreman.llmkube.dev/prfix-pr"
 
+# Bound on a *progressing* retry series (each retry surfaces a fresh failure
+# class). Distinct from PR_FIX_MAX_ATTEMPTS, which caps the same-failure
+# thrashing series. Lets converging work keep runway while walls are cut off.
+PR_FIX_PROGRESS_MAX_ATTEMPTS = 8
+
+
+def failure_signature(item):
+    """Normalize the failure surface of a PrFixItem into a stable token.
+
+    Returns the empty string when there is no feedback at all (so the first
+    retry against an unknown surface still decrements the budget rather
+    than being treated as 'progress' from a missing baseline).
+    """
+    if item is None:
+        return ""
+    type_token = (getattr(item, "type", "") or "").strip().lower() or "unknown"
+    feedback = list(getattr(item, "feedback", None) or [])
+    if not feedback:
+        return f"{type_token}::no-feedback"
+    head = feedback[0].strip().lower()
+    head = " ".join(head.split())
+    if not head:
+        return f"{type_token}::no-feedback"
+    return f"{type_token}::{head[:160]}"
+
 
 def prfix_workload_name(item: "PrFixItem") -> str:
     owner_repo = item.repo.replace("/", "-").lower()
@@ -91,14 +116,21 @@ def prfix_workload_name(item: "PrFixItem") -> str:
 
 
 def build_fix_workload(item, namespace, gate_profile, agent_name, coder_agent, attempt=1,
-                       verify_enabled: bool = True, self_go: list[str] | None = None) -> dict:
+                       verify_enabled: bool = True, self_go: list[str] | None = None,
+                       signature: str = "") -> dict:
     """Explicit code -> verify pipeline that amends the PR's head branch.
 
     reviseFromBranch makes the executor fetch and check out the PR branch;
     allowOverwrite lets the push force-with-lease the existing ref.
 
     When verify_enabled is False, only the issue-fix step is emitted (gateless).
-    gateProfile still propagates: coders use it for self-gates/language routing."""
+    gateProfile still propagates: coders use it for self-gates/language routing.
+
+    ``signature`` is the failure signature that produced this attempt; the
+    next reconcile compares the *new* failure signature against this stored
+    value to decide whether the last fix made progress. Empty string omits
+    the annotation (fresh drain where the caller hasn't decided to track).
+    """
     n = item.pr
     code_payload = {
         "repo": item.repo,
@@ -130,6 +162,13 @@ def build_fix_workload(item, namespace, gate_profile, agent_name, coder_agent, a
         spec["verdictPolicy"] = {"selfGO": list(self_go)}
     if gate_profile:
         spec["gateProfile"] = gate_profile
+    annotations = {
+        ATTEMPT_ANNOTATION: str(attempt),
+        PRFIX_REPO_ANNOTATION: item.repo,
+        PRFIX_PR_ANNOTATION: str(n),
+    }
+    if signature:
+        annotations[SIGNATURE_ANNOTATION] = signature
     return {
         "apiVersion": "foreman.llmkube.dev/v1alpha1",
         "kind": "Workload",
@@ -137,11 +176,7 @@ def build_fix_workload(item, namespace, gate_profile, agent_name, coder_agent, a
             "name": prfix_workload_name(item),
             "namespace": namespace,
             "labels": {"created-by": PRFIX_CREATED_BY, "lane": item.lane},
-            "annotations": {
-                ATTEMPT_ANNOTATION: str(attempt),
-                PRFIX_REPO_ANNOTATION: item.repo,
-                PRFIX_PR_ANNOTATION: str(n),
-            },
+            "annotations": annotations,
         },
         "spec": spec,
     }
@@ -175,6 +210,7 @@ def drain_pr_fixes(list_queued, existing_prfix_names, create_workload,
                 item, namespace, gate_profile_for(item.repo, gate_profiles),
                 agent_name, pr_fix_coder_for(item.lane, lane_agents), attempt=1,
                 verify_enabled=verify_enabled,
+                signature=failure_signature(item),
                 self_go=self_go,
             )
             create_workload(manifest)
@@ -199,13 +235,21 @@ _TERMINAL = ("Succeeded", "Completed", "Failed")
 _TERMINAL_PR = ("merged", "closed")
 
 
-def rebuild_prfix_manifest(wl: dict, attempt: int) -> dict:
+def rebuild_prfix_manifest(wl: dict, attempt: int, signature: str = "") -> dict:
     """Reconstruct a clean, create-able manifest from a listed fix Workload,
     overriding the attempt annotation. Strips server-managed metadata and
-    status so it can be re-created under the same name after delete."""
+    status so it can be re-created under the same name after delete.
+
+    ``signature`` is the failure signature that produced this attempt; the
+    next reconcile compares the *new* failure signature against this stored
+    value to decide whether the last fix made progress. Empty string leaves
+    any prior signature annotation untouched so a missing-baseline retry
+    doesn't wipe the comparison baseline for subsequent ticks."""
     meta = wl.get("metadata") or {}
     ann = dict(meta.get("annotations") or {})
     ann[ATTEMPT_ANNOTATION] = str(attempt)
+    if signature:
+        ann[SIGNATURE_ANNOTATION] = signature
     return {
         "apiVersion": "foreman.llmkube.dev/v1alpha1",
         "kind": "Workload",
@@ -243,11 +287,15 @@ def _prfix_current_coder(wl: dict) -> Optional[str]:
     return None
 
 
-def escalate_prfix_manifest(wl: dict, next_lane: str, next_coder: str) -> dict:
+def escalate_prfix_manifest(wl: dict, next_lane: str, next_coder: str, signature: str = "") -> dict:
     """Rebuild the fix Workload for the next escalation tier: swap the issue-fix
     coder, flip the lane label, and reset the attempt to 1 (a fresh budget on the
-    stronger coder)."""
-    m = rebuild_prfix_manifest(wl, attempt=1)
+    stronger coder). The failure signature annotation carries over unchanged so
+    a thrashing series that escalates still sees the same baseline on the next
+    tier; ``signature`` lets the caller overwrite it when the new tier produced
+    a different surface (e.g. the fix Workload is being re-launched against a
+    freshly-seen failure)."""
+    m = rebuild_prfix_manifest(wl, attempt=1, signature=signature)
     m["metadata"].setdefault("labels", {})["lane"] = next_lane
     for step in (m["spec"].get("pipeline") or []):
         if step.get("kind") == "issue-fix":
@@ -257,7 +305,9 @@ def escalate_prfix_manifest(wl: dict, next_lane: str, next_coder: str) -> dict:
 
 def reconcile_pr_fixes(list_prfix_workloads, delete_workload, create_workload,
                        mark_pr_fix, pr_is_mergeable=lambda repo, pr: "ok", max_attempts=3,
-                       lane_agents=None) -> list:
+                       lane_agents=None,
+                       get_pr_fix_signature=lambda repo, pr: "",
+                       progress_max_attempts=PR_FIX_PROGRESS_MAX_ATTEMPTS) -> list:
     """Settle prior fix Workloads: Succeeded -> verify the PR is actually
     mergeable (pr_is_mergeable) before marking FIXED, delete only if the mark
     succeeded (else leave the tombstone so the next tick retries the mark);
@@ -332,10 +382,59 @@ def reconcile_pr_fixes(list_prfix_workloads, delete_workload, create_workload,
                 results.append(f"{name}:checks-pending:{attempt}/{max_attempts}")
             # Mark failed, still failing check, or Failed phase -> retry or BLOCKED
             elif attempt < max_attempts:
-                delete_workload(name)
-                create_workload(rebuild_prfix_manifest(wl, attempt + 1))
-                tag = "not-mergeable-retry" if merge_status == "checks_failed" else "retry"
-                results.append(f"{name}:{tag}:{attempt + 1}/{max_attempts}")
+                # Signature-aware budgeting: charge the attempt budget by
+                # *failure signature*, not by attempt count (#133). A retry
+                # against the same wall still ticks attempt++; a retry against
+                # a *different* failure surface counts as progress and gets a
+                # fresh per-tier attempt (=1) plus a separate, larger progress
+                # budget as the runaway bound. The attempt cap itself only
+                # bounds the thrashing-on-the-same-wall case.
+                prev_sig = ann.get(SIGNATURE_ANNOTATION, "") or ""
+                try:
+                    new_sig = get_pr_fix_signature(repo, pr) if (repo and pr is not None) else ""
+                except Exception:
+                    new_sig = ""
+                progress = 0
+                try:
+                    progress = int(ann.get(PROGRESS_ANNOTATION, "0") or "0")
+                except Exception:
+                    progress = 0
+                progressed = bool(prev_sig) and bool(new_sig) and prev_sig != new_sig
+                if progressed:
+                    next_progress = progress + 1
+                    if next_progress > progress_max_attempts:
+                        # Runaway bound: too many *progressing* retries, each
+                        # surface-fix lasted one tick. Same escalation/BLOCKED
+                        # shape as the exhausted-attempt branch below.
+                        if repo and pr is not None:
+                            mark_pr_fix(
+                                repo, pr, "BLOCKED",
+                                f"foreman fix exhausted {next_progress}/{progress_max_attempts} "
+                                f"progressing retries; last surface: {new_sig} ({name})",
+                            )
+                        delete_workload(name)
+                        results.append(
+                            f"{name}:progress-giveup:{next_progress}/{progress_max_attempts}"
+                        )
+                        continue
+                    delete_workload(name)
+                    manifest = rebuild_prfix_manifest(
+                        wl, attempt=1, signature=new_sig,
+                    )
+                    manifest["metadata"]["annotations"][PROGRESS_ANNOTATION] = str(next_progress)
+                    create_workload(manifest)
+                    tag = "not-mergeable-retry-progress" if merge_status == "checks_failed" else "retry-progress"
+                    results.append(
+                        f"{name}:{tag}:{next_progress}/{progress_max_attempts}"
+                    )
+                else:
+                    delete_workload(name)
+                    create_workload(rebuild_prfix_manifest(
+                        wl, attempt + 1,
+                        signature=new_sig if new_sig else "",
+                    ))
+                    tag = "not-mergeable-retry" if merge_status == "checks_failed" else "retry"
+                    results.append(f"{name}:{tag}:{attempt + 1}/{max_attempts}")
             else:
                 # Tier exhausted at the attempt cap. Before giving up, escalate to
                 # the next coder tier (NORMAL -> ESCALATED) with a fresh attempt

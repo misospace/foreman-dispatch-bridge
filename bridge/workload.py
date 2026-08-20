@@ -19,6 +19,8 @@ GATE_PROFILE_WILDCARD = "*"
 # Annotation keys the bridge stamps on each Workload so the failed-workload
 # retry loop can read attempt count + the dispatch identity needed to unclaim.
 ATTEMPT_ANNOTATION = "foreman.llmkube.dev/attempt"
+SIGNATURE_ANNOTATION = "foreman.llmkube.dev/failure-signature"
+PROGRESS_ANNOTATION = "foreman.llmkube.dev/progress-attempts"
 ISSUE_ID_ANNOTATION = "foreman.llmkube.dev/issue-id"
 AGENT_NAME_ANNOTATION = "foreman.llmkube.dev/agent-name"
 
