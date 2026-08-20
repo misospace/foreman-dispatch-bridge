@@ -40,8 +40,10 @@ def terminal_since(wl: dict) -> Optional[datetime]:
     is repeatedly refreshed). The bridge owns the timestamp it depends on:
     the first tick a Workload is seen in a terminal phase stamps an annotation
     we then read here. Pre-existing terminal Workloads (no annotation yet)
-    fall back to metadata.creationTimestamp, which the controller also does
-    not rewrite, so they still age out.
+    fall back to the legacy single-stamp annotation
+    (``TERMINAL_SINCE_ANNOTATION_FALLBACK``) or, failing that, to
+    metadata.creationTimestamp -- neither of which the controller rewrites,
+    so they still age out.
     """
     annotations = (wl.get("metadata") or {}).get("annotations") or {}
     phase = ((wl.get("status") or {}).get("phase")) or ""
