@@ -433,11 +433,17 @@ def reconcile_failures(
             # will ever run again, invisible on the board and holding a slot
             # against MAX_IN_PROGRESS until the 48h prune. Parking moves it to
             # backlog with needs-human so it appears on the operator worklist.
-            _park_exhausted(
+            parked = _park_exhausted(
                 wl, f"infra failure after {attempt} attempts (e.g. model 403 "
                 "or network error that never reached the agent)",
             )
             results.append(f"{name}:giveup-infra:{attempt}/{infra_max_attempts}")
+            # Tombstone must be retired on a successful park or the next tick
+            # re-lists it and re-posts the needs-human comment every tick until
+            # the 48h prune. A failed park keeps the tombstone so the next tick
+            # retries the park.
+            if parked:
+                delete_workload(name)
             continue
         if attempt >= max_attempts:
             item = refresh_lane(item_from_workload(wl), current_lane_for)
@@ -469,11 +475,15 @@ def reconcile_failures(
                 # Same reasoning as the infra branch: without parking, an
                 # unescalatable exhausted Workload pins its issue in-progress
                 # forever.
-                _park_exhausted(
+                parked = _park_exhausted(
                     wl, f"exhausted {attempt} attempts with no escalation lane "
                     "available",
                 )
                 results.append(f"{name}:giveup:{attempt}/{max_attempts}")
+                # Same as the infra branch above: a successful park retires the
+                # tombstone so list_failed() does not re-park it next tick.
+                if parked:
+                    delete_workload(name)
             continue
         item = refresh_lane(item_from_workload(wl), current_lane_for)
         # Backfill issue-id BEFORE the delete so the rebuilt Workload carries

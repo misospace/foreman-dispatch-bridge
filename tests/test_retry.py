@@ -818,8 +818,9 @@ def test_infra_giveup_parks_the_issue():
     assert any("giveup-infra:" in line for line in out), out
     assert len(parked) == 1, parked
     assert "infra failure" in parked[0][1]
-    # The tombstone is still left in place for triage.
-    assert rec.deleted == []
+    # A successful park retires the Failed tombstone so list_failed() does
+    # not re-park it and re-post the needs-human comment on every tick.
+    assert rec.deleted == ["w-infra-park"]
     assert rec.created == []
 
 
@@ -830,7 +831,52 @@ def test_verdict_giveup_parks_when_escalation_is_unavailable():
     assert out == ["wl-a-b-7:giveup:3/3"]
     assert len(parked) == 1, parked
     assert "exhausted 3 attempts" in parked[0][1]
+    # Same retire-tombstone contract as the infra branch.
+    assert rec.deleted == ["wl-a-b-7"]
+
+
+def test_parked_workload_is_not_re_parked_on_subsequent_tick():
+    # The acceptance criterion for #176: once park_for_human has succeeded
+    # for a Failed Workload, the tombstone is deleted so list_failed() does
+    # not return it on the next tick, and reconcile_failures does not call
+    # park_for_human again or post a second needs-human comment.
+    park, parked = _parks()
+    wl = _failed_wl("wl-repark-1", attempt=DEFAULT_MAX_ATTEMPTS)
+
+    # Tick 1: park + delete.
+    rec1 = _Recorder([wl])
+    out1 = _reconcile(rec1, park_for_human=park)
+    assert out1 == ["wl-repark-1:giveup:3/3"], out1
+    assert len(parked) == 1, parked
+    assert rec1.deleted == ["wl-repark-1"], rec1.deleted
+
+    # Tick 2: list_failed() is now empty (the tombstone was retired in tick
+    # 1), so reconcile_failures has nothing to act on. If the tombstone had
+    # leaked through, the same workload would appear again and park_for_human
+    # would be called a second time.
+    parked_after_tick1 = len(parked)
+    rec2 = _Recorder([])  # the post-park Failed list
+    out2 = _reconcile(rec2, park_for_human=park)
+    assert out2 == []
+    assert len(parked) == parked_after_tick1, (
+        "park_for_human must not be invoked a second time"
+    )
+
+
+def test_park_failure_leaves_tombstone_for_next_tick():
+    # A park_for_human that returns False (or raises) must NOT retire the
+    # tombstone — otherwise the next tick would silently drop the issue
+    # instead of retrying the park.
+    def no_park(item, reason):
+        return False
+
+    wl = _failed_wl("wl-parkfail-1", attempt=DEFAULT_MAX_ATTEMPTS)
+    rec = _Recorder([wl])
+    out = _reconcile(rec, park_for_human=no_park)
+    assert out == ["wl-parkfail-1:giveup:3/3"], out
+    # Tombstone stays so the next tick retries the park.
     assert rec.deleted == []
+    assert rec.created == []
 
 
 def test_escalated_workloads_are_not_parked():
