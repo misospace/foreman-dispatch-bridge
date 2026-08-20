@@ -80,6 +80,12 @@ class FakeAPI:
         responses = self.responses.get("list_namespaced_custom_object", [])
         return responses.pop(0) if responses else {"items": []}
 
+    def patch_namespaced_custom_object(self, **kwargs: Any) -> Any:
+        self.calls.append(_Call("patch_namespaced_custom_object", kwargs))
+        self._consume_error("patch_namespaced_custom_object")
+        responses = self.responses.get("patch_namespaced_custom_object", [])
+        return responses.pop(0) if responses else {}
+
     def sleep(self, seconds: float) -> None:
         self.sleep_calls += 1
 
