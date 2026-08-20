@@ -38,7 +38,7 @@ from bridge.prfix import (
     DEFAULT_PRFIX_LANE_AGENTS, ACTIONABLE_LANES, PRFIX_CREATED_BY,
     FAILING_CONCLUSIONS, PENDING_STATUSES, failure_signature,
 )
-from bridge.prune import prune_workloads
+from bridge.prune import prune_workloads, stamp_terminal_since
 from bridge.reconcile import reconcile_stranded_issues, release_stuck_claims
 from bridge.review_transition import transition_to_in_review
 
@@ -1131,12 +1131,53 @@ def _list_terminal_candidates(
 
     The caller filters by phase before deleting. The function does not
     deduplicate because Kubernetes CR names are globally unique.
+
+    For every terminal Workload the bridge first sees (issue #170), we
+    stamp a bridge-owned annotation recording the observation moment, so
+    prune TTL is measured against a timestamp the Foreman controller
+    cannot rewrite. The stamp is persisted back to the cluster so it
+    survives a restart.
     """
     bridge = _list_bridge_workloads(api, namespace)
     prfix = _list_workloads_by_label(
         api, namespace, f"created-by={prfix_created_by}"
     )
-    return list(bridge) + list(prfix)
+    items: List[Dict[str, Any]] = list(bridge) + list(prfix)
+    for wl in items:
+        phase = (wl.get("status") or {}).get("phase") or ""
+        if phase not in ("Completed", "Failed"):
+            continue
+        meta = wl.get("metadata") or {}
+        annotations = meta.get("annotations") or {}
+        annotation_key = f"foreman.llmkube.dev/terminal-since/{phase}"
+        if annotations.get(annotation_key):
+            # Already stamped on a prior tick; idempotent no-op so the TTL
+            # timestamp does not advance on subsequent reconciles.
+            continue
+        stamp = stamp_terminal_since(wl)
+        if stamp is None:
+            continue
+        name = meta.get("name")
+        if not name:
+            continue
+        try:
+            api.patch_namespaced_custom_object(
+                group="foreman.llmkube.dev",
+                version="v1alpha1",
+                namespace=namespace,
+                plural="agenticworkloads",
+                name=name,
+                body={
+                    "metadata": {
+                        "annotations": {annotation_key: stamp},
+                    },
+                },
+            )
+        except client.ApiException as exc:  # pragma: no cover - network error path
+            logger.warning(
+                "stamp-terminal-since-failed", extra={"error": repr(exc), "name": name}
+            )
+    return items
 
 
 def _list_workload_tasks(

@@ -1,12 +1,17 @@
 from datetime import datetime, timedelta, timezone
 
 
-from bridge.prune import prunable_workloads, prune_workloads, terminal_since
+from bridge.prune import (
+    prunable_workloads,
+    prune_workloads,
+    stamp_terminal_since,
+    terminal_since,
+)
 
 NOW = datetime(2026, 7, 8, 20, 0, 0, tzinfo=timezone.utc)
 
 
-def _wl(name, phase, *, last_transition=None, created=None):
+def _wl(name, phase, *, last_transition=None, created=None, terminal_since_stamp=None):
     md = {"name": name}
     if created:
         md["creationTimestamp"] = created
@@ -18,6 +23,10 @@ def _wl(name, phase, *, last_transition=None, created=None):
             {"type": "Planned", "lastTransitionTime": "2026-07-01T00:00:00Z"},
             {"type": "Completed", "lastTransitionTime": last_transition},
         ]
+    if terminal_since_stamp is not None:
+        md.setdefault("annotations", {})[
+            f"foreman.llmkube.dev/terminal-since/{phase}"
+        ] = terminal_since_stamp
     return {"metadata": md, "status": st}
 
 
@@ -25,12 +34,18 @@ def _ago(hours):
     return (NOW - timedelta(hours=hours)).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def test_terminal_since_uses_latest_condition():
-    wl = _wl("w", "Failed", last_transition="2026-07-08T19:41:13Z")
-    assert terminal_since(wl) == datetime(2026, 7, 8, 19, 41, 13, tzinfo=timezone.utc)
+def test_terminal_since_uses_bridge_stamped_annotation():
+    """The bridge-owned terminal-since annotation is the source of truth for
+    age, because Foreman's controller rewrites condition lastTransitionTimes
+    on every reconcile (issue #170)."""
+    wl = _wl("w", "Failed", last_transition="2026-07-08T19:41:13Z",
+             terminal_since_stamp="2026-07-08T13:00:00Z")
+    assert terminal_since(wl) == datetime(2026, 7, 8, 13, 0, 0, tzinfo=timezone.utc)
 
 
-def test_terminal_since_falls_back_to_creation_timestamp():
+def test_terminal_since_falls_back_to_creation_timestamp_when_no_stamp():
+    """Workloads that went terminal before the bridge could stamp them fall
+    back to creationTimestamp, which the controller also does not rewrite."""
     wl = _wl("w", "Completed", created="2026-07-08T12:30:02Z")
     assert terminal_since(wl) == datetime(2026, 7, 8, 12, 30, 2, tzinfo=timezone.utc)
 
@@ -39,9 +54,44 @@ def test_terminal_since_none_when_no_timestamp():
     assert terminal_since({"metadata": {}, "status": {"phase": "Failed"}}) is None
 
 
+def test_terminal_since_ignores_refreshed_condition_timestamps():
+    """Regression for #170: a Workload whose condition lastTransitionTime was
+    refreshed minutes ago but which actually went terminal hours earlier (per
+    the bridge-stamped annotation) must still report the older timestamp."""
+    wl = _wl("w", "Completed",
+             last_transition="2026-07-08T19:50:00Z",  # refreshed 10 min ago
+             terminal_since_stamp="2026-07-08T01:00:00Z")  # actually terminal 19h ago
+    assert terminal_since(wl) == datetime(2026, 7, 8, 1, 0, 0, tzinfo=timezone.utc)
+
+
+def test_stamp_terminal_since_first_call_writes_annotation():
+    wl = _wl("w", "Completed")
+    stamp = stamp_terminal_since(wl, now=NOW)
+    assert stamp == NOW.strftime("%Y-%m-%dT%H:%M:%SZ")
+    assert wl["metadata"]["annotations"][
+        "foreman.llmkube.dev/terminal-since/Completed"
+    ] == "2026-07-08T20:00:00Z"
+
+
+def test_stamp_terminal_since_is_idempotent():
+    """Re-stamping must not advance the timestamp, or prune TTL never elapses."""
+    wl = _wl("w", "Failed")
+    stamp_terminal_since(wl, now=NOW - timedelta(hours=10))
+    stamp_terminal_since(wl, now=NOW)  # second tick
+    assert wl["metadata"]["annotations"][
+        "foreman.llmkube.dev/terminal-since/Failed"
+    ] == (NOW - timedelta(hours=10)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def test_stamp_terminal_since_noop_for_non_terminal_phase():
+    wl = _wl("w", "Dispatched")
+    assert stamp_terminal_since(wl, now=NOW) is None
+    assert "annotations" not in wl["metadata"]
+
+
 def test_completed_pruned_past_ttl_but_kept_within():
-    old = _wl("wl-old", "Completed", last_transition=_ago(7))
-    fresh = _wl("wl-fresh", "Completed", last_transition=_ago(3))
+    old = _wl("wl-old", "Completed", terminal_since_stamp=_ago(7))
+    fresh = _wl("wl-fresh", "Completed", terminal_since_stamp=_ago(3))
     results = prunable_workloads([old, fresh], NOW, 6 * 3600, 48 * 3600)
     assert results == [("wl-old", "Completed")]
 
@@ -49,25 +99,35 @@ def test_completed_pruned_past_ttl_but_kept_within():
 def test_failed_uses_its_own_longer_ttl():
     # 7h-old Failed survives the 48h failed TTL even though it exceeds the 6h
     # completed TTL — the phases are independent.
-    failed = _wl("wl-failed", "Failed", last_transition=_ago(7))
+    failed = _wl("wl-failed", "Failed", terminal_since_stamp=_ago(7))
     assert prunable_workloads([failed], NOW, 6 * 3600, 48 * 3600) == []
-    old_failed = _wl("wl-failed-old", "Failed", last_transition=_ago(50))
+    old_failed = _wl("wl-failed-old", "Failed", terminal_since_stamp=_ago(50))
     assert prunable_workloads([old_failed], NOW, 6 * 3600, 48 * 3600) == [("wl-failed-old", "Failed")]
 
 
 def test_non_terminal_never_pruned():
-    running = _wl("wl-running", "Dispatched", last_transition=_ago(100))
+    running = _wl("wl-running", "Dispatched", terminal_since_stamp=_ago(100))
     assert prunable_workloads([running], NOW, 6 * 3600, 48 * 3600) == []
 
 
 def test_ttl_zero_disables_phase():
-    old = _wl("wl-old", "Completed", last_transition=_ago(100))
+    old = _wl("wl-old", "Completed", terminal_since_stamp=_ago(100))
     assert prunable_workloads([old], NOW, 0, 48 * 3600) == []
 
 
 def test_missing_timestamp_skipped():
     wl = {"metadata": {"name": "w"}, "status": {"phase": "Completed"}}
     assert prunable_workloads([wl], NOW, 6 * 3600, 48 * 3600) == []
+
+
+def test_prune_handles_refreshed_condition_timestamps():
+    """Acceptance #1 / #4 for #170: a Workload whose condition timestamps
+    have been refreshed since it went terminal must still be pruned when its
+    bridge-stamped age exceeds the TTL."""
+    wl = _wl("wl-stale", "Completed",
+             last_transition=_ago(1),  # controller refreshed it an hour ago
+             terminal_since_stamp=_ago(7))  # actually terminal 7 hours ago
+    assert prunable_workloads([wl], NOW, 6 * 3600, 48 * 3600) == [("wl-stale", "Completed")]
 
 
 class _Recorder:
@@ -87,8 +147,8 @@ class _Recorder:
 
 def test_prune_workloads_deletes_and_logs():
     r = _Recorder([
-        _wl("wl-old", "Completed", last_transition=_ago(7)),
-        _wl("wl-fresh", "Completed", last_transition=_ago(1)),
+        _wl("wl-old", "Completed", terminal_since_stamp=_ago(7)),
+        _wl("wl-fresh", "Completed", terminal_since_stamp=_ago(1)),
     ])
     out = list(prune_workloads(r.list, r.delete, NOW, 6 * 3600, 48 * 3600))
     assert r.deleted == ["wl-old"]
@@ -96,14 +156,14 @@ def test_prune_workloads_deletes_and_logs():
 
 
 def test_prune_workloads_delete_failure_is_logged_not_raised():
-    r = _Recorder([_wl("wl-old", "Completed", last_transition=_ago(7))], fail_on=["wl-old"])
+    r = _Recorder([_wl("wl-old", "Completed", terminal_since_stamp=_ago(7))], fail_on=["wl-old"])
     out = list(prune_workloads(r.list, r.delete, NOW, 6 * 3600, 48 * 3600))
     assert r.deleted == []
     assert out == ["prune:delete-failed:wl-old:boom"]
 
 
 def test_prune_workloads_noop_when_both_ttls_disabled():
-    r = _Recorder([_wl("wl-old", "Completed", last_transition=_ago(100))])
+    r = _Recorder([_wl("wl-old", "Completed", terminal_since_stamp=_ago(100))])
     out = list(prune_workloads(r.list, r.delete, NOW, 0, 0))
     assert out == []
     assert r.deleted == []
@@ -114,9 +174,10 @@ def test_prune_workloads_noop_when_both_ttls_disabled():
 
 def _wl_with_identity(name, phase, *, repo="a/b", issues=None, issue_id="iss_1",
                        agent_name="foreman-coder", last_transition=None, created=None,
-                       created_by="dispatch-bridge"):
+                       created_by="dispatch-bridge", terminal_since_stamp=None):
     """Workload manifest with spec identity fields for prune reset."""
-    base = _wl(name, phase, last_transition=last_transition, created=created)
+    base = _wl(name, phase, last_transition=last_transition, created=created,
+               terminal_since_stamp=terminal_since_stamp)
     base["spec"] = {"repo": repo, "issues": issues or [42]}
     labels = base["metadata"].setdefault("labels", {})
     labels["created-by"] = created_by
@@ -137,7 +198,7 @@ class _RecorderWithReset(_Recorder):
 
 def test_prune_resets_failed_workload_passes_manifest():
     """A pruned Failed Workload passes the full manifest to reset_issue."""
-    wl = _wl_with_identity("wl-a-b-42", "Failed", last_transition=_ago(50),
+    wl = _wl_with_identity("wl-a-b-42", "Failed", terminal_since_stamp=_ago(50),
                            repo="a/b", issues=[42], issue_id="iss_42")
     r = _RecorderWithReset([wl])
     out = list(prune_workloads(
@@ -156,7 +217,7 @@ def test_prune_resets_failed_workload_passes_manifest():
 
 def test_prune_does_not_reset_completed_workload():
     """A pruned Completed Workload does NOT call reset_issue (PR already opened)."""
-    wl = _wl_with_identity("wl-a-b-99", "Completed", last_transition=_ago(7))
+    wl = _wl_with_identity("wl-a-b-99", "Completed", terminal_since_stamp=_ago(7))
     r = _RecorderWithReset([wl])
     out = list(prune_workloads(
         r.list, r.delete, NOW, 6 * 3600, 48 * 3600,
@@ -169,7 +230,7 @@ def test_prune_does_not_reset_completed_workload():
 
 def test_prune_reset_failure_is_logged_not_raised():
     """A failed reset_issue call is logged but doesn't crash the tick."""
-    wl = _wl_with_identity("wl-a-b-42", "Failed", last_transition=_ago(50))
+    wl = _wl_with_identity("wl-a-b-42", "Failed", terminal_since_stamp=_ago(50))
 
     def fail_reset(wl):
         raise RuntimeError("API down")
@@ -184,7 +245,7 @@ def test_prune_reset_failure_is_logged_not_raised():
 def test_prune_no_reset_when_callback_not_provided():
     """Without reset_issue, prune behaves as before (no reset)."""
     r = _Recorder([
-        _wl_with_identity("wl-a-b-42", "Failed", last_transition=_ago(50)),
+        _wl_with_identity("wl-a-b-42", "Failed", terminal_since_stamp=_ago(50)),
     ])
     out = list(prune_workloads(r.list, r.delete, NOW, 6 * 3600, 48 * 3600))
     assert r.deleted == ["wl-a-b-42"]
@@ -193,7 +254,7 @@ def test_prune_no_reset_when_callback_not_provided():
 
 def test_prune_reset_skips_workloads_without_identity():
     """Workloads missing spec.repo or spec.issues are not reset (can't derive identity)."""
-    wl = _wl("wl-no-identity", "Failed", last_transition=_ago(50))
+    wl = _wl("wl-no-identity", "Failed", terminal_since_stamp=_ago(50))
     wl["spec"] = {}
     r = _RecorderWithReset([wl])
     out = list(prune_workloads(
@@ -208,7 +269,7 @@ def test_prune_reset_skips_workloads_without_identity():
 def test_prune_reset_skips_prfix_workload():
     """PR-fix Workloads are deleted but NOT reset even with repo/issues identity."""
     wl = _wl_with_identity(
-        "wl-prfix-42", "Failed", last_transition=_ago(50),
+        "wl-prfix-42", "Failed", terminal_since_stamp=_ago(50),
         repo="a/b", issues=[42], created_by="dispatch-bridge-prfix",
     )
     r = _RecorderWithReset([wl])

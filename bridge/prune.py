@@ -8,6 +8,14 @@ from typing import Callable, Optional
 COMPLETED_PHASE = "Completed"
 FAILED_PHASE = "Failed"
 
+# Bridge-owned annotation stamped the first tick a Workload is seen in a
+# terminal phase. Used by `terminal_since` so prune age is measured against a
+# timestamp the Foreman controller does not rewrite (issue #170). The
+# fallback key is written by older bridges / for one-time migrations where
+# the per-phase split is unknown.
+TERMINAL_SINCE_ANNOTATION_PREFIX = "foreman.llmkube.dev/terminal-since"
+TERMINAL_SINCE_ANNOTATION_FALLBACK = "foreman.llmkube.dev/terminal-since"
+
 ListWorkloads = Callable[[], list]      # () -> list of Workload manifests (dicts)
 DeleteWorkload = Callable[[str], None]  # (name) -> None
 ResetIssue = Callable[[dict], None]     # (workload_manifest) -> None (return ignored)
@@ -26,16 +34,56 @@ def _parse_ts(ts: Optional[str]) -> Optional[datetime]:
 def terminal_since(wl: dict) -> Optional[datetime]:
     """Best-effort timestamp of when a Workload entered its terminal state.
 
-    Foreman doesn't populate status.completionTime, so use the latest condition
-    lastTransitionTime (the terminal transition), falling back to the object's
-    creationTimestamp when conditions carry no usable stamp.
+    Foreman's controller rewrites condition lastTransitionTimes on every
+    reconcile, so the latest condition timestamp is not a stable age signal
+    (issue #170: prune TTL never elapses because the maximum across conditions
+    is repeatedly refreshed). The bridge owns the timestamp it depends on:
+    the first tick a Workload is seen in a terminal phase stamps an annotation
+    we then read here. Pre-existing terminal Workloads (no annotation yet)
+    fall back to the legacy single-stamp annotation
+    (``TERMINAL_SINCE_ANNOTATION_FALLBACK``) or, failing that, to
+    metadata.creationTimestamp -- neither of which the controller rewrites,
+    so they still age out.
     """
-    st = wl.get("status") or {}
-    stamps = [_parse_ts(c.get("lastTransitionTime")) for c in (st.get("conditions") or [])]
-    stamps = [s for s in stamps if s is not None]
-    if stamps:
-        return max(stamps)  # type: ignore[type-var]  # mypy cannot narrow filtered list[datetime | None] to list[datetime]
+    annotations = (wl.get("metadata") or {}).get("annotations") or {}
+    phase = ((wl.get("status") or {}).get("phase")) or ""
+    if phase in (COMPLETED_PHASE, FAILED_PHASE):
+        for key in (
+            f"{TERMINAL_SINCE_ANNOTATION_PREFIX}/{phase}",
+            TERMINAL_SINCE_ANNOTATION_FALLBACK,
+        ):
+            stamped = annotations.get(key)
+            ts = _parse_ts(stamped)
+            if ts is not None:
+                return ts
     return _parse_ts((wl.get("metadata") or {}).get("creationTimestamp"))
+
+
+def stamp_terminal_since(wl: dict, now: Optional[datetime] = None) -> Optional[str]:
+    """Stamp the bridge-owned terminal-since annotation on a Workload manifest
+    in place and return the stamp written. No-op (returns None) if the manifest
+    is not in a terminal phase or already carries a stamp for that phase, so
+    repeated reconciles do not advance the timestamp the prune TTL reads.
+
+    The stamp is the moment the bridge first observed the terminal phase;
+    that is the definition of "how long has this been terminal" we want.
+    """
+    phase = ((wl.get("status") or {}).get("phase")) or ""
+    if phase not in (COMPLETED_PHASE, FAILED_PHASE):
+        return None
+    md = wl.setdefault("metadata", {})
+    annotations = md.setdefault("annotations", {})
+    key = f"{TERMINAL_SINCE_ANNOTATION_PREFIX}/{phase}"
+    existing = annotations.get(key)
+    if existing:
+        ts = _parse_ts(existing)
+        if ts is not None:
+            return existing
+    stamp = (now or datetime.now(timezone.utc)).astimezone(timezone.utc).strftime(
+        "%Y-%m-%dT%H:%M:%SZ"
+    )
+    annotations[key] = stamp
+    return stamp
 
 
 def prunable_workloads(
