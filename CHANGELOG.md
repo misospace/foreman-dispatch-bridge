@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.6.32](https://github.com/misospace/foreman-dispatch-bridge/compare/v0.6.31...v0.6.32) (2026-08-21)
+
+
+### Bug Fixes
+
+* **prune:** drop the terminal-since stamp when its PATCH fails ([#202](https://github.com/misospace/foreman-dispatch-bridge/issues/202)) ([cd9a0a0](https://github.com/misospace/foreman-dispatch-bridge/commit/cd9a0a037c8f8c77523921939dcf84f07762d0e1))
+
 ## [0.6.31](https://github.com/misospace/foreman-dispatch-bridge/compare/v0.6.30...v0.6.31) (2026-08-21)
 
 
