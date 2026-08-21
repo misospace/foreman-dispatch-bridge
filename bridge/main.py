@@ -1044,14 +1044,11 @@ def _real_main() -> None:  # pragma: no cover - thin wiring, exercised in the cl
     # its TTL is genuinely done. Covers both issue (created-by=dispatch-bridge)
     # and pr-fix (created-by=dispatch-bridge-prfix) Workloads.
     def list_terminal_candidates() -> list:
-        out = list(list_bridge_workloads())
-        resp = api.list_namespaced_custom_object(
-            group="foreman.llmkube.dev", version="v1alpha1",
-            namespace=namespace, plural="workloads",
-            label_selector=f"created-by={PRFIX_CREATED_BY}",
-        )
-        out.extend(resp.get("items", []))
-        return out
+        # Delegates rather than re-listing inline: _list_terminal_candidates also
+        # stamps the bridge-owned terminal-since annotation the prune TTL reads
+        # (#170). An inline copy silently skipped that, leaving prune to fall back
+        # to creationTimestamp.
+        return _list_terminal_candidates(api, namespace, PRFIX_CREATED_BY)
 
     def _reset_issue(wl: dict) -> None:
         """Reset a claimed issue to ready so it can be re-claimed.
