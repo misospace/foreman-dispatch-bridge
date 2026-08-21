@@ -497,6 +497,28 @@ class TestListTerminalCandidates:
         result = _list_terminal_candidates(api, "ns", "dispatch-bridge-prfix")
         assert [w["metadata"]["name"] for w in result] == ["a", "b"]
 
+    def test_stamps_terminal_since_on_the_workloads_plural(self) -> None:
+        """The stamp is persisted with a PATCH; the plural must be the real CRD
+        name. "agenticworkloads" does not exist, so a wrong plural 404s, gets
+        swallowed by the handler, and the annotation silently never persists —
+        leaving terminal_since to fall back to creationTimestamp."""
+        api = FakeAPI(
+            responses={
+                "list_namespaced_custom_object": [
+                    {"items": [_workload("a", "Failed")]},
+                    {"items": []},
+                ]
+            }
+        )
+        _list_terminal_candidates(api, "ns", "dispatch-bridge-prfix")
+        patches = [c for c in api.calls if c.name == "patch_namespaced_custom_object"]
+        assert len(patches) == 1, api.calls
+        assert patches[0].kwargs["plural"] == "workloads"
+        assert patches[0].kwargs["group"] == "foreman.llmkube.dev"
+        assert patches[0].kwargs["name"] == "a"
+        annotations = patches[0].kwargs["body"]["metadata"]["annotations"]
+        assert "foreman.llmkube.dev/terminal-since/Failed" in annotations
+
     def test_uses_dedicated_label_selectors(self) -> None:
         api = FakeAPI(
             responses={
