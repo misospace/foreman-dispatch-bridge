@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.6.31](https://github.com/misospace/foreman-dispatch-bridge/compare/v0.6.30...v0.6.31) (2026-08-21)
+
+
+### Bug Fixes
+
+* **prune:** stop the stamp handler crashing on a reserved log key ([#200](https://github.com/misospace/foreman-dispatch-bridge/issues/200)) ([e6b612a](https://github.com/misospace/foreman-dispatch-bridge/commit/e6b612ace884d73ed4c87ab1c72787c4244a724b))
+
 ## [0.6.30](https://github.com/misospace/foreman-dispatch-bridge/compare/v0.6.29...v0.6.30) (2026-08-21)
 
 
