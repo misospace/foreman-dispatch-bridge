@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.7.0](https://github.com/misospace/foreman-dispatch-bridge/compare/v0.6.32...v0.7.0) (2026-08-21)
+
+
+### Features
+
+* **main:** extract run_tick so a test can drive a whole tick ([#206](https://github.com/misospace/foreman-dispatch-bridge/issues/206)) ([a74e727](https://github.com/misospace/foreman-dispatch-bridge/commit/a74e72788b8bbe50e351ca4cf07ccdccd39dc033))
+
+
+### Bug Fixes
+
+* **prune:** use a valid annotation key for the terminal-since stamp ([#204](https://github.com/misospace/foreman-dispatch-bridge/issues/204)) ([3abd24d](https://github.com/misospace/foreman-dispatch-bridge/commit/3abd24dcdec71831600ed4b20040b155ff822cbe))
+
 ## [0.6.32](https://github.com/misospace/foreman-dispatch-bridge/compare/v0.6.31...v0.6.32) (2026-08-21)
 
 
