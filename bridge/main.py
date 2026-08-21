@@ -1166,9 +1166,12 @@ def _list_terminal_candidates(
                     },
                 },
             )
-        except client.ApiException as exc:  # pragma: no cover - network error path
+        except client.ApiException as exc:
+            # "name" is a reserved LogRecord attribute; passing it in extra makes
+            # logging raise KeyError, so the handler took down the whole tick.
             logger.warning(
-                "stamp-terminal-since-failed", extra={"error": repr(exc), "name": name}
+                "stamp-terminal-since-failed",
+                extra={"error": repr(exc), "workload": name},
             )
     return items
 

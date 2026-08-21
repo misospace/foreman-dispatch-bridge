@@ -497,6 +497,24 @@ class TestListTerminalCandidates:
         result = _list_terminal_candidates(api, "ns", "dispatch-bridge-prfix")
         assert [w["metadata"]["name"] for w in result] == ["a", "b"]
 
+    def test_stamp_failure_is_logged_without_raising(self) -> None:
+        """The handler must survive a failing PATCH. "name" is a reserved
+        LogRecord attribute, so passing it via extra raises KeyError inside
+        logging and takes the whole tick down with it — the failure path has to
+        actually run in a test, not carry a no-cover pragma."""
+        api = FakeAPI(
+            responses={
+                "list_namespaced_custom_object": [
+                    {"items": [_workload("a", "Failed")]},
+                    {"items": []},
+                ]
+            },
+            errors={"patch_namespaced_custom_object": [(404, "not found")]},
+        )
+        result = _list_terminal_candidates(api, "ns", "dispatch-bridge-prfix")
+        # The candidate list is still returned so prune proceeds on the fallback.
+        assert [w["metadata"]["name"] for w in result] == ["a"]
+
     def test_stamps_terminal_since_on_the_workloads_plural(self) -> None:
         """The stamp is persisted with a PATCH; the plural must be the real CRD
         name. "agenticworkloads" does not exist, so a wrong plural 404s, gets
