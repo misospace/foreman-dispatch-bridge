@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.6.28](https://github.com/misospace/foreman-dispatch-bridge/compare/v0.6.27...v0.6.28) (2026-08-21)
+
+
+### Bug Fixes
+
+* **prune:** stamp terminal-since on the workloads plural ([#192](https://github.com/misospace/foreman-dispatch-bridge/issues/192)) ([7101bca](https://github.com/misospace/foreman-dispatch-bridge/commit/7101bca286d265d0e3c9baf06dfc70a512206f0a))
+
 ## [0.6.27](https://github.com/misospace/foreman-dispatch-bridge/compare/v0.6.26...v0.6.27) (2026-08-21)
 
 
