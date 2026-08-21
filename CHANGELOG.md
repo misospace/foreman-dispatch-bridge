@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.6.29](https://github.com/misospace/foreman-dispatch-bridge/compare/v0.6.28...v0.6.29) (2026-08-21)
+
+
+### Bug Fixes
+
+* **prune:** call the stamping lister from the runtime path ([#194](https://github.com/misospace/foreman-dispatch-bridge/issues/194)) ([4dbcf94](https://github.com/misospace/foreman-dispatch-bridge/commit/4dbcf9416605a13b6cee3f7914ccaea14e7b258f))
+
 ## [0.6.28](https://github.com/misospace/foreman-dispatch-bridge/compare/v0.6.27...v0.6.28) (2026-08-21)
 
 
