@@ -5,6 +5,7 @@ import os
 import re
 import time
 import urllib.parse
+from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional
 from kubernetes import client, config
 from bridge.env import validate_env
@@ -586,81 +587,47 @@ def _load_by_coder_agent(
     return load
 
 
-def _real_main() -> None:  # pragma: no cover - thin wiring, exercised in the cluster
-    from bridge.claim import DispatchClient
+@dataclass
+class TickConfig:
+    """Everything the tick needs from the environment.
 
-    validate_env()
-    configure_logging()
+    Built once by _real_main so run_tick takes no implicit inputs and can be
+    driven from a test. See issue #199: the orchestration used to read os.environ
+    directly, which is why nothing could invoke it.
+    """
+    agent_name: str
+    lanes: List[str]
+    namespace: str
+    gate_profiles: dict
+    max_attempts: int
+    lane_coder_agents: dict
+    revision_coder_agents: dict
+    base_coder_agents: dict
+    repo_coder_agents: dict
+    escalation_lane: str
+    verify_enabled: bool
+    self_go: List[str]
+    pr_fix_enabled: bool
+    pr_fix_max_attempts: int
+    github_token: str
+    pr_fix_lane_agents: dict
+    prune_completed_after_h: int
+    prune_failed_after_h: int
+    max_in_progress: int
+    coder_slots: dict
+    fix_first_agents: set
 
-    base_url = os.environ.get("DISPATCH_URL", "http://dispatch.llm:3000")
-    _check_dispatch_url(base_url)
-    token = os.environ["DISPATCH_AGENT_TOKEN"]
-    agent_name = os.environ.get("DISPATCH_AGENT_NAME", "foreman/coder")
-    lanes = [part.strip() for part in os.environ.get("DISPATCH_LANES", "local,cloud,frontier").split(",") if part.strip()]
-    namespace = os.environ.get("FOREMAN_NAMESPACE", "llm")
-    gate_profiles = parse_gate_profiles(os.environ.get("GATEPROFILE_MAP"))
-    max_attempts = int(os.environ.get("RETRY_MAX_ATTEMPTS", str(DEFAULT_MAX_ATTEMPTS)))
-    # Lane -> coder Agent map, e.g. '{"*": "coder", "frontier": "coder-frontier"}'.
-    lane_coder_agents = parse_lane_coder_agents(os.environ.get("LANE_CODER_AGENTS"))
-    # Lane -> revision-tuned coder Agent map (Workload.spec.revisionCoderAgentRef).
-    revision_coder_agents = parse_lane_coder_agents(os.environ.get("REVISION_CODER_AGENTS"))
-    # Language -> coder Agent map for the base lane, e.g.
-    # '{"python": "coder-python", "node": "coder-node", "go": "coder-go", "*": "coder"}'.
-    # Explicit lane_coder_agents entries (e.g. frontier) still win outright.
-    base_coder_agents = parse_base_coder_agents(os.environ.get("BASE_CODER_AGENTS"))
-    repo_coder_agents = parse_repo_coder_agents(os.environ.get("REPO_CODER_AGENTS"))
-    # When set, exhausted Workloads outside this lane escalate into it (re-lane +
-    # unclaim) instead of tombstoning. Empty disables escalation.
-    escalation_lane = os.environ.get("ESCALATION_LANE", "").strip()
-    verify_enabled = _parse_bool_env(os.environ.get("VERIFY_ENABLED", ""), default=True)
-    self_go = parse_self_go(os.environ.get("VERDICT_SELF_GO"))
-    pr_fix_enabled = os.environ.get("PR_FIX_ENABLED", "").strip().lower() in ("1", "true", "yes")
-    pr_fix_max_attempts = int(os.environ.get("PR_FIX_MAX_ATTEMPTS", "3"))
-    github_token = os.environ.get("GITHUB_TOKEN", "")
-    _raw_lane_agents = os.environ.get("PR_FIX_LANE_AGENTS", "").strip()
-    pr_fix_lane_agents = (
-        _parse_json_map(_raw_lane_agents, "PR_FIX_LANE_AGENTS")
-        if _raw_lane_agents
-        else dict(DEFAULT_PRFIX_LANE_AGENTS)
-    )
-    # Terminal-Workload GC: a Completed Workload has already opened its PR (which
-    # lives on GitHub), and a Failed one still Failed at prune time has been left
-    # by reconcile (retries exhausted). Delete each once past its per-phase TTL so
-    # terminal objects stop accumulating. Failed gets a longer TTL for triage. 0
-    # disables a phase.
-    prune_completed_after_h = int(os.environ.get("PRUNE_COMPLETED_AFTER_HOURS", "6"))
-    prune_failed_after_h = int(os.environ.get("PRUNE_FAILED_AFTER_HOURS", "48"))
 
-    def http_get(url, headers, allow_404=False):
-        from bridge.http_retry import http_get as _http_get
-        r = _http_get(url, headers=headers)
-        if allow_404 and r.status_code == 404:
-            return r
-        r.raise_for_status()
-        return r.json()
-
-    def http_post(url, headers, payload):
-        from bridge.http_retry import http_post as _http_post
-        r = _http_post(url, headers=headers, json=payload)
-        if r.status_code == 409:  # already claimed by another agent
-            return None
-        r.raise_for_status()
-        return r.json()
-
-    dispatch = DispatchClient(base_url, token, http_get, http_post)
-
-    try:
-        config.load_incluster_config()
-    except Exception as e:
-        raise SystemExit(f"Failed to load Kubernetes in-cluster config: {e}") from e
-
-    api = client.CustomObjectsApi()
+def run_tick(api, dispatch, cfg: TickConfig, http_get: Callable) -> None:
+    """Run one reconcile cycle. All k8s and dispatch access goes through the
+    two injected clients, so a test can supply fakes and assert the call
+    sequence."""
 
     def create_workload(manifest: dict) -> None:
         try:
             api.create_namespaced_custom_object(
                 group="foreman.llmkube.dev", version="v1alpha1",
-                namespace=namespace, plural="workloads", body=manifest,
+                namespace=cfg.namespace, plural="workloads", body=manifest,
             )
         except client.exceptions.ApiException as e:
             if e.status != 409:  # 409 = Workload already exists -> idempotent no-op
@@ -669,7 +636,7 @@ def _real_main() -> None:  # pragma: no cover - thin wiring, exercised in the cl
     def list_bridge_workloads() -> list:
         resp = api.list_namespaced_custom_object(
             group="foreman.llmkube.dev", version="v1alpha1",
-            namespace=namespace, plural="workloads",
+            namespace=cfg.namespace, plural="workloads",
             label_selector="created-by=dispatch-bridge",
         )
         return resp.get("items", [])
@@ -699,17 +666,17 @@ def _real_main() -> None:  # pragma: no cover - thin wiring, exercised in the cl
         # workload-phase semantics; see that docstring for the fail-closed
         # task semantics (#180).
         return _load_by_coder_agent(
-            api, namespace, workloads=active_workloads()
+            api, cfg.namespace, workloads=active_workloads()
         )
 
     delete_workload = functools.partial(
-        _delete_workload, api, namespace, timeout=DELETE_WORKLOAD_TIMEOUT_S
+        _delete_workload, api, cfg.namespace, timeout=DELETE_WORKLOAD_TIMEOUT_S
     )
 
     def list_workload_tasks(workload_name: str) -> list:
         resp = api.list_namespaced_custom_object(
             group="foreman.llmkube.dev", version="v1alpha1",
-            namespace=namespace, plural="agentictasks",
+            namespace=cfg.namespace, plural="agentictasks",
             label_selector=f"foreman.llmkube.dev/workload={workload_name}",
         )
         return resp.get("items", [])
@@ -745,7 +712,7 @@ def _real_main() -> None:  # pragma: no cover - thin wiring, exercised in the cl
             "repoFullName": item.repo,
             "number": item.issue_number,
         }
-        ok = dispatch.update_status(payload, "backlog", agent_name)
+        ok = dispatch.update_status(payload, "backlog", cfg.agent_name)
         label_applied = False
         comment_posted = False
         if ok:
@@ -831,8 +798,8 @@ def _real_main() -> None:  # pragma: no cover - thin wiring, exercised in the cl
                 "Accept": "application/vnd.github+json",
                 "X-GitHub-Api-Version": "2022-11-28",
             }
-            if github_token:
-                gh_headers["Authorization"] = f"Bearer {github_token}"
+            if cfg.github_token:
+                gh_headers["Authorization"] = f"Bearer {cfg.github_token}"
             r = http_get(url, headers=gh_headers, allow_404=True)
         except Exception:
             r = None
@@ -859,7 +826,7 @@ def _real_main() -> None:  # pragma: no cover - thin wiring, exercised in the cl
 
     def lookup_issue_id(item: ClaimedItem) -> str:
         try:
-            return dispatch.find_issue_id(agent_name, lanes, item.repo, item.issue_number)
+            return dispatch.find_issue_id(cfg.agent_name, cfg.lanes, item.repo, item.issue_number)
         except Exception as e:  # best-effort; missing id just means no escalation
             logger.warning(
                 "issue-id-lookup-failed",
@@ -873,16 +840,16 @@ def _real_main() -> None:  # pragma: no cover - thin wiring, exercised in the cl
 
     def escalate(item: ClaimedItem) -> bool:
         reason = (
-            f"bridge escalation: {max_attempts} failed attempts in lane "
+            f"bridge escalation: {cfg.max_attempts} failed attempts in lane "
             f"'{item.lane or '?'}' for {item.repo}#{item.issue_number}"
         )
-        return dispatch.escalate(item, escalation_lane, reason, agent_name)
+        return dispatch.escalate(item, cfg.escalation_lane, reason, cfg.agent_name)
 
     # A Workload's lane label froze when it was created, so a retry cannot see a
     # lane that changed since. One pass over the queues gives every retry in this
     # tick dispatch's current view.
     try:
-        current_lane_for = dispatch.lane_index(agent_name, lanes)
+        current_lane_for = dispatch.lane_index(cfg.agent_name, cfg.lanes)
     except Exception as e:  # best-effort; falling back to the label is the old behavior
         current_lane_for = {}
         logger.warning("lane-index-failed", extra={"error": _redact_token(repr(e))})
@@ -890,18 +857,18 @@ def _real_main() -> None:  # pragma: no cover - thin wiring, exercised in the cl
     # Retry failed workloads first (so a re-run this tick uses the current config),
     # then claim new work.
     for line in reconcile_failures(
-        agent_name, list_failed_workloads, create_workload, delete_workload,
-        namespace, gate_profiles, max_attempts,
-        escalate=escalate if escalation_lane else None,
-        escalation_lane=escalation_lane,
-        lane_coder_agents=lane_coder_agents,
-        base_coder_agents=base_coder_agents,
-        repo_coder_agents=repo_coder_agents,
+        cfg.agent_name, list_failed_workloads, create_workload, delete_workload,
+        cfg.namespace, cfg.gate_profiles, cfg.max_attempts,
+        escalate=escalate if cfg.escalation_lane else None,
+        escalation_lane=cfg.escalation_lane,
+        lane_coder_agents=cfg.lane_coder_agents,
+        base_coder_agents=cfg.base_coder_agents,
+        repo_coder_agents=cfg.repo_coder_agents,
         lookup_issue_id=lookup_issue_id,
         current_lane_for=current_lane_for,
         feedback_for=feedback_for,
-        verify_enabled=verify_enabled,
-        self_go=self_go,
+        verify_enabled=cfg.verify_enabled,
+        self_go=cfg.self_go,
         branch_pushed_for=branch_pushed_for,
         issue_state_for=issue_state_for,
         declared_escalation_for=declared_escalation_for,
@@ -911,33 +878,30 @@ def _real_main() -> None:  # pragma: no cover - thin wiring, exercised in the cl
 
     # Cap concurrent in-progress work so the pipeline drains a bounded set
     # instead of claiming the whole backlog at once (0 = uncapped).
-    max_in_progress = int(os.environ.get("MAX_IN_PROGRESS", "0"))
-    active = count_active_workloads() if max_in_progress else 0
-    coder_slots = parse_coder_agent_slots(os.environ.get("CODER_AGENT_SLOTS"))
-    coder_load = load_by_coder_agent() if coder_slots else {}
+    active = count_active_workloads() if cfg.max_in_progress else 0
+    coder_load = load_by_coder_agent() if cfg.coder_slots else {}
     # Fix-first work-stealing (issue #134): named agents are removed from the
     # issue rotation while they still hold fix work or have a full slot, so
     # the fix lane's single slot stays uncontended. A JSON list ["coder"] or
     # a comma-separated "coder,fixer" both parse to {"coder"} (etc.).
-    fix_first_agents = _parse_fix_first_agents(os.environ.get("FIX_FIRST_AGENTS"))
     for line in run_once(
-        lanes, agent_name, dispatch.claim_one, create_workload, namespace,
-        gate_profiles, lane_coder_agents, revision_coder_agents,
-        base_coder_agents=base_coder_agents,
-        repo_coder_agents=repo_coder_agents,
-        in_progress=active, max_in_progress=max_in_progress,
-        verify_enabled=verify_enabled,
-        self_go=self_go,
-        agent_load=coder_load, agent_slots=coder_slots,
-        fix_first_agents=fix_first_agents,
+        cfg.lanes, cfg.agent_name, dispatch.claim_one, create_workload, cfg.namespace,
+        cfg.gate_profiles, cfg.lane_coder_agents, cfg.revision_coder_agents,
+        base_coder_agents=cfg.base_coder_agents,
+        repo_coder_agents=cfg.repo_coder_agents,
+        in_progress=active, max_in_progress=cfg.max_in_progress,
+        verify_enabled=cfg.verify_enabled,
+        self_go=cfg.self_go,
+        agent_load=coder_load, agent_slots=cfg.coder_slots,
+        fix_first_agents=cfg.fix_first_agents,
     ):
         logger.info(line)
 
-    if pr_fix_enabled:
+    if cfg.pr_fix_enabled:
         def list_prfix_workloads() -> list:
             resp = api.list_namespaced_custom_object(
                 group="foreman.llmkube.dev", version="v1alpha1",
-                namespace=namespace, plural="workloads",
+                namespace=cfg.namespace, plural="workloads",
                 label_selector=f"created-by={PRFIX_CREATED_BY}",
             )
             return resp.get("items", [])
@@ -959,7 +923,7 @@ def _real_main() -> None:  # pragma: no cover - thin wiring, exercised in the cl
 
         def pr_is_mergeable(repo, pr) -> str:
             return check_pr_mergeable(
-                repo, pr, http_get=http_get, github_token=github_token
+                repo, pr, http_get=http_get, github_token=cfg.github_token
             )
 
         # Build a one-per-tick {repo, pr} -> failure-signature map so the
@@ -986,8 +950,8 @@ def _real_main() -> None:  # pragma: no cover - thin wiring, exercised in the cl
             list_prfix_workloads, delete_workload, create_workload,
             mark_pr_fix,
             pr_is_mergeable=pr_is_mergeable,
-            max_attempts=pr_fix_max_attempts,
-            lane_agents=pr_fix_lane_agents,
+            max_attempts=cfg.pr_fix_max_attempts,
+            lane_agents=cfg.pr_fix_lane_agents,
             get_pr_fix_signature=get_pr_fix_signature,
         ):
             logger.info(line)
@@ -998,9 +962,9 @@ def _real_main() -> None:  # pragma: no cover - thin wiring, exercised in the cl
         for line in drain_pr_fixes(
             lambda: dispatch.list_pr_fix_queued(list(ACTIONABLE_LANES)),
             existing, create_workload,
-            gate_profiles, pr_fix_lane_agents, agent_name, namespace,
-            verify_enabled=verify_enabled,
-            self_go=self_go,
+            cfg.gate_profiles, cfg.pr_fix_lane_agents, cfg.agent_name, cfg.namespace,
+            verify_enabled=cfg.verify_enabled,
+            self_go=cfg.self_go,
         ):
             logger.info(line)
 
@@ -1013,7 +977,7 @@ def _real_main() -> None:  # pragma: no cover - thin wiring, exercised in the cl
         list_bridge_workloads,
         lambda name: list_workload_tasks(name),
         lambda item, status, agent: dispatch.update_status(item, status, agent),
-        agent_name,
+        cfg.agent_name,
     ):
         logger.info(line)
 
@@ -1025,7 +989,7 @@ def _real_main() -> None:  # pragma: no cover - thin wiring, exercised in the cl
         if (name := (wl.get("metadata") or {}).get("name")) is not None
     }
     for line in reconcile_stranded_issues(
-        dispatch, agent_name, bridge_wl_names,
+        dispatch, cfg.agent_name, bridge_wl_names,
     ):
         logger.info(line)
 
@@ -1035,7 +999,7 @@ def _real_main() -> None:  # pragma: no cover - thin wiring, exercised in the cl
     # being permanently unreachable. Runs alongside the stranded reconcile and
     # before prune, so a released issue is claimable on the next tick.
     for line in release_stuck_claims(
-        dispatch, agent_name, bridge_wl_names,
+        dispatch, cfg.agent_name, bridge_wl_names,
     ):
         logger.info(line)
 
@@ -1048,7 +1012,7 @@ def _real_main() -> None:  # pragma: no cover - thin wiring, exercised in the cl
         # stamps the bridge-owned terminal-since annotation the prune TTL reads
         # (#170). An inline copy silently skipped that, leaving prune to fall back
         # to creationTimestamp.
-        return _list_terminal_candidates(api, namespace, PRFIX_CREATED_BY)
+        return _list_terminal_candidates(api, cfg.namespace, PRFIX_CREATED_BY)
 
     def _reset_issue(wl: dict) -> None:
         """Reset a claimed issue to ready so it can be re-claimed.
@@ -1063,15 +1027,114 @@ def _real_main() -> None:  # pragma: no cover - thin wiring, exercised in the cl
             "repoFullName": spec.get("repo", ""),
             "number": int(issues[0]),
         }
-        dispatch.update_status(item, "ready", agent_name)
+        dispatch.update_status(item, "ready", cfg.agent_name)
 
     for line in prune_workloads(
         list_terminal_candidates, delete_workload,
-        completed_ttl_seconds=prune_completed_after_h * 3600,
-        failed_ttl_seconds=prune_failed_after_h * 3600,
+        completed_ttl_seconds=cfg.prune_completed_after_h * 3600,
+        failed_ttl_seconds=cfg.prune_failed_after_h * 3600,
         reset_issue=_reset_issue,
     ):
         logger.info(line)
+
+
+def _real_main() -> None:  # pragma: no cover - thin wiring, exercised in the cluster
+    from bridge.claim import DispatchClient
+
+    validate_env()
+    configure_logging()
+
+    base_url = os.environ.get("DISPATCH_URL", "http://dispatch.llm:3000")
+    _check_dispatch_url(base_url)
+    token = os.environ["DISPATCH_AGENT_TOKEN"]
+    agent_name = os.environ.get("DISPATCH_AGENT_NAME", "foreman/coder")
+    lanes = [part.strip() for part in os.environ.get("DISPATCH_LANES", "local,cloud,frontier").split(",") if part.strip()]
+    namespace = os.environ.get("FOREMAN_NAMESPACE", "llm")
+    gate_profiles = parse_gate_profiles(os.environ.get("GATEPROFILE_MAP"))
+    max_attempts = int(os.environ.get("RETRY_MAX_ATTEMPTS", str(DEFAULT_MAX_ATTEMPTS)))
+    # Lane -> coder Agent map, e.g. '{"*": "coder", "frontier": "coder-frontier"}'.
+    lane_coder_agents = parse_lane_coder_agents(os.environ.get("LANE_CODER_AGENTS"))
+    # Lane -> revision-tuned coder Agent map (Workload.spec.revisionCoderAgentRef).
+    revision_coder_agents = parse_lane_coder_agents(os.environ.get("REVISION_CODER_AGENTS"))
+    # Language -> coder Agent map for the base lane, e.g.
+    # '{"python": "coder-python", "node": "coder-node", "go": "coder-go", "*": "coder"}'.
+    # Explicit lane_coder_agents entries (e.g. frontier) still win outright.
+    base_coder_agents = parse_base_coder_agents(os.environ.get("BASE_CODER_AGENTS"))
+    repo_coder_agents = parse_repo_coder_agents(os.environ.get("REPO_CODER_AGENTS"))
+    # When set, exhausted Workloads outside this lane escalate into it (re-lane +
+    # unclaim) instead of tombstoning. Empty disables escalation.
+    escalation_lane = os.environ.get("ESCALATION_LANE", "").strip()
+    verify_enabled = _parse_bool_env(os.environ.get("VERIFY_ENABLED", ""), default=True)
+    self_go = parse_self_go(os.environ.get("VERDICT_SELF_GO"))
+    pr_fix_enabled = os.environ.get("PR_FIX_ENABLED", "").strip().lower() in ("1", "true", "yes")
+    pr_fix_max_attempts = int(os.environ.get("PR_FIX_MAX_ATTEMPTS", "3"))
+    github_token = os.environ.get("GITHUB_TOKEN", "")
+    _raw_lane_agents = os.environ.get("PR_FIX_LANE_AGENTS", "").strip()
+    pr_fix_lane_agents = (
+        _parse_json_map(_raw_lane_agents, "PR_FIX_LANE_AGENTS")
+        if _raw_lane_agents
+        else dict(DEFAULT_PRFIX_LANE_AGENTS)
+    )
+    # Terminal-Workload GC: a Completed Workload has already opened its PR (which
+    # lives on GitHub), and a Failed one still Failed at prune time has been left
+    # by reconcile (retries exhausted). Delete each once past its per-phase TTL so
+    # terminal objects stop accumulating. Failed gets a longer TTL for triage. 0
+    # disables a phase.
+    prune_completed_after_h = int(os.environ.get("PRUNE_COMPLETED_AFTER_HOURS", "6"))
+    prune_failed_after_h = int(os.environ.get("PRUNE_FAILED_AFTER_HOURS", "48"))
+
+    def http_get(url, headers, allow_404=False):
+        from bridge.http_retry import http_get as _http_get
+        r = _http_get(url, headers=headers)
+        if allow_404 and r.status_code == 404:
+            return r
+        r.raise_for_status()
+        return r.json()
+
+    def http_post(url, headers, payload):
+        from bridge.http_retry import http_post as _http_post
+        r = _http_post(url, headers=headers, json=payload)
+        if r.status_code == 409:  # already claimed by another agent
+            return None
+        r.raise_for_status()
+        return r.json()
+
+    dispatch = DispatchClient(base_url, token, http_get, http_post)
+
+    try:
+        config.load_incluster_config()
+    except Exception as e:
+        raise SystemExit(f"Failed to load Kubernetes in-cluster config: {e}") from e
+
+    api = client.CustomObjectsApi()
+    max_in_progress = int(os.environ.get("MAX_IN_PROGRESS", "0"))
+    coder_slots = parse_coder_agent_slots(os.environ.get("CODER_AGENT_SLOTS"))
+    fix_first_agents = _parse_fix_first_agents(os.environ.get("FIX_FIRST_AGENTS"))
+
+    cfg = TickConfig(
+        agent_name=agent_name,
+        lanes=lanes,
+        namespace=namespace,
+        gate_profiles=gate_profiles,
+        max_attempts=max_attempts,
+        lane_coder_agents=lane_coder_agents,
+        revision_coder_agents=revision_coder_agents,
+        base_coder_agents=base_coder_agents,
+        repo_coder_agents=repo_coder_agents,
+        escalation_lane=escalation_lane,
+        verify_enabled=verify_enabled,
+        self_go=self_go,
+        pr_fix_enabled=pr_fix_enabled,
+        pr_fix_max_attempts=pr_fix_max_attempts,
+        github_token=github_token,
+        pr_fix_lane_agents=pr_fix_lane_agents,
+        prune_completed_after_h=prune_completed_after_h,
+        prune_failed_after_h=prune_failed_after_h,
+        max_in_progress=max_in_progress,
+        coder_slots=coder_slots,
+        fix_first_agents=fix_first_agents,
+    )
+    run_tick(api, dispatch, cfg, http_get)
 
 
 # ---------------------------------------------------------------------------
