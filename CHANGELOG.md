@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.6.30](https://github.com/misospace/foreman-dispatch-bridge/compare/v0.6.29...v0.6.30) (2026-08-21)
+
+
+### Bug Fixes
+
+* **main:** move the entrypoint guard to the end of the module ([#197](https://github.com/misospace/foreman-dispatch-bridge/issues/197)) ([85ba19f](https://github.com/misospace/foreman-dispatch-bridge/commit/85ba19f7ca616a34b08899bef8525202ab15e414))
+
 ## [0.6.29](https://github.com/misospace/foreman-dispatch-bridge/compare/v0.6.28...v0.6.29) (2026-08-21)
 
 
