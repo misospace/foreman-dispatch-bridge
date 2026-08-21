@@ -1165,7 +1165,7 @@ def _list_terminal_candidates(
                 group="foreman.llmkube.dev",
                 version="v1alpha1",
                 namespace=namespace,
-                plural="agenticworkloads",
+                plural="workloads",
                 name=name,
                 body={
                     "metadata": {
