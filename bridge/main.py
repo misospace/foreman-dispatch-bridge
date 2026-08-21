@@ -1,4 +1,3 @@
-import functools  # noqa: F401  # retained for forward compatibility with helpers re-added here
 import json
 import logging
 import os
@@ -416,7 +415,7 @@ def _check_dispatch_url(base_url: str) -> None:
 # seam exercised by tests/test_bridge_runtime.py and bundled by BridgeRuntime.
 #
 # Phases that indicate a Workload no longer needs reconcile attention.
-_TERMINAL_PHASES = frozenset({"Succeeded", "Failed", "Cancelled", "Timeout"})
+_TERMINAL_PHASES = frozenset({"Succeeded", "Failed", "Cancelled", "Timeout", "Completed"})
 
 # Phases at which an AgenticTask is done. "Completed" is task-terminal even
 # while its enclosing Workload is still reconciling.
@@ -1116,7 +1115,7 @@ def _list_failed_workloads(
     failed: List[Dict[str, Any]] = []
     for workload in _list_bridge_workloads(api, namespace):
         phase = workload.get("status", {}).get("phase")
-        if phase in {"Failed", "Timeout", "Cancelled"}:
+        if phase in {"Failed"}:
             failed.append(workload)
     return failed
 
