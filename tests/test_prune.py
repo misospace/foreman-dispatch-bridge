@@ -1,10 +1,15 @@
+import re
 from datetime import datetime, timedelta, timezone
+
+import pytest
 
 
 from bridge.prune import (
     prunable_workloads,
     prune_workloads,
     stamp_terminal_since,
+    terminal_since_key,
+    TERMINAL_SINCE_ANNOTATION_FALLBACK,
     terminal_since,
 )
 
@@ -25,7 +30,7 @@ def _wl(name, phase, *, last_transition=None, created=None, terminal_since_stamp
         ]
     if terminal_since_stamp is not None:
         md.setdefault("annotations", {})[
-            f"foreman.llmkube.dev/terminal-since/{phase}"
+            terminal_since_key(phase)
         ] = terminal_since_stamp
     return {"metadata": md, "status": st}
 
@@ -69,7 +74,7 @@ def test_stamp_terminal_since_first_call_writes_annotation():
     stamp = stamp_terminal_since(wl, now=NOW)
     assert stamp == NOW.strftime("%Y-%m-%dT%H:%M:%SZ")
     assert wl["metadata"]["annotations"][
-        "foreman.llmkube.dev/terminal-since/Completed"
+        terminal_since_key("Completed")
     ] == "2026-07-08T20:00:00Z"
 
 
@@ -79,7 +84,7 @@ def test_stamp_terminal_since_is_idempotent():
     stamp_terminal_since(wl, now=NOW - timedelta(hours=10))
     stamp_terminal_since(wl, now=NOW)  # second tick
     assert wl["metadata"]["annotations"][
-        "foreman.llmkube.dev/terminal-since/Failed"
+        terminal_since_key("Failed")
     ] == (NOW - timedelta(hours=10)).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
@@ -280,3 +285,25 @@ def test_prune_reset_skips_prfix_workload():
     assert r.deleted == ["wl-prfix-42"]
     assert r.reset_calls == []
     assert any("prune:reset-issue-skipped" in line for line in out)
+
+
+# Kubernetes' own validation: optional DNS-subdomain prefix, one slash, then a
+# name of alphanumerics/-/_/. starting and ending alphanumeric. The API server
+# rejects anything else with 422, which is what a second slash produced.
+_ANNOTATION_KEY = re.compile(
+    r"^(?:[a-z0-9]([-a-z0-9.]*[a-z0-9])?/)?"
+    r"([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9]$"
+)
+
+
+@pytest.mark.parametrize("phase", ["Completed", "Failed"])
+def test_terminal_since_key_is_a_valid_annotation_key(phase):
+    """A second slash made every stamp fail 422 Unprocessable Entity, silently:
+    "…/terminal-since/Completed" is not a valid key."""
+    key = terminal_since_key(phase)
+    assert key.count("/") == 1, key
+    assert _ANNOTATION_KEY.match(key), key
+
+
+def test_fallback_annotation_key_is_also_valid():
+    assert _ANNOTATION_KEY.match(TERMINAL_SINCE_ANNOTATION_FALLBACK)

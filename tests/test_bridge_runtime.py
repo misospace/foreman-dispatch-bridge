@@ -14,6 +14,7 @@ from typing import Any, Dict, List
 import pytest
 from kubernetes.client.rest import ApiException
 
+from bridge.prune import terminal_since_key
 from bridge.main import (
     BridgeRuntime,
     _count_active_workloads,
@@ -546,7 +547,7 @@ class TestListTerminalCandidates:
         )
         result = _list_terminal_candidates(api, "ns", "dispatch-bridge-prfix")
         annotations = (result[0].get("metadata") or {}).get("annotations") or {}
-        assert "foreman.llmkube.dev/terminal-since/Completed" in annotations
+        assert terminal_since_key("Completed") in annotations
 
     def test_stamps_terminal_since_on_the_workloads_plural(self) -> None:
         """The stamp is persisted with a PATCH; the plural must be the real CRD
@@ -568,7 +569,7 @@ class TestListTerminalCandidates:
         assert patches[0].kwargs["group"] == "foreman.llmkube.dev"
         assert patches[0].kwargs["name"] == "a"
         annotations = patches[0].kwargs["body"]["metadata"]["annotations"]
-        assert "foreman.llmkube.dev/terminal-since/Failed" in annotations
+        assert terminal_since_key("Failed") in annotations
 
     def test_uses_dedicated_label_selectors(self) -> None:
         api = FakeAPI(

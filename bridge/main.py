@@ -38,7 +38,7 @@ from bridge.prfix import (
     DEFAULT_PRFIX_LANE_AGENTS, ACTIONABLE_LANES, PRFIX_CREATED_BY,
     FAILING_CONCLUSIONS, PENDING_STATUSES, failure_signature,
 )
-from bridge.prune import prune_workloads, stamp_terminal_since
+from bridge.prune import prune_workloads, stamp_terminal_since, terminal_since_key
 from bridge.reconcile import reconcile_stranded_issues, release_stuck_claims
 from bridge.review_transition import transition_to_in_review
 
@@ -1142,7 +1142,7 @@ def _list_terminal_candidates(
             continue
         meta = wl.get("metadata") or {}
         annotations = meta.get("annotations") or {}
-        annotation_key = f"foreman.llmkube.dev/terminal-since/{phase}"
+        annotation_key = terminal_since_key(phase)
         if annotations.get(annotation_key):
             # Already stamped on a prior tick; idempotent no-op so the TTL
             # timestamp does not advance on subsequent reconciles.
