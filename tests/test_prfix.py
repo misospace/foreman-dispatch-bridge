@@ -111,6 +111,17 @@ def test_build_fix_workload_code_verify_only_no_review():
     assert "openPullRequest" not in code["payload"]
 
 
+def test_build_fix_workload_rebases_onto_current_base():
+    """reviseFromBranch is ignored under the CRD's default "reset" strategy, which
+    cuts the branch fresh from the base tip -- so each attempt would lose the
+    previous attempt's commits. Only "rebase" honours it."""
+    wl = build_fix_workload(_item(repo="o/r", pr=9, issue=42, branch="foreman/wl-x/issue-42"),
+                            "llm", None, "a", "coder")
+    payload = wl["spec"]["pipeline"][0]["payload"]
+    assert payload["reviseFromBranch"] == "foreman/wl-x/issue-42"
+    assert payload["branchStrategy"] == "rebase"
+
+
 def test_build_fix_workload_omits_issue_when_absent():
     wl = build_fix_workload(_item(repo="o/r", pr=9, issue=None, branch="b"),
                             "llm", None, "a", "coder")

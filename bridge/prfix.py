@@ -122,6 +122,10 @@ def build_fix_workload(item, namespace, gate_profile, agent_name, coder_agent, a
 
     reviseFromBranch makes the executor fetch and check out the PR branch;
     allowOverwrite lets the push force-with-lease the existing ref.
+    branchStrategy must be "rebase" for that checkout to happen at all: the CRD
+    default is "reset", which cuts the branch fresh from the current base tip and
+    ignores reviseFromBranch, so each attempt would start without the previous
+    attempt's commits.
 
     When verify_enabled is False, only the issue-fix step is emitted (gateless).
     gateProfile still propagates: coders use it for self-gates/language routing.
@@ -136,6 +140,7 @@ def build_fix_workload(item, namespace, gate_profile, agent_name, coder_agent, a
         "repo": item.repo,
         "branch": item.branch,
         "reviseFromBranch": item.branch,
+        "branchStrategy": "rebase",
         "allowOverwrite": True,
         "prompt": assemble_fix_prompt(item),
     }
