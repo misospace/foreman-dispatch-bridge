@@ -515,6 +515,39 @@ class TestListTerminalCandidates:
         # The candidate list is still returned so prune proceeds on the fallback.
         assert [w["metadata"]["name"] for w in result] == ["a"]
 
+    def test_failed_stamp_does_not_leave_the_annotation_behind(self) -> None:
+        """stamp_terminal_since mutates the manifest in place, so a failed PATCH
+        must drop the annotation again. Retaining it makes terminal_since read
+        "now" for every terminal Workload on every tick, and prune can never
+        reach a TTL — prune silently stopped in 0.6.29 for exactly this reason."""
+        api = FakeAPI(
+            responses={
+                "list_namespaced_custom_object": [
+                    {"items": [_workload("a", "Completed")]},
+                    {"items": []},
+                ]
+            },
+            errors={"patch_namespaced_custom_object": [(403, "forbidden")]},
+        )
+        result = _list_terminal_candidates(api, "ns", "dispatch-bridge-prfix")
+        annotations = (result[0].get("metadata") or {}).get("annotations") or {}
+        assert not [k for k in annotations if "terminal-since" in k], annotations
+
+    def test_successful_stamp_keeps_the_annotation(self) -> None:
+        """On success the cluster holds the stamp, so the returned manifest must
+        match it — prune should measure age from the observation, not re-stamp."""
+        api = FakeAPI(
+            responses={
+                "list_namespaced_custom_object": [
+                    {"items": [_workload("a", "Completed")]},
+                    {"items": []},
+                ]
+            }
+        )
+        result = _list_terminal_candidates(api, "ns", "dispatch-bridge-prfix")
+        annotations = (result[0].get("metadata") or {}).get("annotations") or {}
+        assert "foreman.llmkube.dev/terminal-since/Completed" in annotations
+
     def test_stamps_terminal_since_on_the_workloads_plural(self) -> None:
         """The stamp is persisted with a PATCH; the plural must be the real CRD
         name. "agenticworkloads" does not exist, so a wrong plural 404s, gets

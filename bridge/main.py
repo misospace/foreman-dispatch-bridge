@@ -1167,11 +1167,24 @@ def _list_terminal_candidates(
                 },
             )
         except client.ApiException as exc:
+            # stamp_terminal_since mutated this manifest in place. The PATCH did
+            # not land, so drop the annotation again: leaving it makes
+            # terminal_since read "now" for every terminal Workload on every
+            # tick, and prune can then never reach a TTL.
+            # read the live dict: stamp_terminal_since may have created it
+            ((wl.get("metadata") or {}).get("annotations") or {}).pop(annotation_key, None)
             # "name" is a reserved LogRecord attribute; passing it in extra makes
-            # logging raise KeyError, so the handler took down the whole tick.
+            # logging raise KeyError. repr(ApiException) is empty -- the client
+            # passes http_resp as a keyword, so args is () -- and status/reason/
+            # body carry the cause.
             logger.warning(
                 "stamp-terminal-since-failed",
-                extra={"error": repr(exc), "workload": name},
+                extra={
+                    "status": getattr(exc, "status", None),
+                    "reason": getattr(exc, "reason", None),
+                    "body": (getattr(exc, "body", None) or "")[:400],
+                    "workload": name,
+                },
             )
     return items
 
