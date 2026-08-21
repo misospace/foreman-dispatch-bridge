@@ -16,6 +16,17 @@ FAILED_PHASE = "Failed"
 TERMINAL_SINCE_ANNOTATION_PREFIX = "foreman.llmkube.dev/terminal-since"
 TERMINAL_SINCE_ANNOTATION_FALLBACK = "foreman.llmkube.dev/terminal-since"
 
+
+def terminal_since_key(phase: str) -> str:
+    """Annotation key recording when the bridge first saw *phase*.
+
+    Joined with "-", not "/": a Kubernetes annotation key takes at most one
+    slash (the optional DNS-subdomain prefix), so "…/terminal-since/Completed"
+    is rejected with 422 "a valid label key must consist of alphanumeric
+    characters, '-', '_' or '.'".
+    """
+    return f"{TERMINAL_SINCE_ANNOTATION_PREFIX}-{phase}"
+
 ListWorkloads = Callable[[], list]      # () -> list of Workload manifests (dicts)
 DeleteWorkload = Callable[[str], None]  # (name) -> None
 ResetIssue = Callable[[dict], None]     # (workload_manifest) -> None (return ignored)
@@ -49,7 +60,7 @@ def terminal_since(wl: dict) -> Optional[datetime]:
     phase = ((wl.get("status") or {}).get("phase")) or ""
     if phase in (COMPLETED_PHASE, FAILED_PHASE):
         for key in (
-            f"{TERMINAL_SINCE_ANNOTATION_PREFIX}/{phase}",
+            terminal_since_key(phase),
             TERMINAL_SINCE_ANNOTATION_FALLBACK,
         ):
             stamped = annotations.get(key)
@@ -73,7 +84,7 @@ def stamp_terminal_since(wl: dict, now: Optional[datetime] = None) -> Optional[s
         return None
     md = wl.setdefault("metadata", {})
     annotations = md.setdefault("annotations", {})
-    key = f"{TERMINAL_SINCE_ANNOTATION_PREFIX}/{phase}"
+    key = terminal_since_key(phase)
     existing = annotations.get(key)
     if existing:
         ts = _parse_ts(existing)
