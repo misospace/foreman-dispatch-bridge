@@ -163,7 +163,7 @@ class TestListFailedWorkloads:
             }
         )
         result = _list_failed_workloads(api, "ns")
-        assert [w["metadata"]["name"] for w in result] == ["a", "c", "d"]
+        assert [w["metadata"]["name"] for w in result] == ["a"]
 
 
 class TestActiveWorkloads:
@@ -184,6 +184,22 @@ class TestActiveWorkloads:
         )
         result = _active_workloads(api, "ns")
         assert [w["metadata"]["name"] for w in result] == ["running", "pending"]
+
+    def test_excludes_completed_phase(self) -> None:
+        api = FakeAPI(
+            responses={
+                "list_namespaced_custom_object": [
+                    {
+                        "items": [
+                            _workload("running", "Running"),
+                            _workload("completed", "Completed"),
+                        ]
+                    }
+                ]
+            }
+        )
+        result = _active_workloads(api, "ns")
+        assert [w["metadata"]["name"] for w in result] == ["running"]
 
 
 # ---------------------------------------------------------------------------
@@ -209,6 +225,21 @@ class TestCountActiveWorkloads:
             }
         )
         assert _count_active_workloads(api, "ns") == 2
+
+    def test_excludes_completed_phase(self) -> None:
+        api = FakeAPI(
+            responses={
+                "list_namespaced_custom_object": [
+                    {
+                        "items": [
+                            _workload("w-running", "Running"),
+                            _workload("w-completed", "Completed"),
+                        ]
+                    }
+                ]
+            }
+        )
+        assert _count_active_workloads(api, "ns") == 1
 
     def test_includes_prfix_when_requested(self) -> None:
         api = FakeAPI(

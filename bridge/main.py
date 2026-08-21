@@ -1,4 +1,3 @@
-import functools
 import json
 import logging
 import os
@@ -416,7 +415,7 @@ def _check_dispatch_url(base_url: str) -> None:
 # seam exercised by tests/test_bridge_runtime.py and bundled by BridgeRuntime.
 #
 # Phases that indicate a Workload no longer needs reconcile attention.
-_TERMINAL_PHASES = frozenset({"Succeeded", "Failed", "Cancelled", "Timeout"})
+_TERMINAL_PHASES = frozenset({"Succeeded", "Failed", "Cancelled", "Timeout", "Completed"})
 
 # Phases at which an AgenticTask is done. "Completed" is task-terminal even
 # while its enclosing Workload is still reconciling.
@@ -633,53 +632,16 @@ def run_tick(api, dispatch, cfg: TickConfig, http_get: Callable) -> None:
             if e.status != 409:  # 409 = Workload already exists -> idempotent no-op
                 raise
 
-    def list_bridge_workloads() -> list:
-        resp = api.list_namespaced_custom_object(
-            group="foreman.llmkube.dev", version="v1alpha1",
-            namespace=cfg.namespace, plural="workloads",
-            label_selector="created-by=dispatch-bridge",
-        )
-        return resp.get("items", [])
-
-    def list_failed_workloads() -> list:
-        return [
-            wl for wl in list_bridge_workloads()
-            if (wl.get("status") or {}).get("phase") == "Failed"
-        ]
-
-    def active_workloads() -> list:
-        # Non-terminal bridge Workloads = issues currently being worked.
-        terminal = {"Completed", "Failed"}
-        return [
-            wl for wl in list_bridge_workloads()
-            if ((wl.get("status") or {}).get("phase") or "") not in terminal
-        ]
-
-    def count_active_workloads() -> int:
-        # Drives the in-progress cap so claiming stops once the working set is full.
-        return len(active_workloads())
-
-    def load_by_coder_agent() -> dict:
-        # Per-coder view of the same non-terminal set the cap already counts, so
-        # capacity-aware routing matches the working set. Delegates to the shared
-        # _load_by_coder_agent helper while preserving this closure's existing
-        # workload-phase semantics; see that docstring for the fail-closed
-        # task semantics (#180).
-        return _load_by_coder_agent(
-            api, cfg.namespace, workloads=active_workloads()
-        )
-
-    delete_workload = functools.partial(
-        _delete_workload, api, cfg.namespace, timeout=DELETE_WORKLOAD_TIMEOUT_S
-    )
-
-    def list_workload_tasks(workload_name: str) -> list:
-        resp = api.list_namespaced_custom_object(
-            group="foreman.llmkube.dev", version="v1alpha1",
-            namespace=cfg.namespace, plural="agentictasks",
-            label_selector=f"foreman.llmkube.dev/workload={workload_name}",
-        )
-        return resp.get("items", [])
+    # The behaviours below used to live as closures inlined here; they are now
+    # sourced from a single BridgeRuntime instance so production and tests share
+    # one implementation (#199).
+    bridge = BridgeRuntime(api=api, namespace=cfg.namespace, prfix_created_by=PRFIX_CREATED_BY)
+    list_bridge_workloads = bridge.list_bridge_workloads
+    list_failed_workloads = bridge.list_failed_workloads
+    count_active_workloads = bridge.count_active_workloads
+    load_by_coder_agent = bridge.load_by_coder_agent
+    delete_workload = bridge.delete_workload
+    list_workload_tasks = bridge.list_workload_tasks
 
     def declared_escalation_for(workload_name: str) -> "str | None":
         """The escalation reason the coder declared, if any. Best-effort: a lookup
@@ -1007,12 +969,11 @@ def run_tick(api, dispatch, cfg: TickConfig, http_get: Callable) -> None:
     # retried anything retryable this tick — so a still-terminal Workload past
     # its TTL is genuinely done. Covers both issue (created-by=dispatch-bridge)
     # and pr-fix (created-by=dispatch-bridge-prfix) Workloads.
-    def list_terminal_candidates() -> list:
-        # Delegates rather than re-listing inline: _list_terminal_candidates also
-        # stamps the bridge-owned terminal-since annotation the prune TTL reads
-        # (#170). An inline copy silently skipped that, leaving prune to fall back
-        # to creationTimestamp.
-        return _list_terminal_candidates(api, cfg.namespace, PRFIX_CREATED_BY)
+    # Delegates rather than re-listing inline: BridgeRuntime.list_terminal_candidates
+    # also stamps the bridge-owned terminal-since annotation the prune TTL reads
+    # (#170). An inline copy silently skipped that, leaving prune to fall back
+    # to creationTimestamp.
+    list_terminal_candidates = bridge.list_terminal_candidates
 
     def _reset_issue(wl: dict) -> None:
         """Reset a claimed issue to ready so it can be re-claimed.
@@ -1154,7 +1115,7 @@ def _list_failed_workloads(
     failed: List[Dict[str, Any]] = []
     for workload in _list_bridge_workloads(api, namespace):
         phase = workload.get("status", {}).get("phase")
-        if phase in {"Failed", "Timeout", "Cancelled"}:
+        if phase in {"Failed"}:
             failed.append(workload)
     return failed
 
