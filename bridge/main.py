@@ -1074,10 +1074,6 @@ def _real_main() -> None:  # pragma: no cover - thin wiring, exercised in the cl
         logger.info(line)
 
 
-if __name__ == "__main__":
-    _real_main()
-
-
 # ---------------------------------------------------------------------------
 # BridgeRuntime: testable seam for the per-cycle k8s queries.
 # ---------------------------------------------------------------------------
@@ -1243,3 +1239,7 @@ class BridgeRuntime:
         _delete_workload(
             self.api, self.namespace, name, timeout=DELETE_WORKLOAD_TIMEOUT_S
         )
+
+
+if __name__ == "__main__":
+    _real_main()
