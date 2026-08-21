@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.6.27](https://github.com/misospace/foreman-dispatch-bridge/compare/v0.6.26...v0.6.27) (2026-08-21)
+
+
+### Bug Fixes
+
+* 170: prune TTL never elapses ([#190](https://github.com/misospace/foreman-dispatch-bridge/issues/190)) ([f0174c6](https://github.com/misospace/foreman-dispatch-bridge/commit/f0174c621b6ac320c437d70479c60bba6a06e7f6))
+* **deps:** update dependency ruff (0.16.3 → 0.16.4) ([#184](https://github.com/misospace/foreman-dispatch-bridge/issues/184)) ([d5bfde0](https://github.com/misospace/foreman-dispatch-bridge/commit/d5bfde05fdd08df6f8c5279939d0f9ad09ba2e8e))
+* **prfix:** rebase the PR branch so attempts keep prior commits ([#191](https://github.com/misospace/foreman-dispatch-bridge/issues/191)) ([ec26b19](https://github.com/misospace/foreman-dispatch-bridge/commit/ec26b190add06bf02febe80c0002a512bcc711a6))
+
+
+### Chores
+
+* untrack the generated egg-info directory ([#188](https://github.com/misospace/foreman-dispatch-bridge/issues/188)) ([fe30afa](https://github.com/misospace/foreman-dispatch-bridge/commit/fe30afa4cf16705d6f749dd7cc50998172fb7f68))
+
 ## [0.6.26](https://github.com/misospace/foreman-dispatch-bridge/compare/v0.6.25...v0.6.26) (2026-08-20)
 
 
