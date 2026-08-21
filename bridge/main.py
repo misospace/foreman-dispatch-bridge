@@ -615,7 +615,7 @@ class TickConfig:
     prune_failed_after_h: int
     max_in_progress: int
     coder_slots: dict
-    fix_first_agents: dict
+    fix_first_agents: set
 
 
 def run_tick(api, dispatch, cfg: TickConfig, http_get: Callable) -> None:
