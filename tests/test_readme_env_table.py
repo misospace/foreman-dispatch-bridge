@@ -54,6 +54,27 @@ def test_readme_documents_every_env_var_the_bridge_reads():
     assert not missing, f"README.md Configuration table is missing env vars the bridge reads: {missing}. See issue #97."
 
 
+def test_env_registry_covers_every_env_var_the_bridge_reads():
+    """``OPTIONAL_VARS``/``REQUIRED_VARS`` in bridge/env.py must cover all reads.
+
+    Issue #173: ``OPTIONAL_VARS`` is the reference registry of supported
+    configuration, but it drifted from what the bridge actually reads
+    (FIX_FIRST_AGENTS, LOG_FORMAT, LOG_LEVEL, REPO_CODER_AGENTS were missing).
+    This test asserts no env var read by the bridge falls outside
+    ``REQUIRED_VARS ∪ OPTIONAL_VARS`` so the registry cannot drift again.
+    """
+    from bridge.env import OPTIONAL_VARS, REQUIRED_VARS
+
+    read_by_bridge = _env_vars_read_by_bridge()
+    registered = set(REQUIRED_VARS) | set(OPTIONAL_VARS)
+
+    missing = sorted(read_by_bridge - registered)
+    assert not missing, (
+        f"bridge/env.py registry (REQUIRED_VARS ∪ OPTIONAL_VARS) is missing env "
+        f"vars the bridge reads: {missing}. See issue #173."
+    )
+
+
 def test_readme_does_not_claim_a_wrong_default_for_max_in_progress():
     """The MAX_IN_PROGRESS default in code is "0"; README must match.
 
