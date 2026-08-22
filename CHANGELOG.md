@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.7.1](https://github.com/misospace/foreman-dispatch-bridge/compare/v0.7.0...v0.7.1) (2026-08-22)
+
+
+### Bug Fixes
+
+* **bridge:** route run_tick's duplicate closures through BridgeRuntime ([#207](https://github.com/misospace/foreman-dispatch-bridge/issues/207)) ([e05354d](https://github.com/misospace/foreman-dispatch-bridge/commit/e05354d4de84790f8fdd4addc0ac916cb57a910c))
+* **deps:** pin msgpack exactly in requirements.txt ([#211](https://github.com/misospace/foreman-dispatch-bridge/issues/211)) ([45cf953](https://github.com/misospace/foreman-dispatch-bridge/commit/45cf9537e62040eb4718b1ab160e7c4882d52891)), closes [#172](https://github.com/misospace/foreman-dispatch-bridge/issues/172)
+* **env:** sync OPTIONAL_VARS registry with env vars the bridge reads ([#210](https://github.com/misospace/foreman-dispatch-bridge/issues/210)) ([3d9a369](https://github.com/misospace/foreman-dispatch-bridge/commit/3d9a369dff3c3eedc812826069573a5b204a7369)), closes [#173](https://github.com/misospace/foreman-dispatch-bridge/issues/173)
+* **release:** synchronize Python project version ([#212](https://github.com/misospace/foreman-dispatch-bridge/issues/212)) ([ac7f596](https://github.com/misospace/foreman-dispatch-bridge/commit/ac7f596bef6779bfd011d1e4b96a3f783b90990f)), closes [#174](https://github.com/misospace/foreman-dispatch-bridge/issues/174)
+
 ## [0.7.0](https://github.com/misospace/foreman-dispatch-bridge/compare/v0.6.32...v0.7.0) (2026-08-21)
 
 
