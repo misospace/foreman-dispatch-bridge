@@ -37,6 +37,10 @@ OPTIONAL_VARS: Dict[str, str] = {
     "PRUNE_FAILED_AFTER_HOURS": "48",
     "MAX_IN_PROGRESS": "0",
     "DELETE_WORKLOAD_TIMEOUT_S": "60",
+    "FIX_FIRST_AGENTS": "",
+    "REPO_CODER_AGENTS": "",
+    "LOG_FORMAT": "json",
+    "LOG_LEVEL": "INFO",
 }
 
 
