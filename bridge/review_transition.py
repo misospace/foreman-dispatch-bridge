@@ -48,6 +48,29 @@ def _extract_pr_url(tasks: list) -> str:
     return ""
 
 
+def _extract_task_signal(tasks: list) -> tuple[str, str, dict]:
+    """Read verdict, result.summary, and result.extra from the last task that carries a verdict.
+
+    The coder task's status already carries the routing signal:
+    ``status.verdict`` (``GO`` / ``INCOMPLETE``), ``status.result.summary``,
+    and ``status.result.extra`` (``commitSHA``, ``branch``, ...). An absent
+    verdict is returned as ``""`` so callers can treat it as non-GO.
+    """
+    verdict = ""
+    summary = ""
+    extra: dict = {}
+    for t in tasks or []:
+        status = t.get("status") or {}
+        v = status.get("verdict")
+        if not v:
+            continue
+        verdict = str(v)
+        result = status.get("result") or {}
+        summary = str(result.get("summary") or "")
+        extra = result.get("extra") or {}
+    return verdict, summary, extra
+
+
 def _workload_all_already_resolved(wl: dict) -> bool:
     """Return True if any task carries a Completed condition with reason=AllAlreadyResolved.
 
@@ -116,7 +139,35 @@ def transition_to_in_review(
                 except Exception as e:
                     results.append(f"{name}:error:{e}")
                 continue
-            results.append(f"{name}:skip:no-pr")
+            # No PR and not AllAlreadyResolved: route on the coder task's
+            # verdict instead of silently skipping (#213). A silent skip leaves
+            # the issue in status/in-progress with no Workload that will run
+            # again, so it holds a MAX_IN_PROGRESS slot and re-cycles.
+            verdict, summary, extra = _extract_task_signal(tasks)
+            if verdict != "GO":
+                # Non-GO (or absent) verdict: park the issue out of agent
+                # circulation so it stops being re-claimed. "blocked" is the
+                # status that does this today (see update_status in claim.py).
+                item = _item_from_workload(wl)
+                try:
+                    update_status(item, "blocked", agent_name)
+                    results.append(
+                        f"{name}:blocked:no-pr:verdict={verdict or 'absent'}"
+                        + (f":{summary}" if summary else "")
+                    )
+                except Exception as e:
+                    results.append(f"{name}:error:{e}")
+                continue
+            # GO with no PR is a distinct anomaly: the coder reported success
+            # but no PR exists. Surface it (with commitSHA/branch so an
+            # operator can tell whether commits exist that were never opened
+            # as a PR) without parking the issue silently.
+            results.append(
+                f"{name}:anomaly:go-no-pr"
+                f":commitSHA={extra.get('commitSHA') or 'none'}"
+                f":branch={extra.get('branch') or 'none'}"
+                + (f":{summary}" if summary else "")
+            )
             continue
 
         item = _item_from_workload(wl)

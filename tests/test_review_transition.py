@@ -75,17 +75,19 @@ class TestTransitionToInReview:
         assert item["number"] == 42
         assert any("in-review" in line for line in out)
 
-    def test_skips_workload_without_pr(self):
-        """A Completed Workload whose review didn't open a PR → skip."""
+    def test_no_pr_without_verdict_parks(self):
+        """A Completed Workload with no PR and no verdict → parked as blocked
+        (absent signal is not GO), reported to dispatch (#213)."""
         updated = []
         out = transition_to_in_review(
             list_workloads=lambda: [_wl("wl-a-b-42")],
-            list_workload_tasks=lambda name: [_task("review", pr_url=None)],
+            list_workload_tasks=lambda name: [_task("review", pr_url=None, verdict=None)],
             update_status=lambda item, status, agent: updated.append((item, status, agent)),
             agent_name="foreman-coder",
         )
-        assert updated == []
-        assert any("skip" in line for line in out)
+        assert len(updated) == 1
+        assert updated[0][1] == "blocked"
+        assert any("blocked" in line for line in out)
 
     def test_transitions_already_resolved_workload_to_done(self):
         """A Completed Workload with reason=AllAlreadyResolved and no PR →
@@ -163,10 +165,10 @@ class TestTransitionToInReview:
     def test_multiple_workloads_mixed(self):
         """Process each independently: one with PR → transition, one without → skip."""
         updated = []
-        wls = [_wl("wl-a-b-42"), _wl("wl-a-b-43")]
+        wls = [_wl("wl-a-b-42"), _wl("wl-a-b-43", issue_id="iss-43")]
         tasks_map = {
             "wl-a-b-42": [_task("review", pr_url="https://github.com/a/b/pull/42")],
-            "wl-a-b-43": [_task("review", pr_url=None)],
+            "wl-a-b-43": [_task("review", pr_url=None, verdict=None)],
         }
         out = transition_to_in_review(
             list_workloads=lambda: wls,
@@ -174,10 +176,12 @@ class TestTransitionToInReview:
             update_status=lambda item, status, agent: updated.append((item, status, agent)),
             agent_name="foreman-coder",
         )
-        assert len(updated) == 1
-        assert updated[0][1] == "in-review"
+        assert len(updated) == 2
+        statuses = {u[0]["issueId"]: u[1] for u in updated}
+        assert statuses["iss-42"] == "in-review"
+        assert statuses["iss-43"] == "blocked"
         assert any("42" in line and "in-review" in line for line in out)
-        assert any("43" in line and "skip" in line for line in out)
+        assert any("43" in line and "blocked" in line for line in out)
 
     def test_update_status_failure_is_caught(self):
         """A failed update_status call is logged, not fatal."""
@@ -213,3 +217,123 @@ class TestTransitionToInReview:
         )
         assert len(updated) == 1
         assert updated[0][1] == "in-review"
+
+
+# ── No-PR verdict routing (#213) ───────────────────────────────────────────
+
+
+def _task_with_signal(verdict=None, summary=None, extra=None):
+    """A coder task carrying status.verdict / status.result.summary / extra."""
+    status = {"phase": "Succeeded"}
+    if verdict is not None:
+        status["verdict"] = verdict
+    result = {}
+    if summary is not None:
+        result["summary"] = summary
+    if extra is not None:
+        result["extra"] = extra
+    if result:
+        status["result"] = result
+    return {"spec": {"kind": "issue-fix"}, "status": status}
+
+
+class TestNoPrVerdictRouting:
+    def test_incomplete_no_pr_parks_and_reports(self):
+        """No PR + INCOMPLETE verdict → issue parked as blocked, reported."""
+        updated = []
+        out = transition_to_in_review(
+            list_workloads=lambda: [_wl("wl-a-b-42")],
+            list_workload_tasks=lambda name: [
+                _task_with_signal(verdict="INCOMPLETE", summary="tests failing")
+            ],
+            update_status=lambda item, status, agent: updated.append((item, status, agent)),
+            agent_name="foreman-coder",
+        )
+        assert len(updated) == 1
+        item, status, agent = updated[0]
+        assert status == "blocked"
+        assert agent == "foreman-coder"
+        assert item["issueId"] == "iss-42"
+        assert item["number"] == 42
+        assert any("blocked" in line for line in out)
+        assert any("INCOMPLETE" in line for line in out)
+        assert any("tests failing" in line for line in out)
+
+    def test_go_no_pr_surfaces_anomaly_with_commitsha_and_does_not_park(self):
+        """No PR + GO verdict → anomaly surfaced with commitSHA/branch,
+        issue NOT parked (not done, not blocked)."""
+        updated = []
+        out = transition_to_in_review(
+            list_workloads=lambda: [_wl("wl-a-b-42")],
+            list_workload_tasks=lambda name: [
+                _task_with_signal(
+                    verdict="GO",
+                    summary="change complete",
+                    extra={"commitSHA": "abc123", "branch": "fix-42"},
+                )
+            ],
+            update_status=lambda item, status, agent: updated.append((item, status, agent)),
+            agent_name="foreman-coder",
+        )
+        assert updated == []
+        assert any("anomaly" in line for line in out)
+        assert any("abc123" in line for line in out)
+        assert any("fix-42" in line for line in out)
+        assert any("change complete" in line for line in out)
+
+    def test_go_no_pr_without_commit_info_still_surfaces(self):
+        """GO with no PR and no commitSHA/branch → anomaly, no parking."""
+        updated = []
+        out = transition_to_in_review(
+            list_workloads=lambda: [_wl("wl-a-b-42")],
+            list_workload_tasks=lambda name: [_task_with_signal(verdict="GO")],
+            update_status=lambda item, status, agent: updated.append((item, status, agent)),
+            agent_name="foreman-coder",
+        )
+        assert updated == []
+        assert any("anomaly" in line for line in out)
+
+    def test_all_already_resolved_still_goes_to_done(self):
+        """AllAlreadyResolved keeps its done path even with a verdict present."""
+        updated = []
+        wl = _wl_already_resolved("wl-a-b-42")
+        out = transition_to_in_review(
+            list_workloads=lambda: [wl],
+            list_workload_tasks=lambda name: [
+                _task_with_signal(verdict="INCOMPLETE", summary="no fix attempted")
+            ],
+            update_status=lambda item, status, agent: updated.append((item, status, agent)),
+            agent_name="foreman-coder",
+        )
+        assert len(updated) == 1
+        assert updated[0][1] == "done"
+        assert any("done" in line for line in out)
+
+    def test_raising_dispatch_call_still_returns_result_line(self):
+        """Fails open: a raising update_status on the park path appends an
+        error result line and does not abort the pass."""
+        def fail_update(item, status, agent):
+            raise RuntimeError("API down")
+        out = transition_to_in_review(
+            list_workloads=lambda: [_wl("wl-a-b-42")],
+            list_workload_tasks=lambda name: [
+                _task_with_signal(verdict="INCOMPLETE", summary="tests failing")
+            ],
+            update_status=fail_update,
+            agent_name="foreman-coder",
+        )
+        assert any("error" in line.lower() for line in out)
+        assert any("API down" in line for line in out)
+
+    def test_absent_verdict_parks(self):
+        """No verdict on any task → treated as non-GO: parked, not GO."""
+        updated = []
+        out = transition_to_in_review(
+            list_workloads=lambda: [_wl("wl-a-b-42")],
+            list_workload_tasks=lambda name: [_task_with_signal()],
+            update_status=lambda item, status, agent: updated.append((item, status, agent)),
+            agent_name="foreman-coder",
+        )
+        assert len(updated) == 1
+        assert updated[0][1] == "blocked"
+        assert any("blocked" in line for line in out)
