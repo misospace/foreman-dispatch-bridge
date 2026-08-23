@@ -15,7 +15,7 @@
     "issueId": "iss_def456",
     "repoFullName": "joryirving/home-ops",
     "number": 7,
-    "title": "chore(deps): update renovate bot config",
+    "title": "Update dependency pytest from 8.0.0 to 8.1.0",
     "currentLane": "local",
     "claimable": true,
     "labels": [{ "name": "status/ready" }]

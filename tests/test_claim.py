@@ -21,6 +21,67 @@ def test_select_item_respects_lane():
     assert select_item(SAMPLE, "frontier") is None
 
 
+# ── renovate filter scope (issue #216) ────────────────────────────────────────
+# The old filter was a bare "renovate" substring on the title, which dropped
+# every issue *about* Renovate. The guard now mirrors dispatch's isRenovateIssue:
+# dashboard substrings, update prefixes, and bot labels only.
+
+
+def _ready_local(number, title, labels=None):
+    return {
+        "number": number, "repoFullName": "o/r", "issueId": f"i{number}",
+        "title": title, "lane": "local",
+        "labels": labels if labels is not None else ["status/ready"],
+        "claimable": True,
+    }
+
+
+def test_title_mentioning_renovate_mid_sentence_is_claimable():
+    # The two real issues that were starved on 2026-08-23: both merely mention
+    # Renovate in the title and must be yielded.
+    queue = [
+        _ready_local(55, "[P3] No requirements-dev.txt pin management — dev-only deps not managed by Renovate"),
+        _ready_local(199, "[P3] Renovate config still groups coder apps that were consolidated into apps/llmkube-coder"),
+    ]
+    assert [c["number"] for c in select_candidates(queue, "local")] == [55, 199]
+
+
+def test_renovate_dashboard_titles_are_not_claimable():
+    queue = [
+        _ready_local(1, "Renovate Dashboard"),
+        _ready_local(2, "Dependency Dashboard for October"),
+    ]
+    assert select_item(queue, "local") is None
+
+
+def test_update_dependency_title_is_not_claimable():
+    queue = [_ready_local(1, "Update dependency pytest from 8.0.0 to 8.1.0")]
+    assert select_item(queue, "local") is None
+
+
+def test_update_image_title_is_not_claimable():
+    queue = [_ready_local(1, "update image python from 3.12 to 3.13")]
+    assert select_item(queue, "local") is None
+
+
+def test_renovate_label_is_not_claimable():
+    queue = [_ready_local(1, "Tune the dependency update schedule",
+                          labels=["status/ready", "renovate"])]
+    assert select_item(queue, "local") is None
+
+
+def test_skipped_candidate_is_logged_with_number_and_reason(caplog):
+    import logging
+    queue = [_ready_local(7, "Update dependency pytest from 8.0.0 to 8.1.0")]
+    with caplog.at_level(logging.INFO, logger="bridge.claim"):
+        assert select_item(queue, "local") is None
+    records = [r for r in caplog.records if r.message == "candidate-skipped"]
+    assert len(records) == 1
+    assert records[0].number == 7
+    assert records[0].reason == "renovate-title-prefix:update dep"
+    assert records[0].lane == "local"
+
+
 def test_to_claimed_item_maps_dispatch_fields():
     item = to_claimed_item(SAMPLE[0], "local")
     assert item == ClaimedItem(
