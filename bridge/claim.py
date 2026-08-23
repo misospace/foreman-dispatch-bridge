@@ -75,14 +75,20 @@ def _status(item: dict) -> Optional[str]:
 def select_candidates(items: list, lane: str):
     """Yield every claimable, ready, lane-matching, non-bot queue item, in queue
     (ranked) order. Items skipped by a bridge-side filter are logged with their
-    issue number and reason (issue #216), so an empty lane is distinguishable
-    from a filtered one. Callers claim them in turn so one un-claimable head
-    item can't hide the rest of the lane."""
+    issue number and reason (issue #216) — bot-filter skips at INFO, mechanical
+    lane/status/claimable skips at DEBUG — so an empty lane is distinguishable
+    from a filtered one without one INFO line per item per tick. Callers claim
+    them in turn so one un-claimable head item can't hide the rest of the lane."""
     for item in items:
         if not isinstance(item, dict):
             continue
         number = _number(item)
         skip = _renovate_reason(item)
+        # Bot-filter skips are the #216 failure mode (a lane silently starved
+        # by a bridge-side filter), so they log at INFO. The mechanical skips
+        # below are expected noise — dispatch filters lane/status server-side
+        # before the queue reaches us — and log at DEBUG so an unfiltered queue
+        # ever handed to select_candidates doesn't spam one INFO line per item.
         if skip is None and (_lane(item) or lane) != lane:
             skip = f"lane-mismatch:{_lane(item)}"
         if skip is None and _status(item) != "status/ready":
@@ -90,7 +96,8 @@ def select_candidates(items: list, lane: str):
         if skip is None and item.get("claimable") is not True and item.get("agentMatch") is not True:
             skip = "not-claimable"
         if skip is not None:
-            logger.info(
+            log = logger.info if skip.startswith("renovate-") else logger.debug
+            log(
                 "candidate-skipped",
                 extra={"number": number, "reason": skip, "lane": lane},
             )

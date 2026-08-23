@@ -80,6 +80,35 @@ def test_skipped_candidate_is_logged_with_number_and_reason(caplog):
     assert records[0].number == 7
     assert records[0].reason == "renovate-title-prefix:update dep"
     assert records[0].lane == "local"
+    # The bot filter is the #216 failure mode: it must be visible at INFO.
+    assert records[0].levelno == logging.INFO
+
+
+def test_mechanical_skips_log_at_debug_not_info(caplog):
+    """lane-mismatch / not-ready / not-claimable skips are expected noise
+    (dispatch filters server-side); they must not spam INFO on a queue that
+    select_candidates didn't fetch per-lane."""
+    import logging
+    queue = [
+        _ready_local(1, "other lane"),  # ready+claimable but wrong lane (set below)
+        _ready_local(2, "backlog item", labels=["status/backlog"]),
+        _ready_local(3, "not claimable", ),
+    ]
+    queue[0]["lane"] = "frontier"
+    queue[2]["claimable"] = False
+    with caplog.at_level(logging.DEBUG, logger="bridge.claim"):
+        assert select_item(queue, "local") is None
+    records = [r for r in caplog.records if r.message == "candidate-skipped"]
+    assert [(r.number, r.reason, r.levelno) for r in records] == [
+        (1, "lane-mismatch:frontier", logging.DEBUG),
+        (2, "not-ready:status/backlog", logging.DEBUG),
+        (3, "not-claimable", logging.DEBUG),
+    ]
+    # At INFO (the default operational level) the mechanical skips are silent.
+    caplog.clear()
+    with caplog.at_level(logging.INFO, logger="bridge.claim"):
+        select_item(queue, "local")
+    assert [r for r in caplog.records if r.message == "candidate-skipped"] == []
 
 
 def test_to_claimed_item_maps_dispatch_fields():
