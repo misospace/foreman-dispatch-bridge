@@ -491,6 +491,27 @@ def test_issue_state_none_for_an_unrecognised_state():
         assert _client(lambda url, headers: {"state": weird}).issue_state("o/n", 1) is None
 
 
+def test_issue_is_parked_when_backlog_or_marker_label_is_present():
+    assert _client(lambda url, headers: {"labels": ["status/backlog"]}).issue_is_parked(
+        "o/n", 1, "needs-human"
+    ) is True
+    assert _client(lambda url, headers: {"labels": ["needs-human"]}).issue_is_parked(
+        "o/n", 1, "needs-human"
+    ) is True
+    assert _client(lambda url, headers: {"labels": ["status/ready"]}).issue_is_parked(
+        "o/n", 1, "needs-human"
+    ) is False
+
+
+def test_issue_is_parked_fails_open_when_label_snapshot_is_unknown():
+    assert _client(lambda url, headers: {"state": "open"}).issue_is_parked(
+        "o/n", 1, "needs-human"
+    ) is None
+    assert _client(lambda url, headers: None).issue_is_parked(
+        "o/n", 1, "needs-human"
+    ) is None
+
+
 # --- Parallel lane-fetching tests ---
 
 class TestFindIssueIdParallel:

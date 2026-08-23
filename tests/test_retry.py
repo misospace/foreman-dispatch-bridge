@@ -525,6 +525,106 @@ def test_declared_escalation_parks_and_does_not_retry():
     assert r.deleted == []          # tombstone left to triage from
 
 
+def test_declared_escalation_first_park_still_posts_comment():
+    comments = []
+    r = _Recorder([_failed_wl("wl-misospace-dispatch-7", attempt=1)])
+    out = _reconcile(
+        r,
+        declared_escalation_for=lambda name: "DESIGN-DECISION",
+        needs_human_for=lambda item: False,
+        park_for_human=lambda item, reason: comments.append(reason) or True,
+        ensure_human_label=lambda item: pytest.fail("first park must not use label-only path"),
+    )
+    assert out == ["wl-misospace-dispatch-7:human-escalation:DESIGN-DECISION"]
+    assert comments == ["DESIGN-DECISION"]
+
+
+def test_declared_escalation_repeat_skips_comment_and_repairs_label():
+    comments = []
+    label_repairs = []
+    wl = _failed_wl("wl-misospace-dispatch-7", attempt=1)
+
+    def park(item, reason):
+        comments.append(reason)
+        return True
+
+    # The declared path intentionally leaves its Failed Workload as a tombstone.
+    # On the next tick, the durable issue label suppresses the announcement while
+    # the label-only operation repairs the marker if needed.
+    first = _Recorder([wl])
+    out1 = _reconcile(
+        first,
+        declared_escalation_for=lambda name: "DESIGN-DECISION",
+        needs_human_for=lambda item: False,
+        park_for_human=park,
+    )
+    assert out1 == ["wl-misospace-dispatch-7:human-escalation:DESIGN-DECISION"]
+    assert comments == ["DESIGN-DECISION"]
+    assert first.deleted == []
+
+    second = _Recorder([wl])
+    out2 = _reconcile(
+        second,
+        declared_escalation_for=lambda name: "DESIGN-DECISION",
+        needs_human_for=lambda item: True,
+        park_for_human=park,
+        ensure_human_label=lambda item: label_repairs.append(item.issue_number) or True,
+    )
+    assert out2 == ["wl-misospace-dispatch-7:human-escalation:DESIGN-DECISION"]
+    assert comments == ["DESIGN-DECISION"]  # no duplicate comment
+    assert label_repairs == [7]
+    assert second.deleted == []  # declared-escalation tombstone remains available
+
+
+def test_declared_escalation_repeat_keeps_tombstone_when_label_repair_fails():
+    r = _Recorder([_failed_wl("wl-misospace-dispatch-7", attempt=1)])
+    out = _reconcile(
+        r,
+        declared_escalation_for=lambda name: "DESIGN-DECISION",
+        needs_human_for=lambda item: True,
+        ensure_human_label=lambda item: False,
+        park_for_human=lambda item, reason: pytest.fail("repeat must not repost"),
+    )
+    assert out == ["wl-misospace-dispatch-7:human-escalation:DESIGN-DECISION"]
+    assert r.created == []
+    assert r.deleted == []
+
+
+def test_declared_escalation_retries_after_a_failed_first_park():
+    comments = []
+    park_calls = []
+
+    def park(item, reason):
+        park_calls.append(reason)
+        if len(park_calls) == 1:
+            return False
+        comments.append(reason)
+        return True
+
+    first = _Recorder([_failed_wl("wl-misospace-dispatch-7", attempt=1)])
+    out1 = _reconcile(
+        first,
+        declared_escalation_for=lambda name: "DESIGN-DECISION",
+        needs_human_for=lambda item: False,
+        park_for_human=park,
+    )
+    assert out1 == ["wl-misospace-dispatch-7:retry:2/3"]
+    assert comments == []
+    assert len(first.created) == 1
+
+    # The failed first park did not swallow the declaration. The next Failed
+    # Workload parks normally and posts the one announcement.
+    second = _Recorder([_failed_wl("wl-misospace-dispatch-7", attempt=2)])
+    out2 = _reconcile(
+        second,
+        declared_escalation_for=lambda name: "DESIGN-DECISION",
+        needs_human_for=lambda item: False,
+        park_for_human=park,
+    )
+    assert out2 == ["wl-misospace-dispatch-7:human-escalation:DESIGN-DECISION"]
+    assert comments == ["DESIGN-DECISION"]
+
+
 def test_declared_escalation_does_not_escalate_to_the_frontier_lane():
     """At max_attempts the giveup branch would escalate to a stronger coder. A
     declared design decision must not spend one."""

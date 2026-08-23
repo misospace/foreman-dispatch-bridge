@@ -656,8 +656,7 @@ def run_tick(api, dispatch, cfg: TickConfig, http_get: Callable) -> None:
             return None
 
     def park_for_human(item: ClaimedItem, reason: str) -> bool:
-        """Move a declared-escalation issue to status/backlog so the loop stops
-        serving it and a human sees it in triage.
+        """Move a declared-escalation issue to status/backlog and announce it.
 
         backlog is the right resting place: the agent queue treats it as
         triage-only, so the issue is neither re-claimed nor invisible. Returns
@@ -724,6 +723,30 @@ def run_tick(api, dispatch, cfg: TickConfig, http_get: Callable) -> None:
                 },
             )
         return bool(ok)
+
+    def parked_for_human(item: ClaimedItem) -> "bool | None":
+        """Return the cached needs-human marker used to suppress duplicate posts."""
+        if not item.issue_id:
+            return None
+        return dispatch.issue_is_parked(item.repo, item.issue_number, NEEDS_HUMAN_LABEL)
+
+    def ensure_human_label(item: ClaimedItem) -> bool:
+        """Repair the durable marker without posting another escalation comment."""
+        if not item.issue_id:
+            return False
+        payload = {
+            "issueId": item.issue_id,
+            "repoFullName": item.repo,
+            "number": item.issue_number,
+        }
+        try:
+            return bool(dispatch.add_label(payload, NEEDS_HUMAN_LABEL))
+        except Exception:
+            logger.exception(
+                "park-for-human-label-failed",
+                extra={"repo": item.repo, "number": item.issue_number},
+            )
+            return False
 
     def issue_state_for(item: ClaimedItem) -> "str | None":
         """Cached state of the workload's issue, or None when unknown.
@@ -835,6 +858,8 @@ def run_tick(api, dispatch, cfg: TickConfig, http_get: Callable) -> None:
         issue_state_for=issue_state_for,
         declared_escalation_for=declared_escalation_for,
         park_for_human=park_for_human,
+        needs_human_for=parked_for_human,
+        ensure_human_label=ensure_human_label,
     ):
         logger.info(line)
 
