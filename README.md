@@ -54,6 +54,9 @@ issue per lane.
 | `DELETE_WORKLOAD_TIMEOUT_S` | `60` | Seconds the bridge waits for the cluster to acknowledge a Workload deletion request before giving up |
 | `LOG_FORMAT` | `json` | Log line format — `json` (structured, default) or `plain` (human-readable) |
 | `LOG_LEVEL` | `INFO` | Minimum log level emitted — one of `DEBUG`, `INFO`, `WARNING`, `ERROR` |
+| `INFRA_PROBE_ENABLED` | `true` | probe models backing infra-parked issues for automatic recovery |
+| `INFRA_PROBE_URL` | `http://litellm.llm:4000/v1` | OpenAI-compatible base URL used for recovery probes |
+| `INFRA_PROBE_API_KEY` | *(empty)* | optional bearer token for recovery probes |
 
 PR-fix retries **preserve** the pipeline shape set at creation — `rebuild_prfix_manifest`
 reuses the existing spec, so toggling this env variable after a PR-fix Workload exists

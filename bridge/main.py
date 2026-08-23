@@ -4,7 +4,7 @@ import os
 import re
 import time
 import urllib.parse
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Callable, Dict, List, Optional
 from kubernetes import client, config
 from bridge.env import validate_env
@@ -13,6 +13,7 @@ from bridge.models import ClaimedItem
 from bridge.workload import (
     _parse_json_map,
     ISSUE_ID_ANNOTATION,
+    _branch_name,
     build_workload,
     coder_agent_for,
     coder_candidates,
@@ -32,6 +33,14 @@ from bridge.retry import (
     branch_pushed,
     declared_escalation,
     DEFAULT_MAX_ATTEMPTS,
+    INFRA_BLOCKED_LABEL,
+    INFRA_MODEL_LABEL_PREFIX,
+    INFRA_ATTEMPT_LABEL_PREFIX,
+    INFRA_RECOVERY_MAX_FAILURES,
+    failed_model,
+    claimed_item_from_issue,
+    reconcile_infra_parked,
+    infra_marker_labels,
 )
 from bridge.prfix import (
     reconcile_pr_fixes, drain_pr_fixes,
@@ -617,7 +626,13 @@ class TickConfig:
     fix_first_agents: set
 
 
-def run_tick(api, dispatch, cfg: TickConfig, http_get: Callable) -> None:
+def run_tick(
+    api,
+    dispatch,
+    cfg: TickConfig,
+    http_get: Callable,
+    probe_model: Optional[Callable[[str], bool]] = None,
+) -> None:
     """Run one reconcile cycle. All k8s and dispatch access goes through the
     two injected clients, so a test can supply fakes and assert the call
     sequence."""
@@ -748,6 +763,37 @@ def run_tick(api, dispatch, cfg: TickConfig, http_get: Callable) -> None:
             )
             return False
 
+    def model_for_agent(agent_name: str) -> str:
+        try:
+            response = api.get_namespaced_custom_object(
+                group="foreman.llmkube.dev", version="v1alpha1",
+                namespace=cfg.namespace, plural="agents", name=agent_name,
+            )
+            spec = response.get("spec") or {}
+            return str((spec.get("providerConfig") or {}).get("model") or spec.get("model") or agent_name)
+        except Exception:
+            return agent_name
+
+    def failed_model_for(workload_name: str) -> str:
+        return failed_model(list_workload_tasks(workload_name), model_for_agent)
+
+    def park_infra(item: ClaimedItem, model: str, count: int) -> bool:
+        if not item.issue_id:
+            return False
+        payload = {"issueId": item.issue_id, "repoFullName": item.repo, "number": item.issue_number}
+        safe_model = re.sub(r"[^A-Za-z0-9._/-]+", "-", model).strip("-")[:50] or "unknown"
+        if not dispatch.update_status(payload, "backlog", cfg.agent_name):
+            return False
+        return dispatch.replace_labels(
+            payload,
+            [NEEDS_HUMAN_LABEL, "status/blocked"],
+            [
+                INFRA_BLOCKED_LABEL,
+                f"{INFRA_MODEL_LABEL_PREFIX}{safe_model}",
+                f"{INFRA_ATTEMPT_LABEL_PREFIX}{count}",
+            ],
+        )
+
     def issue_state_for(item: ClaimedItem) -> "str | None":
         """Cached state of the workload's issue, or None when unknown.
 
@@ -860,8 +906,81 @@ def run_tick(api, dispatch, cfg: TickConfig, http_get: Callable) -> None:
         park_for_human=park_for_human,
         needs_human_for=parked_for_human,
         ensure_human_label=ensure_human_label,
+        tasks_for=list_workload_tasks,
+        failed_model_for=failed_model_for,
+        park_infra=park_infra,
     ):
         logger.info(line)
+
+    def list_infra_parked() -> list:
+        try:
+            return [
+                issue for issue in dispatch.list_issues()
+                if INFRA_BLOCKED_LABEL in (issue.get("labels") or [])
+            ]
+        except Exception as e:
+            logger.warning("infra-parked-list-failed", extra={"error": repr(e)})
+            return []
+
+    def clear_infra_marker(issue: dict) -> bool:
+        payload = {
+            "issueId": issue.get("issueId") or issue.get("id") or "",
+            "repoFullName": issue.get("repoFullName"),
+            "number": issue.get("number"),
+        }
+        return dispatch.replace_labels(payload, infra_marker_labels(issue), [])
+
+    def record_infra_failure(issue: dict, count: int) -> bool:
+        payload = {
+            "issueId": issue.get("issueId") or issue.get("id") or "",
+            "repoFullName": issue.get("repoFullName"),
+            "number": issue.get("number"),
+        }
+        old = infra_marker_labels(issue)
+        model = [label for label in old if label.startswith(INFRA_MODEL_LABEL_PREFIX)]
+        return dispatch.replace_labels(
+            payload,
+            [label for label in old if label.startswith(INFRA_ATTEMPT_LABEL_PREFIX)],
+            model + [f"{INFRA_ATTEMPT_LABEL_PREFIX}{count}"],
+        )
+
+    def redrive_infra(issue: dict, model: str) -> bool:
+        item = claimed_item_from_issue(issue)
+        if not item.lane:
+            item = replace(item, lane=cfg.lanes[0] if cfg.lanes else "local")
+        language = cfg.gate_profiles.get(item.repo, {}).get("language")
+        branch = _branch_name(item)
+        manifest = build_workload(
+            item, cfg.namespace, gate_profile_for(item.repo, cfg.gate_profiles),
+            cfg.agent_name, attempt=1,
+            coder_agent=coder_agent_for(
+                item.lane, language, cfg.lane_coder_agents, cfg.base_coder_agents,
+                repo=item.repo, repo_coder_agents=cfg.repo_coder_agents,
+                issue_number=item.issue_number,
+            ), verify_enabled=cfg.verify_enabled, self_go=cfg.self_go,
+            revise_from_branch=branch,
+        )
+        create_workload(manifest)
+        payload = {
+            "issueId": item.issue_id,
+            "repoFullName": item.repo,
+            "number": item.issue_number,
+        }
+        status_ok = dispatch.update_status(payload, "in-progress", cfg.agent_name)
+        label_ok = dispatch.remove_label(payload, NEEDS_HUMAN_LABEL)
+        return bool(status_ok and label_ok)
+
+    if probe_model:
+        for line in reconcile_infra_parked(
+            list_infra_parked,
+            probe_model,
+            record_infra_failure,
+            clear_infra_marker,
+            redrive_infra,
+            park_for_human,
+            max_failures=INFRA_RECOVERY_MAX_FAILURES,
+        ):
+            logger.info(line)
 
     # Cap concurrent in-progress work so the pipeline drains a bounded set
     # instead of claiming the whole backlog at once (0 = uncapped).
@@ -1120,7 +1239,38 @@ def _real_main() -> None:  # pragma: no cover - thin wiring, exercised in the cl
         coder_slots=coder_slots,
         fix_first_agents=fix_first_agents,
     )
-    run_tick(api, dispatch, cfg, http_get)
+    probe_model = None
+    probe_enabled = os.environ.get("INFRA_PROBE_ENABLED", "true").strip().lower() not in ("false", "0", "no")
+    if probe_enabled:
+        probe_url = os.environ.get("INFRA_PROBE_URL", "http://litellm.llm:4000/v1").rstrip("/")
+        probe_key = os.environ.get("INFRA_PROBE_API_KEY", "")
+
+        def probe_model(model: str) -> bool:
+            payload = {
+                "model": model,
+                "messages": [{"role": "user", "content": "Reply OK."}],
+                "max_tokens": 1,
+            }
+            headers = {"Authorization": f"Bearer {probe_key}"} if probe_key else {}
+            try:
+                from bridge.http_retry import http_post as _http_post
+                response = _http_post(
+                    f"{probe_url}/chat/completions",
+                    headers=headers,
+                    json=payload,
+                    timeout=20,
+                )
+                response.raise_for_status()
+                data = response.json()
+                return isinstance(data, dict) and bool(data.get("choices"))
+            except Exception as e:
+                logger.info(
+                    "infra-model-unhealthy",
+                    extra={"model": model, "error": _redact_token(repr(e))},
+                )
+                return False
+
+    run_tick(api, dispatch, cfg, http_get, probe_model=probe_model)
 
 
 # ---------------------------------------------------------------------------

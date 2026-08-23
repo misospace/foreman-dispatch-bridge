@@ -22,6 +22,12 @@ DEFAULT_MAX_ATTEMPTS = 3
 # budget reserved for genuine NO-GO/INCOMPLETE responses, but it must
 # still be bounded so a permanently broken backend cannot loop forever.
 INFRA_MAX_ATTEMPTS = 3
+# At the 15-minute CronJob cadence, keep a failed dependency recoverable for 24h.
+INFRA_RECOVERY_MAX_FAILURES = 96
+INFRA_BLOCKED_LABEL = "blocked/infra"
+INFRA_MODEL_LABEL_PREFIX = "blocked/infra-model/"
+INFRA_ATTEMPT_LABEL_PREFIX = "blocked/infra-attempt/"
+NEEDS_HUMAN_LABEL = "needs-human"
 
 ListFailed = Callable[[], list]         # () -> list of Failed Workload manifests (dicts)
 DeleteWorkload = Callable[[str], None]  # (name) -> None; blocks until the object is gone
@@ -33,6 +39,8 @@ IssueStateFor = Callable[[ClaimedItem], Optional[str]]  # (item) -> "open"/"clos
 DeclaredEscalationFor = Callable[[str], Optional[str]]  # (workload name) -> declared reason or None
 NeedsHumanFor = Callable[[ClaimedItem], Optional[bool]]  # (item) -> parked state, None if unknown
 EnsureHumanLabel = Callable[[ClaimedItem], bool]  # (item) -> label is present after the call
+TasksFor = Callable[[str], list]
+FailedModelFor = Callable[[str], str]
 
 
 # Bounds the feedback block injected into a retry's coder prompt.
@@ -218,6 +226,136 @@ def task_failed_with_executor_error(wl: dict) -> bool:
     return False
 
 
+def tasks_failed_with_executor_error(tasks: list) -> bool:
+    """Return True when a child AgenticTask records ExecutorError."""
+    for task in tasks or []:
+        for condition in ((task.get("status") or {}).get("conditions") or []):
+            if condition.get("type") == "Completed" and condition.get("reason") == "ExecutorError":
+                return True
+    return False
+
+
+def failed_model(tasks: list, model_for_agent: Optional[Callable[[str], str]] = None) -> str:
+    """Resolve the model behind the child task that failed before the loop."""
+    for task in tasks or []:
+        if not tasks_failed_with_executor_error([task]):
+            continue
+        spec = task.get("spec") or {}
+        model = spec.get("modelRef")
+        if isinstance(model, str) and model.strip():
+            return model.strip()
+        agent_ref = spec.get("agentRef") or {}
+        agent = agent_ref.get("name") if isinstance(agent_ref, dict) else ""
+        if isinstance(agent, str) and agent.strip():
+            return (model_for_agent(agent) if model_for_agent else agent) or agent
+    return "unknown"
+
+
+def _issue_labels(record: dict) -> list[str]:
+    labels = record.get("labels") or []
+    return [
+        name for label in labels
+        for name in [label.get("name") if isinstance(label, dict) else label]
+        if isinstance(name, str)
+    ]
+
+
+def infra_model_from_labels(record: dict) -> str:
+    for label in _issue_labels(record):
+        if label.startswith(INFRA_MODEL_LABEL_PREFIX):
+            return label[len(INFRA_MODEL_LABEL_PREFIX):] or "unknown"
+    return "unknown"
+
+
+def infra_failure_count(record: dict) -> int:
+    counts = []
+    for label in _issue_labels(record):
+        if label.startswith(INFRA_ATTEMPT_LABEL_PREFIX):
+            try:
+                counts.append(int(label[len(INFRA_ATTEMPT_LABEL_PREFIX):]))
+            except ValueError:
+                pass
+    return max(counts, default=0)
+
+
+def infra_marker_labels(record: dict) -> list[str]:
+    return [
+        label for label in _issue_labels(record)
+        if label == INFRA_BLOCKED_LABEL
+        or label.startswith(INFRA_MODEL_LABEL_PREFIX)
+        or label.startswith(INFRA_ATTEMPT_LABEL_PREFIX)
+    ]
+
+
+def claimed_item_from_issue(record: dict) -> ClaimedItem:
+    repository = record.get("repository") or {}
+    return ClaimedItem(
+        repo=str(record.get("repoFullName") or (repository.get("fullName") if isinstance(repository, dict) else "") or ""),
+        issue_number=int(record.get("number") or record.get("issueNumber") or 0),
+        intent=str(record.get("title") or ""),
+        lane=str(record.get("currentLane") or ""),
+        issue_id=str(record.get("issueId") or record.get("id") or ""),
+    )
+
+
+def reconcile_infra_parked(
+    list_parked: Callable[[], list],
+    probe_model: Callable[[str], bool],
+    record_failure: Callable[[dict, int], bool],
+    clear_marker: Callable[[dict], bool],
+    redrive: Callable[[dict, str], bool],
+    park_for_human: Callable[[ClaimedItem, str], bool],
+    max_failures: int = INFRA_RECOVERY_MAX_FAILURES,
+) -> list[str]:
+    """Recover issue markers left after an infrastructure Workload was deleted."""
+    records = list_parked() or []
+    health = {}
+    for model in sorted({infra_model_from_labels(r) for r in records}):
+        try:
+            health[model] = bool(probe_model(model))
+        except Exception:
+            health[model] = False
+            logger.exception("infra-model-probe-failed", extra={"model": model})
+
+    results = []
+    for record in records:
+        model = infra_model_from_labels(record)
+        number = record.get("number") or "?"
+        if health.get(model, False):
+            try:
+                recovered = bool(redrive(record, model))
+                if recovered:
+                    recovered = bool(clear_marker(record))
+            except Exception:
+                recovered = False
+                logger.exception("infra-redrive-failed", extra={"issue": number, "model": model})
+            results.append(f"{number}:infra-{'redriven' if recovered else 'redrive-error'}:{model}")
+            continue
+
+        count = infra_failure_count(record)
+        if count + 1 >= max_failures:
+            try:
+                parked = bool(
+                    park_for_human(
+                        claimed_item_from_issue(record),
+                        f"infrastructure dependency unavailable: {model}",
+                    )
+                )
+            except Exception:
+                parked = False
+                logger.exception("infra-human-park-failed", extra={"issue": number, "model": model})
+            if parked:
+                clear_marker(record)
+            results.append(f"{number}:infra-human:{model}")
+        else:
+            try:
+                record_failure(record, count + 1)
+            except Exception:
+                logger.exception("infra-failure-record-failed", extra={"issue": number, "model": model})
+            results.append(f"{number}:infra-unhealthy:{model}:{count + 1}")
+    return results
+
+
 def _issue_from_name(name: str) -> int:
     """Recover the issue number from a Workload name (`wl-<owner>-<repo>-<n>`).
 
@@ -304,6 +442,9 @@ def reconcile_failures(
     declared_escalation_for: Optional[DeclaredEscalationFor] = None,
     park_for_human: Optional[Callable[[ClaimedItem, str], bool]] = None,
     infra_max_attempts: int = INFRA_MAX_ATTEMPTS,
+    tasks_for: Optional[TasksFor] = None,
+    failed_model_for: Optional[FailedModelFor] = None,
+    park_infra: Optional[Callable[[ClaimedItem, str, int], bool]] = None,
     needs_human_for: Optional[NeedsHumanFor] = None,
     ensure_human_label: Optional[EnsureHumanLabel] = None,
 ) -> list:
@@ -356,7 +497,16 @@ def reconcile_failures(
         # never reached the agent (model 403, network drop, etc.) — so the
         # failure is an infrastructure problem and must not consume the
         # verdict retry budget. Such Workloads get their own budget below.
-        is_infra = task_failed_with_executor_error(wl)
+        tasks = []
+        if tasks_for:
+            try:
+                tasks = tasks_for(name) or []
+            except Exception as e:
+                logger.warning(
+                    "infra-task-lookup-failed",
+                    extra={"workload": name, "error": repr(e)},
+                )
+        is_infra = task_failed_with_executor_error(wl) or tasks_failed_with_executor_error(tasks)
 
         # A closed issue cannot be advanced by anything we do here, so neither a
         # retry nor an escalation is worth an attempt. Checked before the
@@ -490,19 +640,34 @@ def reconcile_failures(
             # will ever run again, invisible on the board and holding a slot
             # against MAX_IN_PROGRESS until the 48h prune. Parking moves it to
             # backlog with needs-human so it appears on the operator worklist.
-            parked = _park_exhausted(
-                wl, f"infra failure after {attempt} attempts (e.g. model 403 "
-                "or network error that never reached the agent)",
-            )
-            results.append(f"{name}:giveup-infra:{attempt}/{infra_max_attempts}")
-            # Tombstone must be retired on a successful park or the next tick
-            # re-lists it and re-posts the needs-human comment every tick until
-            # the 48h prune. A failed park keeps the tombstone so the next tick
-            # retries the park.
+            item = refresh_lane(item_from_workload(wl), current_lane_for)
+            model = "unknown"
+            if failed_model_for:
+                try:
+                    model = failed_model_for(name) or "unknown"
+                except Exception as e:
+                    logger.warning(
+                        "infra-model-lookup-failed",
+                        extra={"workload": name, "error": repr(e)},
+                    )
+            if park_infra is not None:
+                try:
+                    parked = bool(park_infra(item, model, attempt))
+                except Exception:
+                    logger.exception("park-infra-failed", extra={"workload": name, "model": model})
+                    parked = False
+            else:
+                parked = _park_exhausted(
+                    wl, f"infra failure after {attempt} attempts (e.g. model 403 "
+                    "or network error that never reached the agent)",
+                )
+            results.append(f"{name}:giveup-infra:{attempt}/{infra_max_attempts}:{model}")
+            # Tombstone is retired only after the issue marker is safely written;
+            # a failed park leaves it for the next tick.
             if parked:
                 delete_workload(name)
             continue
-        if attempt >= max_attempts:
+        if attempt >= max_attempts and not is_infra:
             item = refresh_lane(item_from_workload(wl), current_lane_for)
             if not item.issue_id and lookup_issue_id:
                 # Workloads created before the issue-id annotation (bridge <0.3.0)
