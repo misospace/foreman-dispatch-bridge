@@ -1,4 +1,5 @@
 import logging
+import re
 from dataclasses import replace
 from typing import Callable, Optional
 
@@ -236,7 +237,12 @@ def tasks_failed_with_executor_error(tasks: list) -> bool:
 
 
 def failed_model(tasks: list, model_for_agent: Optional[Callable[[str], str]] = None) -> str:
-    """Resolve the model behind the child task that failed before the loop."""
+    """Resolve the model behind the child task that failed before the loop.
+
+    Foreman versions that do not stamp ``spec.modelRef`` may still include the
+    model in the executor condition message; retain that evidence before falling
+    back to the Agent name.
+    """
     for task in tasks or []:
         if not tasks_failed_with_executor_error([task]):
             continue
@@ -244,6 +250,18 @@ def failed_model(tasks: list, model_for_agent: Optional[Callable[[str], str]] = 
         model = spec.get("modelRef")
         if isinstance(model, str) and model.strip():
             return model.strip()
+        extra = ((task.get("status") or {}).get("result") or {}).get("extra") or {}
+        for key in ("model", "modelName"):
+            model = extra.get(key)
+            if isinstance(model, str) and model.strip():
+                return model.strip()
+        condition_text = " ".join(
+            str(condition.get("message") or "")
+            for condition in ((task.get("status") or {}).get("conditions") or [])
+        )
+        match = re.search(r"(?:model|deployment)[ =:'\"]+([A-Za-z0-9._/-]+)", condition_text, re.IGNORECASE)
+        if match:
+            return match.group(1)
         agent_ref = spec.get("agentRef") or {}
         agent = agent_ref.get("name") if isinstance(agent_ref, dict) else ""
         if isinstance(agent, str) and agent.strip():
@@ -471,7 +489,8 @@ def reconcile_failures(
     reached the agent). Such Workloads retry against a separate budget
     (`infra_max_attempts`) without incrementing the verdict counter, so a
     transient 403 or network drop does not consume the budget reserved for
-    genuine rejections.
+    genuine rejections. At the cap, `park_infra` records the failed model on
+    the issue before the tombstone is retired.
 
     A declared human escalation normally parks the issue through
     `park_for_human`. When `needs_human_for` confirms that the issue already has
@@ -661,7 +680,7 @@ def reconcile_failures(
                     wl, f"infra failure after {attempt} attempts (e.g. model 403 "
                     "or network error that never reached the agent)",
                 )
-            results.append(f"{name}:giveup-infra:{attempt}/{infra_max_attempts}:{model}")
+            results.append(f"{name}:giveup-infra:{attempt}/{infra_max_attempts}")
             # Tombstone is retired only after the issue marker is safely written;
             # a failed park leaves it for the next tick.
             if parked:

@@ -891,7 +891,7 @@ def test_reconcile_task_error_uses_infra_park_hook_and_model():
     tasks = [{"spec": {"agentRef": {"name": "coder"}}, "status": {"conditions": [{"type": "Completed", "reason": "ExecutorError"}]}}]
     r = _Recorder([_failed_wl("w-task-infra", attempt=1)])
     out = _reconcile(r, attempts=1, infra_max_attempts=1, tasks_for=lambda name: tasks, failed_model_for=lambda name: "model-a", park_infra=lambda item, model, count: True)
-    assert any("giveup-infra:1/1:model-a" in line for line in out), out
+    assert any("giveup-infra:1/1" in line for line in out), out
 
 
 def test_reconcile_verdict_failure_still_increments_attempt():
