@@ -31,6 +31,8 @@ FeedbackFor = Callable[[str], str]             # (workload name) -> retry feedba
 BranchPushedFor = Callable[[str, str, str], bool]  # (workload name, branch, repo) -> did its task branch reach the remote
 IssueStateFor = Callable[[ClaimedItem], Optional[str]]  # (item) -> "open"/"closed", None if unknown
 DeclaredEscalationFor = Callable[[str], Optional[str]]  # (workload name) -> declared reason or None
+NeedsHumanFor = Callable[[ClaimedItem], Optional[bool]]  # (item) -> parked state, None if unknown
+EnsureHumanLabel = Callable[[ClaimedItem], bool]  # (item) -> label is present after the call
 
 
 # Bounds the feedback block injected into a retry's coder prompt.
@@ -302,6 +304,8 @@ def reconcile_failures(
     declared_escalation_for: Optional[DeclaredEscalationFor] = None,
     park_for_human: Optional[Callable[[ClaimedItem, str], bool]] = None,
     infra_max_attempts: int = INFRA_MAX_ATTEMPTS,
+    needs_human_for: Optional[NeedsHumanFor] = None,
+    ensure_human_label: Optional[EnsureHumanLabel] = None,
 ) -> list:
     """Retry Failed bridge Workloads, bounded by max_attempts.
 
@@ -327,6 +331,14 @@ def reconcile_failures(
     (`infra_max_attempts`) without incrementing the verdict counter, so a
     transient 403 or network drop does not consume the budget reserved for
     genuine rejections.
+
+    A declared human escalation normally parks the issue through
+    `park_for_human`. When `needs_human_for` confirms that the issue already has
+    the durable parked marker, the bridge uses `ensure_human_label` instead and
+    skips the comment. This leaves the Failed Workload available for triage
+    without posting the same announcement on every tick. An unknown lookup fails
+    open to the full park path; a failed label-only repair keeps the tombstone and
+    retries the label repair on the next tick.
 
     Returns per-Workload outcome strings.
     """
@@ -386,6 +398,10 @@ def reconcile_failures(
         # invisible. The Failed workload is left as the tombstone to triage from,
         # matching what max_attempts giveup already does.
         #
+        # Once the issue has durable parked state, do not post the same escalation
+        # comment again. Still run the label-only callback so a race or partial
+        # label failure can repair the marker without announcing twice.
+        #
         # Fails open: if the park callback is missing or fails, fall through to the
         # normal retry path rather than dropping the work on the floor.
         if declared_escalation_for is not None:
@@ -401,20 +417,61 @@ def reconcile_failures(
                 item_h = refresh_lane(item_from_workload(wl), current_lane_for)
                 if not item_h.issue_id and lookup_issue_id:
                     item_h = replace(item_h, issue_id=lookup_issue_id(item_h) or "")
-                parked = False
-                if park_for_human is not None:
+
+                already_parked = False
+                if needs_human_for is not None:
                     try:
-                        parked = bool(park_for_human(item_h, reason))
+                        already_parked = needs_human_for(item_h) is True
                     except Exception as e:
                         logger.warning(
-                            "park-for-human-failed",
-                            extra={"workload": name, "reason": reason, "error": repr(e)},
+                            "needs-human-lookup-failed",
+                            extra={"workload": name, "error": repr(e)},
                         )
-                if parked:
+
+                if already_parked:
+                    # The label/backlog state is the durable idempotency marker.
+                    # A separate callback keeps this path label-only, so
+                    # park_for_human cannot accidentally post another comment.
+                    if ensure_human_label is not None:
+                        try:
+                            if not ensure_human_label(item_h):
+                                logger.warning(
+                                    "ensure-needs-human-label-failed",
+                                    extra={"workload": name, "reason": reason},
+                                )
+                        except Exception as e:
+                            logger.warning(
+                                "ensure-needs-human-label-failed",
+                                extra={
+                                    "workload": name,
+                                    "reason": reason,
+                                    "error": repr(e),
+                                },
+                            )
+                    # Parking already succeeded on an earlier tick. Keep the
+                    # tombstone for triage and retry only the label repair above;
+                    # never rerun the coder because that would spend an attempt on
+                    # a decision already made by the model.
                     msg = f"{name}:human-escalation:{reason}"
                     logger.info(msg)
                     results.append(msg)
                     continue
+                else:
+                    parked = False
+                    if park_for_human is not None:
+                        try:
+                            parked = bool(park_for_human(item_h, reason))
+                        except Exception as e:
+                            logger.warning(
+                                "park-for-human-failed",
+                                extra={"workload": name, "reason": reason, "error": repr(e)},
+                            )
+                    if parked:
+                        msg = f"{name}:human-escalation:{reason}"
+                        logger.info(msg)
+                        results.append(msg)
+                        continue
+
                 # Could not park it — do not silently swallow the declaration, but
                 # do not strand the work either: fall through and retry as normal.
                 logger.warning(

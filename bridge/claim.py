@@ -280,6 +280,19 @@ class DispatchClient:
         payload = {"repo": repo, "pr": pr, "status": status, "note": note}
         return self._http_post(f"{self._base}/api/pr-fix-queue/mark", payload) is not None
 
+    def _issue_state_data(self, repo: str, number: int) -> Optional[dict]:
+        """Return the unfiltered cached issue snapshot, or None if unknown."""
+        query = urlencode({"repo": repo, "number": number})
+        try:
+            data = self._http_get(f"{self._base}/api/issues/state?{query}")
+        except Exception as e:
+            logger.warning(
+                "issue-state-lookup-failed",
+                extra={"repo": repo, "number": number, "error": repr(e)},
+            )
+            return None
+        return data if isinstance(data, dict) else None
+
     def issue_state(self, repo: str, number: int) -> Optional[str]:
         """Return the cached state of repo#number ("open"/"closed"), or None if unknown.
 
@@ -294,16 +307,8 @@ class DispatchClient:
         (Renovate exclusion, excluded labels, open-only default), so a 404 here
         really does mean "not cached" rather than "filtered out".
         """
-        query = urlencode({"repo": repo, "number": number})
-        try:
-            data = self._http_get(f"{self._base}/api/issues/state?{query}")
-        except Exception as e:
-            logger.warning(
-                "issue-state-lookup-failed",
-                extra={"repo": repo, "number": number, "error": repr(e)},
-            )
-            return None
-        if not isinstance(data, dict):
+        data = self._issue_state_data(repo, number)
+        if data is None:
             return None
         state = data.get("state")
         if not isinstance(state, str):
@@ -315,6 +320,24 @@ class DispatchClient:
         # would silently read as "not closed" and quietly bypass the check the
         # caller added it for.
         return state if state in ISSUE_STATES else None
+
+    def issue_is_parked(
+        self, repo: str, number: int, marker: str
+    ) -> Optional[bool]:
+        """Return whether an issue is already parked for human triage.
+
+        ``status/backlog`` is the durable resting state. The marker is checked
+        too because an operator can restore the status while leaving the bridge's
+        human-triage label in place. Unknown or malformed responses stay unknown
+        so callers can fail open and attempt the full park.
+        """
+        data = self._issue_state_data(repo, number)
+        if data is None:
+            return None
+        labels = data.get("labels")
+        if not isinstance(labels, list) or not all(isinstance(item, str) for item in labels):
+            return None
+        return marker in labels or "status/backlog" in labels
 
     def list_claimed(self, agent_name: str, status: str = "") -> list:
         """List issues currently claimed by *agent_name* (across all lanes).
