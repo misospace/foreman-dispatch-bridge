@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.7.1](https://github.com/misospace/foreman-dispatch-bridge/compare/v0.7.0...v0.7.1) (2026-08-23)
+
+
+### Bug Fixes
+
+* **bridge:** route run_tick's duplicate closures through BridgeRuntime ([#207](https://github.com/misospace/foreman-dispatch-bridge/issues/207)) ([e05354d](https://github.com/misospace/foreman-dispatch-bridge/commit/e05354d4de84790f8fdd4addc0ac916cb57a910c))
+* **claim:** skip only renovate bot issues, log filtered candidates ([#219](https://github.com/misospace/foreman-dispatch-bridge/issues/219)) ([32cd164](https://github.com/misospace/foreman-dispatch-bridge/commit/32cd164dc442294ce1e2ced7b4f7734eb8532396))
+* **deps:** pin msgpack exactly in requirements.txt ([#211](https://github.com/misospace/foreman-dispatch-bridge/issues/211)) ([45cf953](https://github.com/misospace/foreman-dispatch-bridge/commit/45cf9537e62040eb4718b1ab160e7c4882d52891)), closes [#172](https://github.com/misospace/foreman-dispatch-bridge/issues/172)
+* **env:** sync OPTIONAL_VARS registry with env vars the bridge reads ([#210](https://github.com/misospace/foreman-dispatch-bridge/issues/210)) ([3d9a369](https://github.com/misospace/foreman-dispatch-bridge/commit/3d9a369dff3c3eedc812826069573a5b204a7369)), closes [#173](https://github.com/misospace/foreman-dispatch-bridge/issues/173)
+* **release:** synchronize Python project version ([#212](https://github.com/misospace/foreman-dispatch-bridge/issues/212)) ([ac7f596](https://github.com/misospace/foreman-dispatch-bridge/commit/ac7f596bef6779bfd011d1e4b96a3f783b90990f)), closes [#174](https://github.com/misospace/foreman-dispatch-bridge/issues/174)
+* **retry:** make human escalation parking idempotent ([#217](https://github.com/misospace/foreman-dispatch-bridge/issues/217)) ([c259c4c](https://github.com/misospace/foreman-dispatch-bridge/commit/c259c4c77fd3e7899d58f268f502e59f6550af0f))
+* **retry:** recover infra-parked workloads ([#218](https://github.com/misospace/foreman-dispatch-bridge/issues/218)) ([db7a9f0](https://github.com/misospace/foreman-dispatch-bridge/commit/db7a9f0b8c079151db4a60d86fb7c83e59da2276))
+* **review-transition:** report no-PR Workload verdict to dispatch instead of silent skip:no-pr ([#214](https://github.com/misospace/foreman-dispatch-bridge/issues/214)) ([46fcac1](https://github.com/misospace/foreman-dispatch-bridge/commit/46fcac16bc8b3516b67cf4d2d7dadf5a0ae9b939)), closes [#213](https://github.com/misospace/foreman-dispatch-bridge/issues/213)
+
 ## [0.7.0](https://github.com/misospace/foreman-dispatch-bridge/compare/v0.6.32...v0.7.0) (2026-08-21)
 
 
