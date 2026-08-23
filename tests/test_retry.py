@@ -804,6 +804,12 @@ def test_task_failed_with_executor_error_false_for_a_real_verdict_rejection():
     assert task_failed_with_executor_error(wl) is False
 
 
+def test_tasks_failed_with_executor_error_reads_agentic_task_status():
+    from bridge.retry import tasks_failed_with_executor_error
+    task = {"status": {"conditions": [{"type": "Completed", "reason": "ExecutorError"}]}}
+    assert tasks_failed_with_executor_error([task]) is True
+
+
 def test_task_failed_with_executor_error_false_when_no_task_statuses():
     from bridge.retry import task_failed_with_executor_error
     # A workload with no status yet must not be misclassified as infra.
@@ -854,6 +860,15 @@ def test_reconcile_executor_error_does_not_escalate_or_give_up_prematurely():
     assert any(f"giveup-infra:{INFRA_MAX_ATTEMPTS}/{INFRA_MAX_ATTEMPTS}" in line for line in out2), out2
 
 
+def test_failed_model_prefers_model_ref_and_resolves_agent_model():
+    from bridge.retry import failed_model
+    task = {"spec": {"modelRef": "model-a"}, "status": {"conditions": [{"type": "Completed", "reason": "ExecutorError"}]}}
+    assert failed_model([task]) == "model-a"
+    task["spec"].pop("modelRef")
+    task["spec"]["agentRef"] = {"name": "coder"}
+    assert failed_model([task], lambda name: "resolved-model") == "resolved-model"
+
+
 def test_reconcile_executor_error_gives_up_after_infra_cap():
     # The infra budget is bounded so a permanently broken backend cannot
     # loop forever. Once it is hit, the Failed tombstone is left in place
@@ -872,6 +887,13 @@ def test_reconcile_executor_error_gives_up_after_infra_cap():
     assert rec.created == []
 
 
+def test_reconcile_task_error_uses_infra_park_hook_and_model():
+    tasks = [{"spec": {"agentRef": {"name": "coder"}}, "status": {"conditions": [{"type": "Completed", "reason": "ExecutorError"}]}}]
+    r = _Recorder([_failed_wl("w-task-infra", attempt=1)])
+    out = _reconcile(r, attempts=1, infra_max_attempts=1, tasks_for=lambda name: tasks, failed_model_for=lambda name: "model-a", park_infra=lambda item, model, count: True)
+    assert any("giveup-infra:1/1" in line for line in out), out
+
+
 def test_reconcile_verdict_failure_still_increments_attempt():
     # Real NO-GO/INCOMPLETE verdicts must continue to spend the budget —
     # this issue changes nothing for them.
@@ -881,6 +903,29 @@ def test_reconcile_verdict_failure_still_increments_attempt():
     assert any("retry:2/" in line for line in out), out
     created = rec.created[-1]
     assert created["metadata"]["annotations"][ATTEMPT_ANNOTATION] == "2"
+
+
+def test_infra_recovery_probes_once_per_model_and_redrives_healthy_records():
+    from bridge.retry import reconcile_infra_parked
+    records = [
+        {"issueId": "a", "repoFullName": "o/r", "number": 1, "labels": ["blocked/infra", "blocked/infra-model/model-a", "blocked/infra-attempt/4"]},
+        {"issueId": "b", "repoFullName": "o/r", "number": 2, "labels": ["blocked/infra", "blocked/infra-model/model-a", "blocked/infra-attempt/4"]},
+    ]
+    probes, redriven, cleared = [], [], []
+    out = reconcile_infra_parked(lambda: records, lambda model: probes.append(model) or True, lambda record, count: True, lambda record: cleared.append(record["number"]) or True, lambda record, model: redriven.append(record["number"]) or True, lambda item, reason: pytest.fail("healthy dependency must not park"))
+    assert probes == ["model-a"]
+    assert redriven == [1, 2]
+    assert cleared == [1, 2]
+    assert all("infra-redriven" in line for line in out)
+
+
+def test_infra_recovery_unhealthy_escalates_to_human_after_window():
+    from bridge.retry import INFRA_RECOVERY_MAX_FAILURES, reconcile_infra_parked
+    records = [{"issueId": "a", "repoFullName": "o/r", "number": 1, "labels": ["blocked/infra", "blocked/infra-model/model-a", f"blocked/infra-attempt/{INFRA_RECOVERY_MAX_FAILURES - 1}"]}]
+    parked = []
+    out = reconcile_infra_parked(lambda: records, lambda model: False, lambda record, count: pytest.fail("window should end"), lambda record: True, lambda record, model: pytest.fail("unhealthy must not redrive"), lambda item, reason: parked.append((item.issue_number, reason)) or True)
+    assert parked == [(1, "infrastructure dependency unavailable: model-a")]
+    assert out == ["1:infra-human:model-a"]
 
 
 def test_env_documents_default_max_attempts_in_sync_with_retry_default():

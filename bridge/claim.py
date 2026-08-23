@@ -321,6 +321,28 @@ class DispatchClient:
         # caller added it for.
         return state if state in ISSUE_STATES else None
 
+    def list_issues(self) -> list:
+        """List open cached issues, including non-claimable backlog items."""
+        data = self._http_get(f"{self._base}/api/issues")
+        if not isinstance(data, list):
+            return []
+        result = []
+        for issue in data:
+            if not isinstance(issue, dict):
+                continue
+            item = dict(issue)
+            repository = item.get("repository") or {}
+            repo = item.get("repoFullName") or (
+                repository.get("fullName") if isinstance(repository, dict) else None
+            )
+            if repo:
+                item["repoFullName"] = repo
+            issue_id = item.get("issueId") or item.get("id")
+            if issue_id:
+                item["issueId"] = issue_id
+            result.append(item)
+        return result
+
     def issue_is_parked(
         self, repo: str, number: int, marker: str
     ) -> Optional[bool]:
@@ -371,6 +393,23 @@ class DispatchClient:
             "agentName": agent_name,
         }
         return self._http_post(f"{self._base}/api/issues/status", payload) is not None
+
+    def replace_labels(self, item: dict, remove: list[str], add: list[str]) -> bool:
+        """Remove and add labels, returning false if any operation fails."""
+        ok = True
+        for label in remove:
+            try:
+                ok = self.remove_label(item, label) and ok
+            except Exception:
+                logger.exception("dispatch-remove-label-failed", extra={"label": label})
+                ok = False
+        for label in add:
+            try:
+                ok = self.add_label(item, label) and ok
+            except Exception:
+                logger.exception("dispatch-add-label-failed", extra={"label": label})
+                ok = False
+        return ok
 
     def add_label(self, item: dict, label: str) -> bool:
         """Add a label to an issue. Best-effort: failures do not raise."""

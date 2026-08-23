@@ -41,6 +41,9 @@ OPTIONAL_VARS: Dict[str, str] = {
     "REPO_CODER_AGENTS": "",
     "LOG_FORMAT": "json",
     "LOG_LEVEL": "INFO",
+    "INFRA_PROBE_ENABLED": "true",
+    "INFRA_PROBE_URL": "http://litellm.llm:4000/v1",
+    "INFRA_PROBE_API_KEY": "",
 }
 
 

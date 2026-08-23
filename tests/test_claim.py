@@ -388,6 +388,13 @@ def test_update_status_accepts_current_lane_key():
     assert posts[0]["issueNumber"] == 99
 
 
+def test_replace_labels_removes_and_adds_in_order():
+    c, posts = _client_recording_posts()
+    item = {"issueId": "i", "repoFullName": "o/r", "number": 1}
+    assert c.replace_labels(item, ["old"], ["new"]) is True
+    assert [url.rsplit("/", 1)[-1] for url, _ in posts] == ["unlabel", "label"]
+
+
 def test_update_status_false_when_post_returns_none():
     c = DispatchClient("http://d", "t", lambda u, h: [], lambda u, h, p: None)
     item = {"issueId": "iss_1", "repoFullName": "a/b", "number": 1}
@@ -489,6 +496,13 @@ def test_issue_state_none_for_an_unrecognised_state():
     """
     for weird in ("merged", "draft", "locked", "unknown", "OPENISH"):
         assert _client(lambda url, headers: {"state": weird}).issue_state("o/n", 1) is None
+
+
+def test_list_issues_returns_open_snapshots():
+    from bridge.claim import DispatchClient
+    c = DispatchClient("http://d", "tok", lambda url, headers: [{"id": "i", "number": 1}], lambda *args: {})
+    assert c.list_issues()[0]["id"] == "i"
+    assert c.list_issues()[0]["number"] == 1
 
 
 def test_issue_is_parked_when_backlog_or_marker_label_is_present():
