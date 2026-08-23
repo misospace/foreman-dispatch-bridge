@@ -29,7 +29,34 @@ ISSUE_STATES = frozenset({"open", "closed"})
 HttpGet = Callable[[str, dict], object]
 HttpPost = Callable[[str, dict, dict], object]
 
-_RENOVATE_RE = re.compile(r"renovate", re.IGNORECASE)
+# Bridge-side guard for Renovate bot issues, mirroring dispatch's
+# isRenovateIssue (src/lib/issue-filters.ts). The queue already omits these by
+# default (includeRenovate=false); this only covers the gap where a dispatch
+# version or config serves them. It deliberately uses the same narrow criteria
+# — dashboard substrings, update prefixes, bot labels — NOT a bare "renovate"
+# substring, which used to drop every issue *about* Renovate (issue #216).
+# Known trade-off, kept on purpose to stay consistent with dispatch: the
+# `dependencies` label is a criterion here too, so a hand-written issue
+# carrying that label is unclaimable. If that ever bites, change both sides.
+_RENOVATE_TITLE_SUBSTRINGS = ("dependency dashboard", "renovate dashboard")
+_RENOVATE_TITLE_PREFIXES = ("update dep", "update image")
+_RENOVATE_LABELS = frozenset({"renovate", "dependencies", "automated"})
+
+
+def _renovate_reason(item: dict) -> Optional[str]:
+    """Return a skip reason if *item* matches dispatch's Renovate criteria, else None."""
+    title = str(item.get("title") or "").lower()
+    for substring in _RENOVATE_TITLE_SUBSTRINGS:
+        if substring in title:
+            return f"renovate-title-substring:{substring}"
+    for prefix in _RENOVATE_TITLE_PREFIXES:
+        if title.startswith(prefix):
+            return f"renovate-title-prefix:{prefix}"
+    for label in item.get("labels") or []:
+        name = label.get("name") if isinstance(label, dict) else label
+        if isinstance(name, str) and name.lower() in _RENOVATE_LABELS:
+            return f"renovate-label:{name.lower()}"
+    return None
 
 
 def _number(item: dict):
@@ -49,25 +76,40 @@ def _status(item: dict) -> Optional[str]:
 
 
 def select_candidates(items: list, lane: str):
-    """Yield every claimable, ready, lane-matching, non-renovate queue item, in
-    queue (ranked) order. Callers claim them in turn so one un-claimable head
-    item can't hide the rest of the lane."""
+    """Yield every claimable, ready, lane-matching, non-bot queue item, in queue
+    (ranked) order. Items skipped by a bridge-side filter are logged with their
+    issue number and reason (issue #216) — bot-filter skips at INFO, mechanical
+    lane/status/claimable skips at DEBUG — so an empty lane is distinguishable
+    from a filtered one without one INFO line per item per tick. Callers claim
+    them in turn so one un-claimable head item can't hide the rest of the lane."""
     for item in items:
         if not isinstance(item, dict):
             continue
-        if _RENOVATE_RE.search(str(item.get("title") or "")):
-            continue
-        if (_lane(item) or lane) != lane:
-            continue
-        if _status(item) != "status/ready":
-            continue
-        if item.get("claimable") is not True and item.get("agentMatch") is not True:
+        number = _number(item)
+        skip = _renovate_reason(item)
+        # Bot-filter skips are the #216 failure mode (a lane silently starved
+        # by a bridge-side filter), so they log at INFO. The mechanical skips
+        # below are expected noise — dispatch filters lane/status server-side
+        # before the queue reaches us — and log at DEBUG so an unfiltered queue
+        # ever handed to select_candidates doesn't spam one INFO line per item.
+        if skip is None and (_lane(item) or lane) != lane:
+            skip = f"lane-mismatch:{_lane(item)}"
+        if skip is None and _status(item) != "status/ready":
+            skip = f"not-ready:{_status(item)}"
+        if skip is None and item.get("claimable") is not True and item.get("agentMatch") is not True:
+            skip = "not-claimable"
+        if skip is not None:
+            log = logger.info if skip.startswith("renovate-") else logger.debug
+            log(
+                "candidate-skipped",
+                extra={"number": number, "reason": skip, "lane": lane},
+            )
             continue
         yield item
 
 
 def select_item(items: list, lane: str) -> Optional[dict]:
-    """First claimable, ready, lane-matching, non-renovate queue item (or None)."""
+    """First claimable, ready, lane-matching, non-bot queue item (or None)."""
     return next(select_candidates(items, lane), None)
 
 
