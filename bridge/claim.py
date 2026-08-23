@@ -35,6 +35,9 @@ HttpPost = Callable[[str, dict, dict], object]
 # version or config serves them. It deliberately uses the same narrow criteria
 # — dashboard substrings, update prefixes, bot labels — NOT a bare "renovate"
 # substring, which used to drop every issue *about* Renovate (issue #216).
+# Known trade-off, kept on purpose to stay consistent with dispatch: the
+# `dependencies` label is a criterion here too, so a hand-written issue
+# carrying that label is unclaimable. If that ever bites, change both sides.
 _RENOVATE_TITLE_SUBSTRINGS = ("dependency dashboard", "renovate dashboard")
 _RENOVATE_TITLE_PREFIXES = ("update dep", "update image")
 _RENOVATE_LABELS = frozenset({"renovate", "dependencies", "automated"})
