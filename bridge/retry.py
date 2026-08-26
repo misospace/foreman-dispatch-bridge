@@ -10,6 +10,7 @@ from bridge.workload import (
     gate_profile_for,
     _branch_name,
     ATTEMPT_ANNOTATION,
+    INFRA_ATTEMPT_ANNOTATION,
     ISSUE_ID_ANNOTATION,
 )
 
@@ -173,6 +174,7 @@ def _park_exhausted_factory(
     park_for_human: Optional[Callable[[ClaimedItem, str], bool]],
     current_lane_for: Optional[dict],
     lookup_issue_id: Optional[LookupIssueId],
+    needs_human_for: Optional[NeedsHumanFor] = None,
 ) -> Callable[[dict, str], bool]:
     """Build the _park_exhausted closure used by the giveup branches.
 
@@ -180,6 +182,13 @@ def _park_exhausted_factory(
     because the remaining Workloads and the downstream claim/pr-fix passes
     still need to run. The tombstone is left in place either way, so a failed
     park degrades to today's behaviour rather than losing the work.
+
+    If `needs_human_for` is supplied, an issue that is already parked is
+    treated as already-handled and park_for_human is not called again, so a
+    wedged delete_workload (which leaves the tombstone alive and triggers
+    list_failed() to return the same workload on every tick) does not repost
+    the same needs-human escalation comment each tick. This mirrors the
+    dedupe the declared-escalation path already uses.
     """
 
     def _park_exhausted(wl: dict, reason: str) -> bool:
@@ -189,6 +198,9 @@ def _park_exhausted_factory(
             item = refresh_lane(item_from_workload(wl), current_lane_for)
             if not item.issue_id and lookup_issue_id:
                 item = replace(item, issue_id=lookup_issue_id(item) or "")
+            if needs_human_for is not None and needs_human_for(item) is True:
+                # Already parked by an earlier tick — do not double-comment.
+                return True
             return bool(park_for_human(item, reason))
         except Exception:
             logger.exception(
@@ -205,6 +217,20 @@ def attempt_of(wl: dict) -> int:
     ann = (wl.get("metadata") or {}).get("annotations") or {}
     try:
         return max(1, int(ann.get(ATTEMPT_ANNOTATION, "1")))
+    except (TypeError, ValueError):
+        return 1
+
+
+def infra_attempt_of(wl: dict) -> int:
+    """Read the infra-attempt counter off a Workload; absent/garbage -> 1.
+
+    Mirrors ``attempt_of``'s default of 1 so the first infra failure retries
+    as ``retry-infra:1/M`` and the gate fires on the N-th retry rather than
+    the (N+1)-th.
+    """
+    ann = (wl.get("metadata") or {}).get("annotations") or {}
+    try:
+        return max(1, int(ann.get(INFRA_ATTEMPT_ANNOTATION, "1")))
     except (TypeError, ValueError):
         return 1
 
@@ -507,11 +533,12 @@ def reconcile_failures(
     repo_coder_agents = repo_coder_agents or {}
     results = []
     _park_exhausted = _park_exhausted_factory(
-        park_for_human, current_lane_for, lookup_issue_id
+        park_for_human, current_lane_for, lookup_issue_id, needs_human_for
     )
     for wl in list_failed():
         name = (wl.get("metadata") or {}).get("name") or "?"
         attempt = attempt_of(wl)
+        infra_attempt = infra_attempt_of(wl)
         # An ExecutorError on a task's Completed condition means the request
         # never reached the agent (model 403, network drop, etc.) — so the
         # failure is an infrastructure problem and must not consume the
@@ -647,7 +674,7 @@ def reconcile_failures(
                     "human-escalation-not-parked",
                     extra={"workload": name, "reason": reason},
                 )
-        if is_infra and attempt >= infra_max_attempts:
+        if is_infra and infra_attempt >= infra_max_attempts:
             # Infra-error retries have their own budget so a permanently
             # broken backend cannot loop forever. Leave the Failed tombstone
             # in place — escalating to the frontier lane would only pay for
@@ -680,11 +707,22 @@ def reconcile_failures(
                     wl, f"infra failure after {attempt} attempts (e.g. model 403 "
                     "or network error that never reached the agent)",
                 )
-            results.append(f"{name}:giveup-infra:{attempt}/{infra_max_attempts}")
+            results.append(f"{name}:giveup-infra:{infra_attempt}/{infra_max_attempts}")
             # Tombstone is retired only after the issue marker is safely written;
-            # a failed park leaves it for the next tick.
+            # a failed park leaves it for the next tick. The delete itself is
+            # best-effort: a wedged finalizer (LLMKube#949) raises TimeoutError
+            # after 60s, which would otherwise abort the whole reconcile pass
+            # and block every downstream stage. Leaving the tombstone alive is
+            # acceptable — list_failed() returns it next tick, where the wrap
+            # lets the rest of the bridge run again.
             if parked:
-                delete_workload(name)
+                try:
+                    delete_workload(name)
+                except Exception:
+                    logger.exception(
+                        "giveup-infra-delete-failed",
+                        extra={"workload": name},
+                    )
             continue
         if attempt >= max_attempts and not is_infra:
             item = refresh_lane(item_from_workload(wl), current_lane_for)
@@ -723,8 +761,18 @@ def reconcile_failures(
                 results.append(f"{name}:giveup:{attempt}/{max_attempts}")
                 # Same as the infra branch above: a successful park retires the
                 # tombstone so list_failed() does not re-park it next tick.
+                # The delete itself is best-effort: a wedged finalizer
+                # (LLMKube#949) raises TimeoutError after 60s, which would
+                # otherwise abort the whole reconcile pass and block every
+                # downstream stage.
                 if parked:
-                    delete_workload(name)
+                    try:
+                        delete_workload(name)
+                    except Exception:
+                        logger.exception(
+                            "giveup-verdict-delete-failed",
+                            extra={"workload": name},
+                        )
             continue
         item = refresh_lane(item_from_workload(wl), current_lane_for)
         # Backfill issue-id BEFORE the delete so the rebuilt Workload carries
@@ -754,15 +802,23 @@ def reconcile_failures(
             language = gate_profiles.get(item.repo, {}).get("language")
             # Infra errors are not real rejections — the request never reached
             # the agent — so a retry against the same backend must not spend
-            # the verdict budget. Real verdicts increment as before.
-            next_attempt = attempt + 1 if not is_infra else attempt
+            # the verdict budget. Real verdicts increment as before. Infra
+            # failures have their own counter (infra-attempt) so a permanently
+            # broken backend still gives up after INFRA_MAX_ATTEMPTS retries.
+            if is_infra:
+                next_attempt = attempt
+                next_infra_attempt = infra_attempt + 1
+            else:
+                next_attempt = attempt + 1
+                next_infra_attempt = infra_attempt
             manifest = build_workload(
                 item,
                 namespace,
                 gate_profile_for(item.repo, gate_profiles),
                 agent_name,
                 next_attempt,
-                coder_agent_for(
+                infra_attempt=next_infra_attempt,
+                coder_agent=coder_agent_for(
                     item.lane, language, lane_coder_agents, base_coder_agents,
                     repo=item.repo, repo_coder_agents=repo_coder_agents,
                     issue_number=item.issue_number,
@@ -777,7 +833,7 @@ def reconcile_failures(
             results.append(f"{name}:retry-error:{e}")
             continue
         if is_infra:
-            results.append(f"{name}:retry-infra:{attempt}/{infra_max_attempts}")
+            results.append(f"{name}:retry-infra:{infra_attempt}/{infra_max_attempts}")
         else:
             results.append(f"{name}:retry:{attempt + 1}/{max_attempts}")
     return results

@@ -23,6 +23,11 @@ PRFIX_CREATED_BY = "dispatch-bridge-prfix"
 ATTEMPT_ANNOTATION = "foreman.llmkube.dev/attempt"
 ISSUE_ID_ANNOTATION = "foreman.llmkube.dev/issue-id"
 
+# Shared with bridge.main.park_for_human — the parking dedupe is keyed on
+# this label, so the comment + status flip below is a no-op on repeated
+# cycles over the same parked issue.
+NEEDS_HUMAN_LABEL = "needs-human"
+
 ListWorkloads = Callable[[], list]                       # () -> Workload manifests
 ListWorkloadTasks = Callable[[str], list]                # (wl name) -> AgenticTask manifests
 UpdateStatus = Callable[..., bool]  # (item, status, agent[, blocked_reason]) -> success
@@ -104,6 +109,7 @@ def transition_to_in_review(
     list_workload_tasks: ListWorkloadTasks,
     update_status: UpdateStatus,
     agent_name: str,
+    dispatch=None,
 ) -> list[str]:
     """Flip completed bridge Workloads with an open PR to ``status/in-review``.
 
@@ -166,14 +172,61 @@ def transition_to_in_review(
                     results.append(f"{name}:error:{e}")
                 continue
             # GO with no PR is a distinct anomaly: the coder reported success
-            # but no PR exists. Surface it (with commitSHA/branch so an
-            # operator can tell whether commits exist that were never opened
-            # as a PR) without parking the issue silently.
+            # but no PR exists. Park for a human so the loop does not silently
+            # re-run the full pipeline every reconciliation cycle. The reason
+            # records commitSHA/branch so an operator can tell whether the push
+            # failed or the PR step did. ``needs-human`` is the existing
+            # dedupe key: repeated cycles reuse the parked label and skip the
+            # comment, so we never post duplicates.
+            item = _item_from_workload(wl)
+            commit_sha = extra.get("commitSHA") or "none"
+            branch_name = extra.get("branch") or "none"
+            reason = (
+                f"Coder reported GO but no PR was opened "
+                f"(commitSHA={commit_sha}, branch={branch_name})."
+                + (f" {summary}" if summary else "")
+            )
+            repo = item.get("repoFullName") or ""
+            issue_number = int(item.get("number") or 0)
+            already_parked = bool(
+                dispatch
+                and repo
+                and issue_number
+                and dispatch.issue_is_parked(
+                    repo, issue_number, NEEDS_HUMAN_LABEL
+                )
+            )
+            if not already_parked:
+                try:
+                    update_status(item, "backlog", agent_name, reason)
+                except Exception as e:
+                    results.append(f"{name}:error:{e}")
+                    continue
+                if dispatch is not None and repo and issue_number:
+                    try:
+                        dispatch.apply_label(
+                            repo, issue_number, NEEDS_HUMAN_LABEL
+                        )
+                    except Exception:
+                        # Label application is best-effort: the status flip
+                        # above already breaks the reconciliation loop, and a
+                        # second pass will retry the label.
+                        pass
+                    try:
+                        dispatch.comment(
+                            repo,
+                            issue_number,
+                            _parked_for_human_comment(
+                                repo, issue_number, reason
+                            ),
+                        )
+                    except Exception:
+                        pass
             results.append(
-                f"{name}:anomaly:go-no-pr"
-                f":commitSHA={extra.get('commitSHA') or 'none'}"
-                f":branch={extra.get('branch') or 'none'}"
-                + (f":{summary}" if summary else "")
+                f"{name}:parked:go-no-pr"
+                f":commitSHA={commit_sha}"
+                f":branch={branch_name}"
+                + (":replay" if already_parked else "")
             )
             continue
 
@@ -185,3 +238,23 @@ def transition_to_in_review(
             results.append(f"{name}:error:{e}")
 
     return results
+
+
+def _parked_for_human_comment(repo: str, issue_number: int, reason: str) -> str:
+    """Format the ``needs-human`` comment for a parked GO-with-no-PR outcome.
+
+    Mirrors the escalation comment style used by ``bridge.main.park_for_human``
+    so a human reading the issue sees the same shape regardless of which path
+    parked it. Kept local to this file to avoid the circular import
+    ``bridge.main`` would create (it imports this module).
+    """
+    lines = [
+        ":rotating_light: coder reported GO but no PR was opened.",
+        "",
+        f"**Reason:** {reason}",
+        "",
+        f"**Issue:** {repo}#{issue_number}",
+        "This issue is parked for a human. A reconciliation pass will not "
+        "re-claim it while the ``needs-human`` label is present.",
+    ]
+    return "\n".join(lines)

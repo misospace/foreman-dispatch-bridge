@@ -8,7 +8,7 @@ from bridge.retry import (
     reconcile_failures,
     refresh_lane,
 )
-from bridge.workload import ATTEMPT_ANNOTATION, ISSUE_ID_ANNOTATION
+from bridge.workload import ATTEMPT_ANNOTATION, INFRA_ATTEMPT_ANNOTATION, ISSUE_ID_ANNOTATION
 
 
 def _failed_wl(name, repo="misospace/dispatch", issue=7, attempt=None, lane="local", issue_id="id-7"):
@@ -764,14 +764,26 @@ def test_refresh_lane_keeps_every_other_field():
 # budget. See bridge/retry.py reconcile_failures for the full semantics. ---
 
 
-def _failed_wl_with_executor_error(name, attempt, issue_id="iss-9"):
+def _executor_error(reason="ExecutorError", message="model 403"):
+    return {"type": "Completed",
+            "status": "False",
+            "reason": reason,
+            "message": message}
+
+
+def _failed_status(task):
+    """Wrap a single task condition in the taskStatuses container."""
+    return {"taskStatuses": [{"conditions": [task]}]}
+
+
+def _failed_wl_with_executor_error(name, attempt, issue_id="iss-9", infra_attempt=0):
     """A Failed Workload whose task died with Completed.reason=ExecutorError.
 
     Mirrors the production shape observed on 2026-08-16: the agent never
     ran (model 403 / network drop), so the only Completed condition on any
     task has reason=ExecutorError, not a verdict.
     """
-    ann = {ATTEMPT_ANNOTATION: str(attempt)}
+    ann = {ATTEMPT_ANNOTATION: str(attempt), INFRA_ATTEMPT_ANNOTATION: str(infra_attempt)}
     if issue_id:
         ann[ISSUE_ID_ANNOTATION] = issue_id
     return {
@@ -824,6 +836,9 @@ def test_reconcile_retries_executor_error_without_incrementing_attempt():
     rec = _Recorder([wl])
     out = _reconcile(rec)
     assert any("retry-infra:1/" in line for line in out), out
+    assert rec.created[-1]["metadata"]["annotations"][ATTEMPT_ANNOTATION] == "1"
+    # infra_attempt was 1 (default) before the retry and is now 2.
+    assert rec.created[-1]["metadata"]["annotations"][INFRA_ATTEMPT_ANNOTATION] == "2"
     # The rebuilt Workload keeps the same attempt annotation (no increment).
     created = rec.created[-1]
     ann = created["metadata"]["annotations"]
@@ -848,12 +863,11 @@ def test_reconcile_executor_error_does_not_escalate_or_give_up_prematurely():
     assert any("retry-infra:" in line for line in out), out
     assert not any("giveup:" in line for line in out), out
     assert not any("escalated:" in line for line in out), out
-    # Infra cap is reached exactly when attempt == INFRA_MAX_ATTEMPTS, so
-    # the failed workload should give up cleanly without consuming the
-    # verdict counter (attempt stays at INFRA_MAX_ATTEMPTS, not at
-    # DEFAULT_MAX_ATTEMPTS+1).
+    # Infra cap is reached exactly when infra_attempt == INFRA_MAX_ATTEMPTS,
+    # so the failed workload should give up cleanly without consuming the
+    # verdict counter (attempt stays at 1, not at DEFAULT_MAX_ATTEMPTS+1).
     wl_cap = _failed_wl_with_executor_error(
-        "w-infra-cap", attempt=INFRA_MAX_ATTEMPTS,
+        "w-infra-cap", attempt=1, infra_attempt=INFRA_MAX_ATTEMPTS,
     )
     rec2 = _Recorder([wl_cap])
     out2 = _reconcile(rec2)
@@ -874,7 +888,7 @@ def test_reconcile_executor_error_gives_up_after_infra_cap():
     # loop forever. Once it is hit, the Failed tombstone is left in place
     # and the result line is giveup-infra:N/M.
     wl = _failed_wl_with_executor_error(
-        "w-infra-3", attempt=INFRA_MAX_ATTEMPTS,
+        "w-infra-3", attempt=1, infra_attempt=INFRA_MAX_ATTEMPTS,
     )
     rec = _Recorder([wl])
     out = _reconcile(rec)
@@ -887,9 +901,84 @@ def test_reconcile_executor_error_gives_up_after_infra_cap():
     assert rec.created == []
 
 
+def test_reconcile_executor_error_series_reaches_infra_cap():
+    # Regression for #225: hand-constructing the terminal state missed the
+    # defect because the recreate path never advanced infra_attempt. Drive
+    # N consecutive infra failures through reconcile_failures and assert
+    # the give-up happens at exactly INFRA_MAX_ATTEMPTS recreations. Use
+    # only the latest recreated manifest in failed[] so each tick processes
+    # a single workload (otherwise accumulated failures would each be
+    # retried alongside the new one).
+    wl = _failed_wl_with_executor_error("wl-infra-series-9", attempt=1)
+    rec = _Recorder([wl])
+    infra_counters = []
+    for tick in range(INFRA_MAX_ATTEMPTS):
+        # Trim to just the most recently failed manifest so only it is
+        # re-processed this tick.
+        rec.failed = [rec.failed[-1]]
+        out = _reconcile(rec)
+        if tick < INFRA_MAX_ATTEMPTS - 1:
+            # The pre-increment infra_attempt visible on this tick is the
+            # post-increment value of the previous retry: tick 0 sees 1
+            # (default), tick 1 sees 2, tick 2 sees 3 then give-up.
+            expected_pre = tick + 1
+            assert any(
+                f"retry-infra:{expected_pre}/{INFRA_MAX_ATTEMPTS}" in line
+                for line in out
+            ), (tick, out)
+            # The recreated workload must carry the bumped infra_attempt
+            # and an untouched verdict budget — separation invariant.
+            recreated = rec.created[-1]
+            assert recreated["metadata"]["annotations"][ATTEMPT_ANNOTATION] == "1"
+            infra_counters.append(
+                int(recreated["metadata"]["annotations"][INFRA_ATTEMPT_ANNOTATION])
+            )
+            # Feed it back as another infra failure by appending it to the
+            # failed list with the status reset.
+            recreated["status"] = _failed_status(_executor_error())
+            rec.failed.append(recreated)
+        else:
+            # Final tick: cap fires, no further recreate.
+            assert any(
+                f"giveup-infra:{INFRA_MAX_ATTEMPTS}/{INFRA_MAX_ATTEMPTS}" in line
+                for line in out
+            ), (tick, out)
+            # No new manifest was created on the give-up tick.
+            assert len(rec.created) == INFRA_MAX_ATTEMPTS - 1, (
+                f"expected {INFRA_MAX_ATTEMPTS - 1} retries, got {len(rec.created)}"
+            )
+    # The infra_attempt annotation actually advanced across the series —
+    # the precise defect this regression test pins.
+    assert infra_counters == [2, 3], infra_counters
+
+
+def test_reconcile_executor_error_does_not_burn_verdict_budget():
+    # #225 separation invariant: an infra series must not exhaust the verdict
+    # budget. After INFRA_MAX_ATTEMPTS infra failures the verdict attempt
+    # counter must still read 1, so a subsequent genuine verdict failure can
+    # still retry against the normal budget.
+    wl = _failed_wl_with_executor_error("wl-infra-iso-9", attempt=1)
+    rec = _Recorder([wl])
+    for tick in range(INFRA_MAX_ATTEMPTS):
+        out = _reconcile(rec)
+        if tick < INFRA_MAX_ATTEMPTS - 1:
+            assert any("retry-infra:" in line for line in out), out
+            # Feed the just-recreated workload back as another infra failure
+            # by appending it to the recorder's failed list with status reset.
+            recreated = rec.created[-1]
+            recreated["status"] = _failed_status(_executor_error())
+            rec.failed.append(recreated)
+        else:
+            # Final tick: cap fires.
+            assert any("giveup-infra:" in line for line in out), out
+    # The most recently created (infra-recreated) manifest still has
+    # attempt=1 — the verdict budget was never touched.
+    assert rec.created[-1]["metadata"]["annotations"][ATTEMPT_ANNOTATION] == "1"
+
+
 def test_reconcile_task_error_uses_infra_park_hook_and_model():
     tasks = [{"spec": {"agentRef": {"name": "coder"}}, "status": {"conditions": [{"type": "Completed", "reason": "ExecutorError"}]}}]
-    r = _Recorder([_failed_wl("w-task-infra", attempt=1)])
+    r = _Recorder([_failed_wl_with_executor_error("w-task-infra", attempt=1, infra_attempt=1)])
     out = _reconcile(r, attempts=1, infra_max_attempts=1, tasks_for=lambda name: tasks, failed_model_for=lambda name: "model-a", park_infra=lambda item, model, count: True)
     assert any("giveup-infra:1/1" in line for line in out), out
 
@@ -957,7 +1046,9 @@ def _parks():
 
 def test_infra_giveup_parks_the_issue():
     park, parked = _parks()
-    wl = _failed_wl_with_executor_error("w-infra-park", attempt=INFRA_MAX_ATTEMPTS)
+    wl = _failed_wl_with_executor_error(
+        "w-infra-park", attempt=1, infra_attempt=INFRA_MAX_ATTEMPTS,
+    )
     rec = _Recorder([wl])
     out = _reconcile(rec, park_for_human=park)
     assert any("giveup-infra:" in line for line in out), out
@@ -978,6 +1069,66 @@ def test_verdict_giveup_parks_when_escalation_is_unavailable():
     assert "exhausted 3 attempts" in parked[0][1]
     # Same retire-tombstone contract as the infra branch.
     assert rec.deleted == ["wl-a-b-7"]
+
+
+def test_infra_giveup_isolates_a_wedged_delete():
+    """Issue #226: a wedged delete_workload in the infra give-up branch
+    must not abort the reconcile pass. The tombstone surviving is
+    acceptable; list_failed() will return it next tick, and the wrap
+    keeps the rest of the bridge running."""
+
+    def wedged_delete(name):
+        raise TimeoutError(f"finalizer-wedge on {name}")
+
+    park, parked = _parks()
+    wl = _failed_wl_with_executor_error("w-wedge-infra", attempt=INFRA_MAX_ATTEMPTS)
+    rec = _Recorder([wl])
+    rec.delete_workload = wedged_delete  # type: ignore[assignment]
+    # Must not raise — the wrap catches TimeoutError.
+    out = _reconcile(rec, park_for_human=park)
+    assert any("giveup-infra:" in line for line in out), out
+    # Park happened; the delete attempt is what wedged.
+    assert len(parked) == 1, parked
+
+
+def test_verdict_giveup_isolates_a_wedged_delete():
+    """Issue #226: same contract for the verdict give-up branch."""
+
+    def wedged_delete(name):
+        raise TimeoutError(f"finalizer-wedge on {name}")
+
+    park, parked = _parks()
+    rec = _Recorder([_failed_wl("wl-a-b-wedge", attempt=3)])
+    rec.delete_workload = wedged_delete  # type: ignore[assignment]
+    out = _reconcile(rec, park_for_human=park)  # no escalate hook wired
+    assert out == ["wl-a-b-wedge:giveup:3/3"]
+    assert len(parked) == 1, parked
+
+
+def test_giveup_dedupes_park_when_issue_is_already_needs_human():
+    """Issue #226: when needs_human_for already returns True for the
+    item, the give-up branches must not post another escalation comment.
+    The tombstone may still be alive, so list_failed() can return the
+    workload next tick — but no duplicate comment."""
+
+    park_calls: list = []
+
+    def park(item, reason):
+        park_calls.append((item.issue_id, reason))
+        return True
+
+    def needs_human_for(item) -> bool:
+        return True  # already parked from a prior tick
+
+    rec = _Recorder([_failed_wl_with_executor_error("w-dedupe", attempt=INFRA_MAX_ATTEMPTS)])
+    out = _reconcile(rec, park_for_human=park, needs_human_for=needs_human_for)
+    assert any("giveup-infra:" in line for line in out), out
+    # No park_for_human call because the issue was already parked.
+    assert park_calls == [], park_calls
+    # Second tick against the same wedged workload posts no additional comment.
+    rec2 = _Recorder([_failed_wl_with_executor_error("w-dedupe", attempt=INFRA_MAX_ATTEMPTS)])
+    _reconcile(rec2, park_for_human=park, needs_human_for=needs_human_for)
+    assert park_calls == [], park_calls
 
 
 def test_parked_workload_is_not_re_parked_on_subsequent_tick():

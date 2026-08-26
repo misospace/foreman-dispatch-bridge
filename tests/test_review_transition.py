@@ -263,9 +263,9 @@ class TestNoPrVerdictRouting:
         assert any("INCOMPLETE" in line for line in out)
         assert any("tests failing" in line for line in out)
 
-    def test_go_no_pr_surfaces_anomaly_with_commitsha_and_does_not_park(self):
-        """No PR + GO verdict → anomaly surfaced with commitSHA/branch,
-        issue NOT parked (not done, not blocked)."""
+    def test_go_no_pr_parks_for_human_with_commit_info(self):
+        """No PR + GO verdict → parked for a human with reason that records
+        commitSHA/branch. Resting state, not a silent anomaly."""
         updated = []
         out = transition_to_in_review(
             list_workloads=lambda: [_wl("wl-a-b-42")],
@@ -279,14 +279,17 @@ class TestNoPrVerdictRouting:
             update_status=lambda item, status, agent, reason="": updated.append((item, status, agent, reason)),
             agent_name="foreman-coder",
         )
-        assert updated == []
-        assert any("anomaly" in line for line in out)
+        assert len(updated) == 1
+        item, status, agent, reason = updated[0]
+        assert status == "backlog"
+        assert "abc123" in reason
+        assert "fix-42" in reason
+        assert any("parked" in line for line in out)
         assert any("abc123" in line for line in out)
         assert any("fix-42" in line for line in out)
-        assert any("change complete" in line for line in out)
 
-    def test_go_no_pr_without_commit_info_still_surfaces(self):
-        """GO with no PR and no commitSHA/branch → anomaly, no parking."""
+    def test_go_no_pr_without_commit_info_still_parks(self):
+        """GO with no PR and no commitSHA/branch → still parked for a human."""
         updated = []
         out = transition_to_in_review(
             list_workloads=lambda: [_wl("wl-a-b-42")],
@@ -294,8 +297,114 @@ class TestNoPrVerdictRouting:
             update_status=lambda item, status, agent, reason="": updated.append((item, status, agent, reason)),
             agent_name="foreman-coder",
         )
-        assert updated == []
-        assert any("anomaly" in line for line in out)
+        assert len(updated) == 1
+        assert updated[0][1] == "backlog"
+        assert any("parked" in line for line in out)
+
+    def test_go_no_pr_park_posts_label_and_comment_once(self):
+        """First pass with dispatch: applies needs-human label and posts
+        exactly one comment, then transitions status to backlog."""
+        updated = []
+        labels = []
+        comments = []
+
+        class FakeDispatch:
+            def issue_is_parked(self, repo, num, label):
+                return False
+
+            def apply_label(self, repo, num, label):
+                labels.append((repo, num, label))
+
+            def comment(self, repo, num, body):
+                comments.append((repo, num, body))
+
+        out = transition_to_in_review(
+            list_workloads=lambda: [_wl("wl-a-b-42")],
+            list_workload_tasks=lambda name: [
+                _task_with_signal(
+                    verdict="GO",
+                    summary="change complete",
+                    extra={"commitSHA": "abc123", "branch": "fix-42"},
+                )
+            ],
+            update_status=lambda item, status, agent, reason="": updated.append((item, status, agent, reason)),
+            agent_name="foreman-coder",
+            dispatch=FakeDispatch(),
+        )
+        assert len(updated) == 1
+        assert updated[0][1] == "backlog"
+        assert labels == [("misospace/foreman-dispatch-bridge", 42, "needs-human")]
+        assert len(comments) == 1
+        assert "abc123" in comments[0][2]
+        assert "fix-42" in comments[0][2]
+        assert any("parked" in line for line in out)
+
+    def test_go_no_pr_second_pass_is_no_op_when_already_parked(self):
+        """Second pass over the same parked state: dedupe via issue_is_parked
+        skips the comment and the status flip, so no duplicate comments are
+        posted and the issue does not re-enter the coder pipeline."""
+        updated = []
+        labels = []
+        comments = []
+
+        class FakeDispatch:
+            def __init__(self):
+                self._parked = False
+
+            def issue_is_parked(self, repo, num, label):
+                return self._parked
+
+            def apply_label(self, repo, num, label):
+                self._parked = True
+                labels.append((repo, num, label))
+
+            def comment(self, repo, num, body):
+                comments.append((repo, num, body))
+
+        def wl_factory():
+            return [_wl("wl-a-b-42")]
+
+        def tasks_factory(name):
+            return [
+                _task_with_signal(
+                    verdict="GO",
+                    summary="change complete",
+                    extra={"commitSHA": "abc123", "branch": "fix-42"},
+                )
+            ]
+
+        def update_factory(item, status, agent, reason=""):
+            updated.append((item, status, agent, reason))
+
+        # First pass: parks the issue.
+        dispatch = FakeDispatch()
+        transition_to_in_review(
+            list_workloads=wl_factory,
+            list_workload_tasks=tasks_factory,
+            update_status=update_factory,
+            agent_name="foreman-coder",
+            dispatch=dispatch,
+        )
+        assert len(updated) == 1
+        assert len(labels) == 1
+        assert len(comments) == 1
+
+        # Second pass over the same state: must be a no-op for the
+        # side-effects that would post duplicates.
+        out2 = transition_to_in_review(
+            list_workloads=wl_factory,
+            list_workload_tasks=tasks_factory,
+            update_status=update_factory,
+            agent_name="foreman-coder",
+            dispatch=dispatch,
+        )
+        # Status is not flipped again on the second pass.
+        assert len(updated) == 1
+        # No additional label or comment.
+        assert len(labels) == 1
+        assert len(comments) == 1
+        # Result line still records the parked state, with a replay marker.
+        assert any("replay" in line for line in out2)
 
     def test_all_already_resolved_still_goes_to_done(self):
         """AllAlreadyResolved keeps its done path even with a verdict present."""

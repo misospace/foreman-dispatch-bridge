@@ -19,6 +19,7 @@ GATE_PROFILE_WILDCARD = "*"
 # Annotation keys the bridge stamps on each Workload so the failed-workload
 # retry loop can read attempt count + the dispatch identity needed to unclaim.
 ATTEMPT_ANNOTATION = "foreman.llmkube.dev/attempt"
+INFRA_ATTEMPT_ANNOTATION = "foreman.llmkube.dev/infra-attempt"
 SIGNATURE_ANNOTATION = "foreman.llmkube.dev/failure-signature"
 PROGRESS_ANNOTATION = "foreman.llmkube.dev/progress-attempts"
 ISSUE_ID_ANNOTATION = "foreman.llmkube.dev/issue-id"
@@ -430,6 +431,7 @@ def build_workload(
     gate_profile: dict | None = None,
     agent_name: str = "",
     attempt: int = 1,
+    infra_attempt: int = 1,
     coder_agent: str = CODER_AGENT,
     feedback: str = "",
     revision_coder_agent: str = "",
@@ -509,10 +511,13 @@ def build_workload(
             "name": workload_name(item),
             "namespace": namespace,
             "labels": {"created-by": "dispatch-bridge", "lane": item.lane},
-            # attempt drives the retry cap; issue-id + agent-name let the retry
-            # loop unclaim the dispatch issue when retries are exhausted.
+            # attempt drives the verdict retry cap; infra-attempt is a separate
+            # counter for infra-classified failures so the verdict budget is not
+            # burned by persistent backend errors. issue-id + agent-name let the
+            # retry loop unclaim the dispatch issue when retries are exhausted.
             "annotations": {
                 ATTEMPT_ANNOTATION: str(attempt),
+                INFRA_ATTEMPT_ANNOTATION: str(infra_attempt),
                 ISSUE_ID_ANNOTATION: item.issue_id,
                 AGENT_NAME_ANNOTATION: agent_name,
             },
