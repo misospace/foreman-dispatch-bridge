@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.7.2](https://github.com/misospace/foreman-dispatch-bridge/compare/v0.7.1...v0.7.2) (2026-08-26)
+
+
+### Bug Fixes
+
+* drop the orphan .rc-check gitlink ([#223](https://github.com/misospace/foreman-dispatch-bridge/issues/223)) ([c62a4b1](https://github.com/misospace/foreman-dispatch-bridge/commit/c62a4b14990e2bf02b92beaf5c450b45d5ef759b))
+* send a reason when parking an issue as blocked ([#224](https://github.com/misospace/foreman-dispatch-bridge/issues/224)) ([1b63225](https://github.com/misospace/foreman-dispatch-bridge/commit/1b63225fcfcdd6bcba0b52b0aaeb948706d031a1))
+
+
+### Chores
+
+* **renovate:** ensure requirements-dev.txt is scanned by Renovate ([#221](https://github.com/misospace/foreman-dispatch-bridge/issues/221)) ([10a56da](https://github.com/misospace/foreman-dispatch-bridge/commit/10a56daf1959853874ca0fc7b5cd02d92975477c)), closes [#55](https://github.com/misospace/foreman-dispatch-bridge/issues/55)
+
 ## [0.7.1](https://github.com/misospace/foreman-dispatch-bridge/compare/v0.7.0...v0.7.1) (2026-08-23)
 
 
