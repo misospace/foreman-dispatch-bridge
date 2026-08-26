@@ -63,11 +63,11 @@ class TestTransitionToInReview:
         out = transition_to_in_review(
             list_workloads=lambda: [_wl("wl-a-b-42")],
             list_workload_tasks=lambda name: [_task("review", pr_url="https://github.com/a/b/pull/42")],
-            update_status=lambda item, status, agent: updated.append((item, status, agent)),
+            update_status=lambda item, status, agent, reason="": updated.append((item, status, agent, reason)),
             agent_name="foreman-coder",
         )
         assert len(updated) == 1
-        item, status, agent = updated[0]
+        item, status, agent, _reason = updated[0]
         assert status == "in-review"
         assert agent == "foreman-coder"
         assert item["issueId"] == "iss-42"
@@ -82,11 +82,15 @@ class TestTransitionToInReview:
         out = transition_to_in_review(
             list_workloads=lambda: [_wl("wl-a-b-42")],
             list_workload_tasks=lambda name: [_task("review", pr_url=None, verdict=None)],
-            update_status=lambda item, status, agent: updated.append((item, status, agent)),
+            update_status=lambda item, status, agent, reason="": updated.append((item, status, agent, reason)),
             agent_name="foreman-coder",
         )
         assert len(updated) == 1
         assert updated[0][1] == "blocked"
+        # dispatch rejects a park with no reason (400), so the reason must be
+        # carried, not left for a human to reconstruct.
+        assert updated[0][3].strip()
+        assert "absent" in updated[0][3]
         assert any("blocked" in line for line in out)
 
     def test_transitions_already_resolved_workload_to_done(self):
@@ -96,11 +100,11 @@ class TestTransitionToInReview:
         out = transition_to_in_review(
             list_workloads=lambda: [_wl_already_resolved("wl-a-b-42")],
             list_workload_tasks=lambda name: [_task("issue-fix", pr_url=None)],
-            update_status=lambda item, status, agent: updated.append((item, status, agent)),
+            update_status=lambda item, status, agent, reason="": updated.append((item, status, agent, reason)),
             agent_name="foreman-coder",
         )
         assert len(updated) == 1
-        item, status, agent = updated[0]
+        item, status, agent, _reason = updated[0]
         assert status == "done"
         assert agent == "foreman-coder"
         assert item["issueId"] == "iss-42"
@@ -116,7 +120,7 @@ class TestTransitionToInReview:
         out = transition_to_in_review(
             list_workloads=lambda: [wl],
             list_workload_tasks=lambda name: [_task("review", pr_url="https://github.com/a/b/pull/42")],
-            update_status=lambda item, status, agent: updated.append((item, status, agent)),
+            update_status=lambda item, status, agent, reason="": updated.append((item, status, agent, reason)),
             agent_name="foreman-coder",
         )
         assert len(updated) == 1
@@ -125,7 +129,7 @@ class TestTransitionToInReview:
 
     def test_already_resolved_update_status_failure_is_caught(self):
         """A failed update_status on the already-resolved path is logged, not fatal."""
-        def fail_update(item, status, agent):
+        def fail_update(item, status, agent, reason=""):
             raise RuntimeError("API down")
         out = transition_to_in_review(
             list_workloads=lambda: [_wl_already_resolved("wl-a-b-42")],
@@ -141,7 +145,7 @@ class TestTransitionToInReview:
         out = transition_to_in_review(
             list_workloads=lambda: [_wl("wl-a-b-42", phase="Dispatched")],
             list_workload_tasks=lambda name: [_task("review", pr_url="https://github.com/a/b/pull/42")],
-            update_status=lambda item, status, agent: updated.append((item, status, agent)),
+            update_status=lambda item, status, agent, reason="": updated.append((item, status, agent, reason)),
             agent_name="foreman-coder",
         )
         assert updated == []
@@ -156,7 +160,7 @@ class TestTransitionToInReview:
         out = transition_to_in_review(
             list_workloads=lambda: [wl],
             list_workload_tasks=lambda name: [_task("review", pr_url="https://github.com/a/b/pull/42")],
-            update_status=lambda item, status, agent: updated.append((item, status, agent)),
+            update_status=lambda item, status, agent, reason="": updated.append((item, status, agent, reason)),
             agent_name="foreman-coder",
         )
         assert updated == []
@@ -173,7 +177,7 @@ class TestTransitionToInReview:
         out = transition_to_in_review(
             list_workloads=lambda: wls,
             list_workload_tasks=lambda name: tasks_map.get(name, []),
-            update_status=lambda item, status, agent: updated.append((item, status, agent)),
+            update_status=lambda item, status, agent, reason="": updated.append((item, status, agent, reason)),
             agent_name="foreman-coder",
         )
         assert len(updated) == 2
@@ -185,7 +189,7 @@ class TestTransitionToInReview:
 
     def test_update_status_failure_is_caught(self):
         """A failed update_status call is logged, not fatal."""
-        def fail_update(item, status, agent):
+        def fail_update(item, status, agent, reason=""):
             raise RuntimeError("API down")
         out = transition_to_in_review(
             list_workloads=lambda: [_wl("wl-a-b-42")],
@@ -212,7 +216,7 @@ class TestTransitionToInReview:
         transition_to_in_review(
             list_workloads=lambda: [_wl("wl-a-b-42")],
             list_workload_tasks=lambda name: [_task("issue-fix", pr_url="https://github.com/a/b/pull/42")],
-            update_status=lambda item, status, agent: updated.append((item, status, agent)),
+            update_status=lambda item, status, agent, reason="": updated.append((item, status, agent, reason)),
             agent_name="foreman-coder",
         )
         assert len(updated) == 1
@@ -246,11 +250,11 @@ class TestNoPrVerdictRouting:
             list_workload_tasks=lambda name: [
                 _task_with_signal(verdict="INCOMPLETE", summary="tests failing")
             ],
-            update_status=lambda item, status, agent: updated.append((item, status, agent)),
+            update_status=lambda item, status, agent, reason="": updated.append((item, status, agent, reason)),
             agent_name="foreman-coder",
         )
         assert len(updated) == 1
-        item, status, agent = updated[0]
+        item, status, agent, _reason = updated[0]
         assert status == "blocked"
         assert agent == "foreman-coder"
         assert item["issueId"] == "iss-42"
@@ -272,7 +276,7 @@ class TestNoPrVerdictRouting:
                     extra={"commitSHA": "abc123", "branch": "fix-42"},
                 )
             ],
-            update_status=lambda item, status, agent: updated.append((item, status, agent)),
+            update_status=lambda item, status, agent, reason="": updated.append((item, status, agent, reason)),
             agent_name="foreman-coder",
         )
         assert updated == []
@@ -287,7 +291,7 @@ class TestNoPrVerdictRouting:
         out = transition_to_in_review(
             list_workloads=lambda: [_wl("wl-a-b-42")],
             list_workload_tasks=lambda name: [_task_with_signal(verdict="GO")],
-            update_status=lambda item, status, agent: updated.append((item, status, agent)),
+            update_status=lambda item, status, agent, reason="": updated.append((item, status, agent, reason)),
             agent_name="foreman-coder",
         )
         assert updated == []
@@ -302,7 +306,7 @@ class TestNoPrVerdictRouting:
             list_workload_tasks=lambda name: [
                 _task_with_signal(verdict="INCOMPLETE", summary="no fix attempted")
             ],
-            update_status=lambda item, status, agent: updated.append((item, status, agent)),
+            update_status=lambda item, status, agent, reason="": updated.append((item, status, agent, reason)),
             agent_name="foreman-coder",
         )
         assert len(updated) == 1
@@ -312,7 +316,7 @@ class TestNoPrVerdictRouting:
     def test_raising_dispatch_call_still_returns_result_line(self):
         """Fails open: a raising update_status on the park path appends an
         error result line and does not abort the pass."""
-        def fail_update(item, status, agent):
+        def fail_update(item, status, agent, reason=""):
             raise RuntimeError("API down")
         out = transition_to_in_review(
             list_workloads=lambda: [_wl("wl-a-b-42")],
@@ -331,7 +335,7 @@ class TestNoPrVerdictRouting:
         out = transition_to_in_review(
             list_workloads=lambda: [_wl("wl-a-b-42")],
             list_workload_tasks=lambda name: [_task_with_signal()],
-            update_status=lambda item, status, agent: updated.append((item, status, agent)),
+            update_status=lambda item, status, agent, reason="": updated.append((item, status, agent, reason)),
             agent_name="foreman-coder",
         )
         assert len(updated) == 1

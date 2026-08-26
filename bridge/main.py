@@ -1082,7 +1082,9 @@ def run_tick(
     for line in transition_to_in_review(
         list_bridge_workloads,
         lambda name: list_workload_tasks(name),
-        lambda item, status, agent: dispatch.update_status(item, status, agent),
+        lambda item, status, agent, reason="": dispatch.update_status(
+            item, status, agent, reason
+        ),
         cfg.agent_name,
     ):
         logger.info(line)

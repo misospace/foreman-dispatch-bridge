@@ -25,7 +25,7 @@ ISSUE_ID_ANNOTATION = "foreman.llmkube.dev/issue-id"
 
 ListWorkloads = Callable[[], list]                       # () -> Workload manifests
 ListWorkloadTasks = Callable[[str], list]                # (wl name) -> AgenticTask manifests
-UpdateStatus = Callable[[dict, str, str], bool]          # (item, status, agent) -> success
+UpdateStatus = Callable[..., bool]  # (item, status, agent[, blocked_reason]) -> success
 
 
 def _workload_is_completed(wl: dict) -> bool:
@@ -149,8 +149,15 @@ def transition_to_in_review(
                 # circulation so it stops being re-claimed. "blocked" is the
                 # status that does this today (see update_status in claim.py).
                 item = _item_from_workload(wl)
+                # dispatch requires a reason to park an issue as blocked, and
+                # rejects the call outright without one. Carry the verdict and
+                # summary we already have rather than leaving a human to guess
+                # why this landed in the blocked column.
+                reason = f"Coder returned verdict {verdict or 'absent'} with no PR"
+                if summary:
+                    reason = f"{reason}: {summary}"
                 try:
-                    update_status(item, "blocked", agent_name)
+                    update_status(item, "blocked", agent_name, reason)
                     results.append(
                         f"{name}:blocked:no-pr:verdict={verdict or 'absent'}"
                         + (f":{summary}" if summary else "")
