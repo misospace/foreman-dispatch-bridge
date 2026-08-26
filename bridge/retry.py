@@ -10,6 +10,7 @@ from bridge.workload import (
     gate_profile_for,
     _branch_name,
     ATTEMPT_ANNOTATION,
+    INFRA_ATTEMPT_ANNOTATION,
     ISSUE_ID_ANNOTATION,
 )
 
@@ -205,6 +206,20 @@ def attempt_of(wl: dict) -> int:
     ann = (wl.get("metadata") or {}).get("annotations") or {}
     try:
         return max(1, int(ann.get(ATTEMPT_ANNOTATION, "1")))
+    except (TypeError, ValueError):
+        return 1
+
+
+def infra_attempt_of(wl: dict) -> int:
+    """Read the infra-attempt counter off a Workload; absent/garbage -> 1.
+
+    Mirrors ``attempt_of``'s default of 1 so the first infra failure retries
+    as ``retry-infra:1/M`` and the gate fires on the N-th retry rather than
+    the (N+1)-th.
+    """
+    ann = (wl.get("metadata") or {}).get("annotations") or {}
+    try:
+        return max(1, int(ann.get(INFRA_ATTEMPT_ANNOTATION, "1")))
     except (TypeError, ValueError):
         return 1
 
@@ -512,6 +527,7 @@ def reconcile_failures(
     for wl in list_failed():
         name = (wl.get("metadata") or {}).get("name") or "?"
         attempt = attempt_of(wl)
+        infra_attempt = infra_attempt_of(wl)
         # An ExecutorError on a task's Completed condition means the request
         # never reached the agent (model 403, network drop, etc.) — so the
         # failure is an infrastructure problem and must not consume the
@@ -647,7 +663,7 @@ def reconcile_failures(
                     "human-escalation-not-parked",
                     extra={"workload": name, "reason": reason},
                 )
-        if is_infra and attempt >= infra_max_attempts:
+        if is_infra and infra_attempt >= infra_max_attempts:
             # Infra-error retries have their own budget so a permanently
             # broken backend cannot loop forever. Leave the Failed tombstone
             # in place — escalating to the frontier lane would only pay for
@@ -680,7 +696,7 @@ def reconcile_failures(
                     wl, f"infra failure after {attempt} attempts (e.g. model 403 "
                     "or network error that never reached the agent)",
                 )
-            results.append(f"{name}:giveup-infra:{attempt}/{infra_max_attempts}")
+            results.append(f"{name}:giveup-infra:{infra_attempt}/{infra_max_attempts}")
             # Tombstone is retired only after the issue marker is safely written;
             # a failed park leaves it for the next tick.
             if parked:
@@ -754,15 +770,23 @@ def reconcile_failures(
             language = gate_profiles.get(item.repo, {}).get("language")
             # Infra errors are not real rejections — the request never reached
             # the agent — so a retry against the same backend must not spend
-            # the verdict budget. Real verdicts increment as before.
-            next_attempt = attempt + 1 if not is_infra else attempt
+            # the verdict budget. Real verdicts increment as before. Infra
+            # failures have their own counter (infra-attempt) so a permanently
+            # broken backend still gives up after INFRA_MAX_ATTEMPTS retries.
+            if is_infra:
+                next_attempt = attempt
+                next_infra_attempt = infra_attempt + 1
+            else:
+                next_attempt = attempt + 1
+                next_infra_attempt = infra_attempt
             manifest = build_workload(
                 item,
                 namespace,
                 gate_profile_for(item.repo, gate_profiles),
                 agent_name,
                 next_attempt,
-                coder_agent_for(
+                infra_attempt=next_infra_attempt,
+                coder_agent=coder_agent_for(
                     item.lane, language, lane_coder_agents, base_coder_agents,
                     repo=item.repo, repo_coder_agents=repo_coder_agents,
                     issue_number=item.issue_number,
@@ -777,7 +801,7 @@ def reconcile_failures(
             results.append(f"{name}:retry-error:{e}")
             continue
         if is_infra:
-            results.append(f"{name}:retry-infra:{attempt}/{infra_max_attempts}")
+            results.append(f"{name}:retry-infra:{infra_attempt}/{infra_max_attempts}")
         else:
             results.append(f"{name}:retry:{attempt + 1}/{max_attempts}")
     return results
