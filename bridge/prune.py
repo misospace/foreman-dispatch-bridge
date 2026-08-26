@@ -30,6 +30,11 @@ def terminal_since_key(phase: str) -> str:
 ListWorkloads = Callable[[], list]      # () -> list of Workload manifests (dicts)
 DeleteWorkload = Callable[[str], None]  # (name) -> None
 ResetIssue = Callable[[dict], None]     # (workload_manifest) -> None (return ignored)
+# Predicate that returns True for a Failed Workload whose underlying issue is
+# parked for a human and must NOT be reset back to "ready" by prune. Used to
+# stop the declared-escalation path (bridge/retry.py:617-645) and exhausted
+# attempts (retry.py:716) from being re-claimed every TTL (#227).
+IsParkedForHuman = Callable[[dict], bool]
 
 
 def _parse_ts(ts: Optional[str]) -> Optional[datetime]:
@@ -150,6 +155,7 @@ def prune_workloads(
     completed_ttl_seconds: int = 0,
     failed_ttl_seconds: int = 0,
     reset_issue: Optional[ResetIssue] = None,
+    is_parked_for_human: Optional[IsParkedForHuman] = None,
 ):
     """Delete terminal bridge Workloads past their per-phase TTL, yielding a log
     line per deletion. Runs last in the tick, after reconcile has already
@@ -161,6 +167,13 @@ def prune_workloads(
     workload manifest is passed to the callback so it can extract identity
     (issueId, repo, issueNumber, agentName) from annotations and spec.
     Completed Workloads are NOT reset (their PR already exists).
+
+    When *is_parked_for_human* is provided, a Failed Workload whose issue is
+    parked for a human (carries the needs-human marker or was parked by the
+    declared-escalation path in retry.py) has its tombstone retired without
+    resetting the issue. The human left the issue parked on purpose; flipping
+    it back to "ready" re-runs the coder every TTL and burns an attempt budget
+    we have already spent (issue #227).
     """
     if completed_ttl_seconds <= 0 and failed_ttl_seconds <= 0:
         return
@@ -175,6 +188,21 @@ def prune_workloads(
             yield f"prune:deleted:{name}"
         except Exception as e:  # best-effort GC; never break the tick on a delete
             yield f"prune:delete-failed:{name}:{e}"
+
+        if phase == FAILED_PHASE and is_parked_for_human is not None:
+            wl = wl_by_name.get(name) or {}
+            try:
+                parked = bool(is_parked_for_human(wl))
+            except Exception as e:  # best-effort; treat callback failure as "not parked"
+                yield f"prune:parked-check-failed:{name}:{e}"
+                parked = False
+            if parked:
+                # Tombstone is already deleted above; skipping reset_issue keeps
+                # the parked issue where the human was meant to find it. This is
+                # how exhaustion survives a Workload delete: the issue's
+                # needs-human label is the durable signal, not the annotation.
+                yield f"prune:reset-issue-skipped-parked:{name}"
+                continue
 
         if reset_issue is not None and phase == FAILED_PHASE:
             wl = wl_by_name.get(name) or {}
