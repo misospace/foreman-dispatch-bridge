@@ -1081,7 +1081,9 @@ def test_infra_giveup_isolates_a_wedged_delete():
         raise TimeoutError(f"finalizer-wedge on {name}")
 
     park, parked = _parks()
-    wl = _failed_wl_with_executor_error("w-wedge-infra", attempt=INFRA_MAX_ATTEMPTS)
+    wl = _failed_wl_with_executor_error(
+        "w-wedge-infra", attempt=1, infra_attempt=INFRA_MAX_ATTEMPTS,
+    )
     rec = _Recorder([wl])
     rec.delete_workload = wedged_delete  # type: ignore[assignment]
     # Must not raise — the wrap catches TimeoutError.
@@ -1120,13 +1122,17 @@ def test_giveup_dedupes_park_when_issue_is_already_needs_human():
     def needs_human_for(item) -> bool:
         return True  # already parked from a prior tick
 
-    rec = _Recorder([_failed_wl_with_executor_error("w-dedupe", attempt=INFRA_MAX_ATTEMPTS)])
+    rec = _Recorder([_failed_wl_with_executor_error(
+        "w-dedupe", attempt=1, infra_attempt=INFRA_MAX_ATTEMPTS,
+    )])
     out = _reconcile(rec, park_for_human=park, needs_human_for=needs_human_for)
     assert any("giveup-infra:" in line for line in out), out
     # No park_for_human call because the issue was already parked.
     assert park_calls == [], park_calls
     # Second tick against the same wedged workload posts no additional comment.
-    rec2 = _Recorder([_failed_wl_with_executor_error("w-dedupe", attempt=INFRA_MAX_ATTEMPTS)])
+    rec2 = _Recorder([_failed_wl_with_executor_error(
+        "w-dedupe", attempt=1, infra_attempt=INFRA_MAX_ATTEMPTS,
+    )])
     _reconcile(rec2, park_for_human=park, needs_human_for=needs_human_for)
     assert park_calls == [], park_calls
 
