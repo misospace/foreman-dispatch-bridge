@@ -2,5 +2,13 @@
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
   "extends": [
     "local>misospace/renovate-config"
+  ],
+  "packageRules": [
+    {
+      "description": "Ensure dev-only requirements are scanned and updated by Renovate",
+      "matchManagers": ["pip_requirements"],
+      "matchFileNames": ["requirements-dev.txt"],
+      "enabled": true
+    }
   ]
 }
