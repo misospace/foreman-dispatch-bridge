@@ -1071,6 +1071,66 @@ def test_verdict_giveup_parks_when_escalation_is_unavailable():
     assert rec.deleted == ["wl-a-b-7"]
 
 
+def test_infra_giveup_isolates_a_wedged_delete():
+    """Issue #226: a wedged delete_workload in the infra give-up branch
+    must not abort the reconcile pass. The tombstone surviving is
+    acceptable; list_failed() will return it next tick, and the wrap
+    keeps the rest of the bridge running."""
+
+    def wedged_delete(name):
+        raise TimeoutError(f"finalizer-wedge on {name}")
+
+    park, parked = _parks()
+    wl = _failed_wl_with_executor_error("w-wedge-infra", attempt=INFRA_MAX_ATTEMPTS)
+    rec = _Recorder([wl])
+    rec.delete_workload = wedged_delete  # type: ignore[assignment]
+    # Must not raise — the wrap catches TimeoutError.
+    out = _reconcile(rec, park_for_human=park)
+    assert any("giveup-infra:" in line for line in out), out
+    # Park happened; the delete attempt is what wedged.
+    assert len(parked) == 1, parked
+
+
+def test_verdict_giveup_isolates_a_wedged_delete():
+    """Issue #226: same contract for the verdict give-up branch."""
+
+    def wedged_delete(name):
+        raise TimeoutError(f"finalizer-wedge on {name}")
+
+    park, parked = _parks()
+    rec = _Recorder([_failed_wl("wl-a-b-wedge", attempt=3)])
+    rec.delete_workload = wedged_delete  # type: ignore[assignment]
+    out = _reconcile(rec, park_for_human=park)  # no escalate hook wired
+    assert out == ["wl-a-b-wedge:giveup:3/3"]
+    assert len(parked) == 1, parked
+
+
+def test_giveup_dedupes_park_when_issue_is_already_needs_human():
+    """Issue #226: when needs_human_for already returns True for the
+    item, the give-up branches must not post another escalation comment.
+    The tombstone may still be alive, so list_failed() can return the
+    workload next tick — but no duplicate comment."""
+
+    park_calls: list = []
+
+    def park(item, reason):
+        park_calls.append((item.issue_id, reason))
+        return True
+
+    def needs_human_for(item) -> bool:
+        return True  # already parked from a prior tick
+
+    rec = _Recorder([_failed_wl_with_executor_error("w-dedupe", attempt=INFRA_MAX_ATTEMPTS)])
+    out = _reconcile(rec, park_for_human=park, needs_human_for=needs_human_for)
+    assert any("giveup-infra:" in line for line in out), out
+    # No park_for_human call because the issue was already parked.
+    assert park_calls == [], park_calls
+    # Second tick against the same wedged workload posts no additional comment.
+    rec2 = _Recorder([_failed_wl_with_executor_error("w-dedupe", attempt=INFRA_MAX_ATTEMPTS)])
+    _reconcile(rec2, park_for_human=park, needs_human_for=needs_human_for)
+    assert park_calls == [], park_calls
+
+
 def test_parked_workload_is_not_re_parked_on_subsequent_tick():
     # The acceptance criterion for #176: once park_for_human has succeeded
     # for a Failed Workload, the tombstone is deleted so list_failed() does
