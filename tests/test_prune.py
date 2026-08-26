@@ -88,6 +88,134 @@ def test_stamp_terminal_since_is_idempotent():
     ] == (NOW - timedelta(hours=10)).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+# --- Regression for issue #227 ---
+# A declared-escalation issue parked for a human (or one whose attempts are
+# exhausted) is parked on purpose. prune_workloads must retire the Failed
+# Workload tombstone without resetting the issue to "ready" -- otherwise the
+# coder re-runs every TTL, burning an attempt budget we have already spent.
+
+
+def _failure_wl(name, *, hours_old=49):
+    """Failed Workload past the 48h prune TTL, attached to a real issue."""
+    md = {"name": name, "creationTimestamp": _ago(hours_old + 24)}
+    md["labels"] = {"created-by": "dispatch-bridge"}
+    md["annotations"] = {
+        terminal_since_key("Failed"): _ago(hours_old),
+        "foreman.llmkube.dev/repo": "misospace/foreman-dispatch-bridge",
+        "foreman.llmkube.dev/issueNumber": "227",
+    }
+    return {
+        "metadata": md,
+        "status": {"phase": "Failed"},
+        "spec": {"repo": "misospace/foreman-dispatch-bridge", "issues": ["227"]},
+    }
+
+
+def test_prune_skips_reset_when_issue_parked_for_human():
+    """Prune retires the tombstone but does NOT reset the parked issue.
+
+    Regression for issue #227: declared-escalation Workloads that were parked
+    in backlog for a human were being reset to ``ready`` by prune every TTL,
+    so the coder re-ran the same issue forever. The is_parked_for_human
+    callback is the durable signal that the issue carries the ``needs-human``
+    label (set by retry.py on the declared-escalation and exhausted paths).
+    """
+    deleted = []
+    resets = []
+
+    def list_workloads():
+        return [_failure_wl("w-parked")]
+
+    def delete_workload(name):
+        deleted.append(name)
+
+    def reset_issue(wl):
+        resets.append(wl["metadata"]["name"])
+
+    def is_parked_for_human(wl):
+        # Pretend the issue still carries the needs-human label -- the durable
+        # marker that bridges Workload deletes.
+        return wl.get("metadata", {}).get("name") == "w-parked"
+
+    log = list(prune_workloads(
+        list_workloads,
+        delete_workload,
+        now=NOW,
+        failed_ttl_seconds=int(timedelta(hours=48).total_seconds()),
+        reset_issue=reset_issue,
+        is_parked_for_human=is_parked_for_human,
+    ))
+
+    assert deleted == ["w-parked"], log
+    assert resets == [], "parked Failed must not be reset to ready"
+    assert any(line == "prune:reset-issue-skipped-parked:w-parked" for line in log), log
+
+
+def test_prune_resets_ordinary_failed_workload():
+    """Sanity guard: the parked-skip does not regress ordinary Failed GC.
+
+    A plain (not-parked) Failed Workload past the TTL must still be reset, so
+    the coder can pick it up next tick. This is the behaviour #227 explicitly
+    preserves.
+    """
+    deleted = []
+    resets = []
+
+    def list_workloads():
+        return [_failure_wl("w-plain")]
+
+    def delete_workload(name):
+        deleted.append(name)
+
+    def reset_issue(wl):
+        resets.append(wl["metadata"]["name"])
+
+    def is_parked_for_human(wl):
+        # Nothing parked -- plain retryable failure.
+        return False
+
+    log = list(prune_workloads(
+        list_workloads,
+        delete_workload,
+        now=NOW,
+        failed_ttl_seconds=int(timedelta(hours=48).total_seconds()),
+        reset_issue=reset_issue,
+        is_parked_for_human=is_parked_for_human,
+    ))
+
+    assert deleted == ["w-plain"], log
+    assert resets == ["w-plain"], log
+    assert not any("skipped-parked" in line for line in log), log
+
+
+def test_prune_without_is_parked_for_human_preserves_legacy_behaviour():
+    """Backward-compat: callers that do not pass the new callback see the same
+    reset behaviour as before, since they have not opted in to the parked
+    detection. Wired-up callers (bridge/main.py) pass the callback."""
+    deleted = []
+    resets = []
+
+    def list_workloads():
+        return [_failure_wl("w-legacy")]
+
+    def delete_workload(name):
+        deleted.append(name)
+
+    def reset_issue(wl):
+        resets.append(wl["metadata"]["name"])
+
+    log = list(prune_workloads(
+        list_workloads,
+        delete_workload,
+        now=NOW,
+        failed_ttl_seconds=int(timedelta(hours=48).total_seconds()),
+        reset_issue=reset_issue,
+    ))
+
+    assert deleted == ["w-legacy"], log
+    assert resets == ["w-legacy"], log
+
+
 def test_stamp_terminal_since_noop_for_non_terminal_phase():
     wl = _wl("w", "Dispatched")
     assert stamp_terminal_since(wl, now=NOW) is None
