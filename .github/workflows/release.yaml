@@ -96,4 +96,15 @@ jobs:
       - name: GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --title "$GITHUB_REF_NAME" --generate-notes
+        # release-please already creates the GitHub release when it cuts the
+        # tag, and `gh release create` fails when one exists. That failed on
+        # every release, so this job was permanently red and told us nothing:
+        # v0.7.2 failed at the Trivy scan and published no image, and looked
+        # exactly like v0.7.1, which failed here after publishing fine. Create
+        # only when the release is missing, i.e. for a hand-pushed tag.
+        run: |
+          if gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "release $GITHUB_REF_NAME already exists (created by release-please)"
+            exit 0
+          fi
+          gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --title "$GITHUB_REF_NAME" --generate-notes
