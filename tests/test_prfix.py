@@ -397,9 +397,11 @@ def test_reconcile_default_pr_is_mergeable_preserves_prior_behavior():
     assert out == ["prfix-o-r-5:fixed"]
 
 
-def test_reconcile_succeeded_mark_fails_at_max_gives_up_blocked():
-    """When mark_pr_fix(FIXED) keeps failing at the attempt cap, stop retrying
-    and mark BLOCKED so the PR doesn't sit stuck forever."""
+def test_reconcile_succeeded_mark_fails_at_max_keeps_tombstone():
+    """When mark_pr_fix(FIXED) keeps failing even at the attempt cap, the mark
+    failure is still an infrastructure problem (Dispatch unavailable), not a
+    code problem. Keep the tombstone and retry the mark next tick, without
+    re-running the coder or spending an attempt. (#228)"""
     marks, deleted, created = [], [], []
     def _mark(repo, pr, status, note):
         marks.append((repo, pr, status, note))
@@ -410,16 +412,19 @@ def test_reconcile_succeeded_mark_fails_at_max_gives_up_blocked():
         mark_pr_fix=_mark,
         max_attempts=3,
     )
-    # First call was mark FIXED (failed), second is mark BLOCKED
-    assert marks[0][:3] == ("o/r", 5, "FIXED")
-    assert marks[1][:3] == ("o/r", 5, "BLOCKED")  # gave up, surfaced BLOCKED
-    assert out == ["prfix-o-r-5:giveup:3/3"]
-    assert deleted == []                          # tombstone kept
+    # Tombstone kept: no delete, no recreate (coder does NOT re-run)
+    assert deleted == []
+    assert created == []
+    # Only mark FIXED was attempted (and failed); no BLOCKED mark
+    assert marks == [("o/r", 5, "FIXED", "foreman fix Workload prfix-o-r-5 succeeded")]
+    assert out == ["prfix-o-r-5:mark-failed:3/3"]
 
 
-def test_reconcile_succeeded_mark_fails_under_max_retries():
-    """When mark_pr_fix(FIXED) fails but we're under the attempt cap,
-    delete + recreate so the next tick gets a fresh attempt."""
+def test_reconcile_succeeded_mark_fails_under_max_keeps_tombstone():
+    """When mark_pr_fix(FIXED) fails but the PR is mergeable, the mark failure
+    is an infrastructure problem (Dispatch unavailable), not a code problem.
+    Keep the tombstone so the next tick retries the mark, without re-running
+    the coder or spending an attempt. (#228)"""
     marks, deleted, created = [], [], []
     def _mark(repo, pr, status, note):
         marks.append((repo, pr, status, note))
@@ -430,10 +435,11 @@ def test_reconcile_succeeded_mark_fails_under_max_retries():
         mark_pr_fix=_mark,
         max_attempts=3,
     )
-    assert deleted == ["prfix-o-r-5"]
-    assert created[0]["metadata"]["annotations"]["foreman.llmkube.dev/attempt"] == "2"
-    assert out == ["prfix-o-r-5:retry:2/3"]
-    # mark FIXED was attempted (and failed), then retry path taken
+    # Tombstone kept: no delete, no recreate (coder does NOT re-run)
+    assert deleted == []
+    assert created == []
+    assert out == ["prfix-o-r-5:mark-failed:1/3"]
+    # mark FIXED was attempted (and failed), then the mark-failed path taken
     assert marks == [("o/r", 5, "FIXED", "foreman fix Workload prfix-o-r-5 succeeded")]
 
 

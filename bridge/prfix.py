@@ -355,12 +355,21 @@ def reconcile_pr_fixes(list_prfix_workloads, delete_workload, create_workload,
                 continue
 
             ok = False
+            mark_failed = False
             if phase in ("Succeeded", "Completed") and merge_status == "ok":
                 if repo and pr is not None:
                     ok = mark_pr_fix(repo, pr, "FIXED", f"foreman fix Workload {name} succeeded")
+                    mark_failed = not ok
             if ok:
                 delete_workload(name)
                 results.append(f"{name}:fixed")
+            # Mark failed: a Succeeded Workload with a mergeable PR whose mark
+            # to Dispatch failed. This is an infrastructure failure (Dispatch
+            # unavailable), not a code problem. Keep the tombstone so the next
+            # tick retries the mark, without re-running the coder or spending
+            # an attempt. (#228)
+            elif mark_failed:
+                results.append(f"{name}:mark-failed:{attempt}/{max_attempts}")
             # Genuine merge conflict (DIRTY/CONFLICTING). A coder cannot resolve
             # a conflict introduced by an unrelated merge; one determination is
             # enough, and the conflict will not resolve itself between ticks.
