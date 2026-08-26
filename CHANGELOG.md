@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.7.3](https://github.com/misospace/foreman-dispatch-bridge/compare/v0.7.2...v0.7.3) (2026-08-26)
+
+
+### Bug Fixes
+
+* **prfix:** keep tombstone on a failed FIXED mark instead of re-running the coder ([#231](https://github.com/misospace/foreman-dispatch-bridge/issues/231)) ([40e7c78](https://github.com/misospace/foreman-dispatch-bridge/commit/40e7c7804e8fc04d7bb5ed498542c574c5294fca)), closes [#228](https://github.com/misospace/foreman-dispatch-bridge/issues/228)
+* **prune:** retire parked-Failed tombstones without resetting the issue ([#232](https://github.com/misospace/foreman-dispatch-bridge/issues/232)) ([9a1e9a3](https://github.com/misospace/foreman-dispatch-bridge/commit/9a1e9a3d66a903f71fdff203b85e80d0a9e2e2b5)), closes [#227](https://github.com/misospace/foreman-dispatch-bridge/issues/227)
+* **release:** patch openssl for CVE-2026-14456 until the base rebuilds ([#235](https://github.com/misospace/foreman-dispatch-bridge/issues/235)) ([c71141a](https://github.com/misospace/foreman-dispatch-bridge/commit/c71141a3bfbd9e4ea47ed1c8d4e807da4b250479))
+* **retry:** bound infra retries with their own counter ([#230](https://github.com/misospace/foreman-dispatch-bridge/issues/230)) ([46d97f5](https://github.com/misospace/foreman-dispatch-bridge/commit/46d97f5ca1dc2d60c95a5399b68cc820140f6234)), closes [#225](https://github.com/misospace/foreman-dispatch-bridge/issues/225)
+* **retry:** isolate wedged deletes in give-up branches and dedupe escalation comments ([#233](https://github.com/misospace/foreman-dispatch-bridge/issues/233)) ([dbd1783](https://github.com/misospace/foreman-dispatch-bridge/commit/dbd178345b80bc64e13e4c36dbc1e45e3f8e0b4e)), closes [#226](https://github.com/misospace/foreman-dispatch-bridge/issues/226)
+* **review-transition:** park GO-with-no-PR for a human ([#234](https://github.com/misospace/foreman-dispatch-bridge/issues/234)) ([cc50fa1](https://github.com/misospace/foreman-dispatch-bridge/commit/cc50fa191238b5d497c3c3b0f362ee80a2ca67b3)), closes [#229](https://github.com/misospace/foreman-dispatch-bridge/issues/229)
+* **tests:** point the give-up fixtures at the infra counter ([#237](https://github.com/misospace/foreman-dispatch-bridge/issues/237)) ([d85efce](https://github.com/misospace/foreman-dispatch-bridge/commit/d85efceee68731315aba7cb4966a1d7179c156d7))
+
 ## [0.7.2](https://github.com/misospace/foreman-dispatch-bridge/compare/v0.7.1...v0.7.2) (2026-08-26)
 
 
