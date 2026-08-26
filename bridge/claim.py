@@ -417,7 +417,9 @@ class DispatchClient:
         data = self._http_get(url)
         return data if isinstance(data, list) else []
 
-    def update_status(self, item: dict, status: str, agent_name: str) -> bool:
+    def update_status(
+        self, item: dict, status: str, agent_name: str, blocked_reason: str = ""
+    ) -> bool:
         """Update the status label of an issue with full identity.
 
         *item* is a claimed-item dict (from ``list_claimed``) carrying at least
@@ -434,6 +436,11 @@ class DispatchClient:
             "status": status,
             "agentName": agent_name,
         }
+        # dispatch rejects status=blocked without a non-empty reason (400), so a
+        # park that omits it silently fails and the issue keeps its in-progress
+        # slot — the very thing parking exists to release (dispatch#862).
+        if status == "blocked" and blocked_reason.strip():
+            payload["blockedReason"] = blocked_reason.strip()[:500]
         return self._http_post(f"{self._base}/api/issues/status", payload) is not None
 
     def replace_labels(self, item: dict, remove: list[str], add: list[str]) -> bool:
