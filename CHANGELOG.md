@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.7.4](https://github.com/misospace/foreman-dispatch-bridge/compare/v0.7.3...v0.7.4) (2026-08-27)
+
+
+### Bug Fixes
+
+* **deps:** update dependency msgpack (1.2.1 → 1.2.2) ([#240](https://github.com/misospace/foreman-dispatch-bridge/issues/240)) ([0a27f6b](https://github.com/misospace/foreman-dispatch-bridge/commit/0a27f6b308e62e1fe5e460186c36e4053b0e514a))
+* **deps:** update dependency ruff (0.16.4 → 0.16.5) ([#241](https://github.com/misospace/foreman-dispatch-bridge/issues/241)) ([28b38ff](https://github.com/misospace/foreman-dispatch-bridge/commit/28b38ff1c9d6be67f10ee08c1343752b6c647fad))
+* **prfix:** treat CHANGES_REQUESTED as actionable, not as a blocker ([#242](https://github.com/misospace/foreman-dispatch-bridge/issues/242)) ([57becd2](https://github.com/misospace/foreman-dispatch-bridge/commit/57becd293f2b5f323adf2afeb55dbfa253d89727))
+* **release:** make the release job green when the release succeeded ([#238](https://github.com/misospace/foreman-dispatch-bridge/issues/238)) ([13598e9](https://github.com/misospace/foreman-dispatch-bridge/commit/13598e96a7b5baf9b42dc25a5995a2b690ffe779))
+
 ## [0.7.3](https://github.com/misospace/foreman-dispatch-bridge/compare/v0.7.2...v0.7.3) (2026-08-26)
 
 
