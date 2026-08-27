@@ -283,6 +283,35 @@ def check_pr_mergeable(repo, pr, *, http_get, github_token) -> str:
     # merge queue not ready). The coder cannot resolve this; do not burn
     # retry attempts on it. (#163)
     if inspect_blockers:
+        # BLOCKED with no failing or pending check is ambiguous: it covers both
+        # "awaiting a required reviewer / merge queue" (the coder cannot help)
+        # and "a reviewer requested changes" (the coder is exactly what should
+        # act). Treating both as "blocked" parked PRs forever holding a slot
+        # while actionable feedback sat unread. Ask the reviews which it is.
+        try:
+            reviews = http_get(
+                f"https://api.github.com/repos/{repo}/pulls/{pr}/reviews?per_page=100",
+                headers,
+            )
+            # Last decisive review per reviewer wins; COMMENTED and DISMISSED
+            # carry no verdict, matching GitHub's own review-decision rule.
+            latest: dict[str, str] = {}
+            for rv in reviews or []:
+                st = str((rv or {}).get("state") or "").upper()
+                if st not in ("APPROVED", "CHANGES_REQUESTED"):
+                    continue
+                who = str(((rv or {}).get("user") or {}).get("login") or "")
+                if who:
+                    latest[who] = st
+            if "CHANGES_REQUESTED" in latest.values():
+                return "changes_requested"
+        except Exception as exc:
+            logger.error(
+                "prfix-reviews-error",
+                extra={"repo": repo, "pr": pr, "error": repr(exc)},
+            )
+            # Unknown: fall through to "blocked" so an API failure parks the PR
+            # rather than burning attempts on a guess.
         return "blocked"
 
     return "ok"

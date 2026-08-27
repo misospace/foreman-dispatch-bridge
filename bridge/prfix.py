@@ -384,9 +384,19 @@ def reconcile_pr_fixes(list_prfix_workloads, delete_workload, create_workload,
                     )
                 delete_workload(name)
                 results.append(f"{name}:not-mergeable-giveup:{attempt}/{max_attempts}")
-            # Blocked for a non-check reason (awaiting required review, merge
-            # queue not ready, etc.). The coder cannot unblock it, and it is
-            # not a verdict failure either. Don't burn a retry attempt; just
+            # A reviewer requested changes. This is the case the pr-fix loop
+            # exists for, so retire the finished Workload and let the next
+            # drain create a fresh one against the new feedback. Previously
+            # this fell into the "blocked" branch below and sat forever: the
+            # Completed Workload was never retired, so no new Workload could
+            # be created for that PR, and later CHANGES_REQUESTED reviews
+            # could never produce a fix run while the slot stayed occupied.
+            elif merge_status == "changes_requested":
+                delete_workload(name)
+                results.append(f"{name}:changes-requested:{attempt}/{max_attempts}")
+            # Blocked for a non-check reason (awaiting a required reviewer,
+            # merge queue not ready, etc.). The coder cannot unblock it, and it
+            # is not a verdict failure either. Don't burn a retry attempt; just
             # leave the Workload for the next reconcile tick. (#163)
             elif merge_status == "blocked" and attempt < max_attempts:
                 results.append(f"{name}:blocked:{attempt}/{max_attempts}")
