@@ -1097,3 +1097,68 @@ def test_rebuild_manifest_persists_signature_annotation():
     rebuilt2 = rebuild_prfix_manifest(wl, attempt=3, signature="")
     assert rebuilt2["metadata"]["annotations"][SIGNATURE_ANNOTATION] == "prior"
     assert rebuilt2["metadata"]["annotations"][ATTEMPT_ANNOTATION] == "3"
+
+
+def test_reconcile_changes_requested_retires_workload_so_feedback_can_be_worked():
+    """CHANGES_REQUESTED is the case the pr-fix loop exists for.
+
+    It used to fall into the 'blocked' branch: the Completed Workload was left
+    in place, so drain_pr_fixes could never create a new one for that PR, and
+    later reviews could never produce a fix run while the slot stayed occupied.
+    Observed on misospace/llmkube-images#237 — a review landed and the bridge
+    logged 'blocked:1/3' every tick for hours without acting.
+    """
+    marks, deleted, created = [], [], []
+
+    def _mark(repo, pr, status, note):
+        marks.append((repo, pr, status))
+        return True
+
+    out = reconcile_pr_fixes(
+        list_prfix_workloads=lambda: [_wl(5, "Succeeded", attempt=1)],
+        delete_workload=deleted.append,
+        create_workload=created.append,
+        mark_pr_fix=_mark,
+        pr_is_mergeable=lambda repo, pr: "changes_requested",
+        max_attempts=3,
+    )
+    # The finished Workload is retired so the next drain can create a fresh
+    # one against the new feedback; the item is NOT marked terminal.
+    assert deleted == ["prfix-o-r-5"]
+    assert marks == []
+    assert out == ["prfix-o-r-5:changes-requested:1/3"]
+
+
+def test_check_pr_mergeable_reports_changes_requested_not_blocked():
+    """BLOCKED with no failing check is ambiguous: awaiting a required
+    reviewer (coder cannot help) versus a reviewer having requested changes
+    (exactly what the coder should act on). Ask the reviews which it is."""
+    from bridge.main import check_pr_mergeable
+
+    def fake_get(url, headers):
+        if url.endswith("/reviews?per_page=100"):
+            return [
+                {"state": "APPROVED", "user": {"login": "bot"}},
+                # Same reviewer changed their mind: the last decisive review wins.
+                {"state": "CHANGES_REQUESTED", "user": {"login": "human"}},
+                {"state": "COMMENTED", "user": {"login": "human"}},
+            ]
+        if "/check-runs" in url:
+            return {"check_runs": [{"status": "completed", "conclusion": "success"}]}
+        return {"mergeable_state": "blocked", "head": {"sha": "abc"}}
+
+    assert check_pr_mergeable("o/r", 5, http_get=fake_get, github_token="t") == "changes_requested"
+
+
+def test_check_pr_mergeable_still_blocked_when_no_changes_requested():
+    """An approving or absent review leaves the old park-and-wait behaviour."""
+    from bridge.main import check_pr_mergeable
+
+    def fake_get(url, headers):
+        if url.endswith("/reviews?per_page=100"):
+            return [{"state": "APPROVED", "user": {"login": "bot"}}]
+        if "/check-runs" in url:
+            return {"check_runs": [{"status": "completed", "conclusion": "success"}]}
+        return {"mergeable_state": "blocked", "head": {"sha": "abc"}}
+
+    assert check_pr_mergeable("o/r", 5, http_get=fake_get, github_token="t") == "blocked"
