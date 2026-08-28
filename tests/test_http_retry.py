@@ -338,3 +338,20 @@ class TestHttpPost:
         mock_post.assert_called_once_with(
             "http://example.com", headers={}, json={"key": "val"}, timeout=30,
         )
+
+# ── shared token redaction (issue #177) ──────────────────────────────────────
+
+
+def test_redact_token_lives_in_http_retry_and_is_shared():
+    """_TOKEN_RE / _redact_token are defined once in http_retry and shared."""
+    from bridge import claim, http_retry, main
+
+    assert http_retry._redact_token(
+        "Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.secret"
+    ) == "Authorization: Bearer ***"
+    assert "eyJhbGciOiJIUzI1NiJ9.secret" not in http_retry._redact_token(
+        "Bearer eyJhbGciOiJIUzI1NiJ9.secret"
+    )
+    # Both modules must use the exact same shared objects, not local copies.
+    assert main._redact_token is http_retry._redact_token
+    assert claim._redact_token is http_retry._redact_token

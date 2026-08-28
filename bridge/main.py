@@ -50,17 +50,7 @@ from bridge.prfix import (
 from bridge.prune import prune_workloads, stamp_terminal_since, terminal_since_key
 from bridge.reconcile import reconcile_stranded_issues, release_stuck_claims
 from bridge.review_transition import transition_to_in_review
-
-# Token redaction for error messages.
-_TOKEN_RE = re.compile(
-    r'(Bearer\s+)([A-Za-z0-9_\-\.]+)',
-    re.IGNORECASE,
-)
-
-
-def _redact_token(text: str) -> str:
-    """Replace Bearer tokens with *** in *text* (used for error messages)."""
-    return _TOKEN_RE.sub(r"\1***", text)
+from bridge.http_retry import _redact_token
 
 
 logger = logging.getLogger("bridge.main")

@@ -4,6 +4,7 @@ Provides exponential-backoff retry on transient failures (timeouts, 429, 5xx)
 while passing through semantic client errors (4xx except 429) immediately.
 """
 
+import re
 import time
 import logging
 
@@ -13,6 +14,18 @@ logger = logging.getLogger(__name__)
 
 # Status codes that indicate a transient condition worth retrying.
 _RETRYABLE_STATUS_CODES = frozenset((429, 500, 502, 503, 504))
+
+# Matches a Bearer token in log/error strings so it can be redacted before
+# the string is written to a log or surfaced to the user.
+_TOKEN_RE = re.compile(
+    r'(Bearer\s+)([A-Za-z0-9_\-\.]+)',
+    re.IGNORECASE,
+)
+
+
+def _redact_token(text: str) -> str:
+    """Replace Bearer tokens with *** in *text* (used for error messages)."""
+    return _TOKEN_RE.sub(r"\1***", text)
 
 
 def _is_retryable(exc_or_response):
