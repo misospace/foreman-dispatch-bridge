@@ -1,23 +1,11 @@
 import logging
-import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Callable, Optional
 from urllib.parse import urlencode
 from bridge.models import ClaimedItem
+from bridge.http_retry import _redact_token
 
 logger = logging.getLogger("bridge.claim")
-
-# Regex patterns for token redaction in error messages.
-# Matches "Bearer <token>" and "Authorization: Bearer <token>" anywhere in a string.
-_TOKEN_RE = re.compile(
-    r'(Bearer\s+)([A-Za-z0-9_\-\.]+)',
-    re.IGNORECASE,
-)
-
-
-def _redact_token(text: str) -> str:
-    """Replace Bearer tokens with *** in *text* (used for error messages)."""
-    return _TOKEN_RE.sub(r"\1***", text)
 
 # The only issue states issue_state will report. Anything else is reported as
 # unknown (None), so a caller fails open instead of acting on a value it does not
