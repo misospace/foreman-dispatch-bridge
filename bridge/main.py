@@ -217,6 +217,26 @@ def check_pr_mergeable(repo, pr, *, http_get, github_token) -> str:
     if state == "conflicting":
         return "conflicting"
 
+    # GitHub computes mergeable_state asynchronously and reports "unknown"
+    # (with mergeable: null) while that is in flight, which is exactly when we
+    # poll: right after a push or a review. Every state this function does not
+    # name falls through to "ok" at the bottom, so an indeterminate answer used
+    # to read as a clean PR — reconcile then marked the item FIXED on a PR
+    # whose mergeability was never established. Both alert-triage#87 and
+    # llmkube-images#237 were marked FIXED while carrying a standing
+    # CHANGES_REQUESTED review, and FIXED is terminal, so nothing re-queued
+    # them.
+    #
+    # Treat it the way a failed check-runs lookup is already treated (#93):
+    # not mergeable, retry next tick, do not burn an attempt. Uncertainty must
+    # not resolve to success on the path that marks work complete.
+    if state in ("unknown", ""):
+        logger.info(
+            "prfix-merge-state-unknown",
+            extra={"repo": repo, "pr": pr, "mergeable": (data or {}).get("mergeable")},
+        )
+        return "checks_pending"
+
     # For unstable/blocked, distinguish a failing check (fixable by a coder)
     # from a non-check blocker (awaiting review, etc.) by looking at the
     # check-runs on the head commit. Returning early on "blocked" with
