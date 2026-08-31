@@ -1162,3 +1162,45 @@ def test_check_pr_mergeable_still_blocked_when_no_changes_requested():
         return {"mergeable_state": "blocked", "head": {"sha": "abc"}}
 
     assert check_pr_mergeable("o/r", 5, http_get=fake_get, github_token="t") == "blocked"
+
+
+def test_check_pr_mergeable_unknown_state_is_not_ok():
+    """GitHub computes mergeable_state asynchronously and reports "unknown"
+    while that is in flight — exactly when we poll, right after a push or a
+    review. Every unnamed state used to fall through to "ok", so an
+    indeterminate answer read as a clean PR and reconcile marked the item
+    FIXED without ever establishing mergeability. alert-triage#87 and
+    llmkube-images#237 were both marked FIXED while carrying a standing
+    CHANGES_REQUESTED review, and FIXED is terminal."""
+    from bridge.main import check_pr_mergeable
+
+    def fake_get(url, headers):
+        if "/check-runs" in url:
+            return {"check_runs": [{"status": "completed", "conclusion": "success"}]}
+        return {"mergeable_state": "unknown", "mergeable": None, "head": {"sha": "abc"}}
+
+    assert check_pr_mergeable("o/r", 5, http_get=fake_get, github_token="t") == "checks_pending"
+
+
+def test_check_pr_mergeable_empty_state_is_not_ok():
+    """Same for an absent mergeable_state, which the API also returns."""
+    from bridge.main import check_pr_mergeable
+
+    def fake_get(url, headers):
+        if "/check-runs" in url:
+            return {"check_runs": [{"status": "completed", "conclusion": "success"}]}
+        return {"head": {"sha": "abc"}}
+
+    assert check_pr_mergeable("o/r", 5, http_get=fake_get, github_token="t") == "checks_pending"
+
+
+def test_check_pr_mergeable_clean_state_is_still_ok():
+    """A genuinely clean PR must still report ok, or nothing ever marks FIXED."""
+    from bridge.main import check_pr_mergeable
+
+    def fake_get(url, headers):
+        if "/check-runs" in url:
+            return {"check_runs": [{"status": "completed", "conclusion": "success"}]}
+        return {"mergeable_state": "clean", "mergeable": True, "head": {"sha": "abc"}}
+
+    assert check_pr_mergeable("o/r", 5, http_get=fake_get, github_token="t") == "ok"
