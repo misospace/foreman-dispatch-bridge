@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.7.5](https://github.com/misospace/foreman-dispatch-bridge/compare/v0.7.4...v0.7.5) (2026-08-30)
+
+
+### Chores
+
+* **bridge:** deduplicate _TOKEN_RE/_redact_token into http_retry ([#243](https://github.com/misospace/foreman-dispatch-bridge/issues/243)) ([a3cdffa](https://github.com/misospace/foreman-dispatch-bridge/commit/a3cdffa0b1b880652da265332683c9bd743d3dbe)), closes [#177](https://github.com/misospace/foreman-dispatch-bridge/issues/177)
+* **container:** update image docker.io/library/python (ce40764 → cae66f2) ([#246](https://github.com/misospace/foreman-dispatch-bridge/issues/246)) ([df7d9de](https://github.com/misospace/foreman-dispatch-bridge/commit/df7d9de789513a34ccc10b80bfe49c2ef63c3fcd))
+
 ## [0.7.4](https://github.com/misospace/foreman-dispatch-bridge/compare/v0.7.3...v0.7.4) (2026-08-27)
 
 
