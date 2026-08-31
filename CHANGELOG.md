@@ -1,6 +1,11 @@
 # Changelog
 
-## [0.7.5](https://github.com/misospace/foreman-dispatch-bridge/compare/v0.7.4...v0.7.5) (2026-08-30)
+## [0.7.5](https://github.com/misospace/foreman-dispatch-bridge/compare/v0.7.4...v0.7.5) (2026-08-31)
+
+
+### Bug Fixes
+
+* **prfix:** an unknown merge state is not a mergeable PR ([#247](https://github.com/misospace/foreman-dispatch-bridge/issues/247)) ([5a3aba2](https://github.com/misospace/foreman-dispatch-bridge/commit/5a3aba2c4aa910cfb2e54107385d0b4458c19d99))
 
 
 ### Chores
