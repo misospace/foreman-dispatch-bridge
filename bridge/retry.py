@@ -262,6 +262,13 @@ def tasks_failed_with_executor_error(tasks: list) -> bool:
     return False
 
 
+# Words that appear where a model name would sit in an error message but are
+# never a model. A capture matching one of these means the scrape misfired.
+_NON_MODEL_TOKENS = frozenset(
+    {"name", "ref", "id", "type", "spec", "model", "deployment", "none", "null", "nil"}
+)
+
+
 def failed_model(tasks: list, model_for_agent: Optional[Callable[[str], str]] = None) -> str:
     """Resolve the model behind the child task that failed before the loop.
 
@@ -285,8 +292,24 @@ def failed_model(tasks: list, model_for_agent: Optional[Callable[[str], str]] = 
             str(condition.get("message") or "")
             for condition in ((task.get("status") or {}).get("conditions") or [])
         )
-        match = re.search(r"(?:model|deployment)[ =:'\"]+([A-Za-z0-9._/-]+)", condition_text, re.IGNORECASE)
-        if match:
+        # Scraping a model out of free-form error text is guesswork, so it must
+        # fail closed. The original pattern took the token straight after
+        # "model", and LLMKube writes "model name=llama-nvidia", so it captured
+        # the literal word "name". That was then written into
+        # blocked/infra-model/name and probed forever against a model that
+        # cannot exist: misospace/dispatch#899 reached
+        # blocked/infra-attempt/92 that way.
+        #
+        # Allow a structural word between the keyword and the value, and reject
+        # a capture that is itself structural, so an unrecognised shape falls
+        # through to the agentRef lookup below — which resolves a real model
+        # from the Agent CR instead of guessing.
+        match = re.search(
+            r"(?:model|deployment)(?:[ _-]?(?:name|ref|id))?[ =:'\"]+([A-Za-z0-9._/-]+)",
+            condition_text,
+            re.IGNORECASE,
+        )
+        if match and match.group(1).lower() not in _NON_MODEL_TOKENS:
             return match.group(1)
         agent_ref = spec.get("agentRef") or {}
         agent = agent_ref.get("name") if isinstance(agent_ref, dict) else ""
@@ -355,6 +378,18 @@ def reconcile_infra_parked(
     records = list_parked() or []
     health = {}
     for model in sorted({infra_model_from_labels(r) for r in records}):
+        # Never probe a model we could not identify. A parked record whose
+        # model resolved to "unknown" (or to a structural word the scrape
+        # rejected) has no backend to ask about: probing it fails every time,
+        # so the record can never be redriven and never reaches the failure
+        # cap that would park it for a human. It just spins.
+        #
+        # Treat it as unhealthy WITHOUT calling out, so the failure counter
+        # below advances and the record reaches a human on the normal path.
+        if model in ("", "unknown"):
+            health[model] = False
+            logger.info("infra-model-unidentified", extra={"model": model})
+            continue
         try:
             health[model] = bool(probe_model(model))
         except Exception:

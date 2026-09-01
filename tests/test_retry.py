@@ -1360,3 +1360,65 @@ def test_park_all_three_succeed_is_not_reported_as_failed(caplog):
     assert not any(
         "park-exhausted-failed" in record.message for record in caplog.records
     ), caplog.records
+
+
+def test_failed_model_does_not_capture_the_word_name():
+    from bridge.retry import failed_model
+    """Regression for misospace/dispatch#899, which reached
+    blocked/infra-attempt/92 against a model called "name".
+
+    LLMKube writes "model name=<model>" in the executor condition, and the
+    scrape took the token straight after "model", capturing the literal word
+    "name". That was written into blocked/infra-model/name and probed forever
+    against a model that cannot exist."""
+    task = {
+        "spec": {"agentRef": {"name": "coder"}},
+        "status": {
+            "conditions": [
+                {
+                    "type": "Completed",
+                    "reason": "ExecutorError",
+                    "message": "executor failed: model name=llama-nvidia unavailable",
+                }
+            ]
+        },
+    }
+    assert failed_model([task]) == "llama-nvidia"
+
+
+def test_failed_model_falls_back_to_the_agent_when_the_scrape_is_structural():
+    from bridge.retry import failed_model
+    """A capture that is itself a structural word means the scrape misfired.
+    Fall through to the Agent CR, which holds a real model, rather than
+    parking against a phantom."""
+    task = {
+        "spec": {"agentRef": {"name": "coder"}},
+        "status": {
+            "conditions": [
+                {
+                    "type": "Completed",
+                    "reason": "ExecutorError",
+                    "message": "executor failed: model: name",
+                }
+            ]
+        },
+    }
+    assert failed_model([task], lambda agent: "llama-nvidia") == "llama-nvidia"
+
+
+def test_failed_model_still_reads_a_plain_model_mention():
+    from bridge.retry import failed_model
+    """The useful case the scrape exists for must keep working."""
+    task = {
+        "spec": {"agentRef": {"name": "coder"}},
+        "status": {
+            "conditions": [
+                {
+                    "type": "Completed",
+                    "reason": "ExecutorError",
+                    "message": 'failed calling model "llama-strix": 403',
+                }
+            ]
+        },
+    }
+    assert failed_model([task]) == "llama-strix"
