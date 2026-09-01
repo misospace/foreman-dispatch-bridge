@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.7.6](https://github.com/misospace/foreman-dispatch-bridge/compare/v0.7.5...v0.7.6) (2026-09-01)
+
+
+### Bug Fixes
+
+* **retry:** stop scraping "name" as the failed model ([#250](https://github.com/misospace/foreman-dispatch-bridge/issues/250)) ([2a5d009](https://github.com/misospace/foreman-dispatch-bridge/commit/2a5d009867fe458d298caeae001dda688e8de84d))
+
 ## [0.7.5](https://github.com/misospace/foreman-dispatch-bridge/compare/v0.7.4...v0.7.5) (2026-08-31)
 
 
