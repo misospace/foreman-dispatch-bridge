@@ -1123,6 +1123,7 @@ def run_tick(
             item, status, agent, reason
         ),
         cfg.agent_name,
+        dispatch=dispatch,
     ):
         logger.info(line)
 

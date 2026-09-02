@@ -312,11 +312,11 @@ class TestNoPrVerdictRouting:
             def issue_is_parked(self, repo, num, label):
                 return False
 
-            def apply_label(self, repo, num, label):
-                labels.append((repo, num, label))
+            def add_label(self, item, label):
+                labels.append((item, label))
 
-            def comment(self, repo, num, body):
-                comments.append((repo, num, body))
+            def post_comment(self, item, body):
+                comments.append((item, body))
 
         out = transition_to_in_review(
             list_workloads=lambda: [_wl("wl-a-b-42")],
@@ -333,10 +333,19 @@ class TestNoPrVerdictRouting:
         )
         assert len(updated) == 1
         assert updated[0][1] == "backlog"
-        assert labels == [("misospace/foreman-dispatch-bridge", 42, "needs-human")]
+        assert labels == [
+            (
+                {
+                    "issueId": "iss-42",
+                    "repoFullName": "misospace/foreman-dispatch-bridge",
+                    "number": 42,
+                },
+                "needs-human",
+            )
+        ]
         assert len(comments) == 1
-        assert "abc123" in comments[0][2]
-        assert "fix-42" in comments[0][2]
+        assert "abc123" in comments[0][1]
+        assert "fix-42" in comments[0][1]
         assert any("parked" in line for line in out)
 
     def test_go_no_pr_second_pass_is_no_op_when_already_parked(self):
@@ -354,12 +363,12 @@ class TestNoPrVerdictRouting:
             def issue_is_parked(self, repo, num, label):
                 return self._parked
 
-            def apply_label(self, repo, num, label):
+            def add_label(self, item, label):
                 self._parked = True
-                labels.append((repo, num, label))
+                labels.append((item, label))
 
-            def comment(self, repo, num, body):
-                comments.append((repo, num, body))
+            def post_comment(self, item, body):
+                comments.append((item, body))
 
         def wl_factory():
             return [_wl("wl-a-b-42")]
