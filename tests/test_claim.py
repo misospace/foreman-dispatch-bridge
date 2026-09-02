@@ -1,5 +1,7 @@
 import json
 from pathlib import Path
+
+import pytest
 from bridge.models import ClaimedItem
 from bridge.claim import select_item, select_candidates, to_claimed_item, DispatchClient
 
@@ -783,3 +785,120 @@ def test_redact_token_does_not_touch_non_tokens():
     assert _redact_token("Bearer ***") == "Bearer ***"  # already redacted
     assert _redact_token("Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.secret") == \
         "Authorization: Bearer ***"
+
+
+class TestLaneWorkerCap:
+    """#255: the per-tick ThreadPoolExecutor must be capped at MAX_LANE_WORKERS
+    so a misconfigured DISPATCH_LANES cannot spawn hundreds of threads."""
+
+    @staticmethod
+    def _captured_max_workers(method, n_lanes):
+        import bridge.claim as claim_mod
+        from unittest.mock import patch
+
+        captured = {}
+
+        class _SpyExecutor(claim_mod.ThreadPoolExecutor):
+            def __init__(self, *args, **kwargs):
+                captured["max_workers"] = kwargs.get("max_workers")
+                super().__init__(*args, **kwargs)
+
+        def get_impl(url, headers):
+            return {"items": []}
+
+        c = _client(get_impl)
+        with patch.object(claim_mod, "ThreadPoolExecutor", _SpyExecutor):
+            if method == "queues":
+                c.queues("a/b", [f"lane{i}" for i in range(n_lanes)])
+            else:
+                c.list_pr_fix_queued([f"lane{i}" for i in range(n_lanes)])
+        return captured["max_workers"]
+
+    @pytest.mark.parametrize("n_lanes", [1, 3, 16, 17, 100])
+    def test_queues_max_workers_capped(self, n_lanes):
+        from bridge.claim import MAX_LANE_WORKERS
+        assert self._captured_max_workers("queues", n_lanes) == min(n_lanes, MAX_LANE_WORKERS)
+
+    @pytest.mark.parametrize("n_lanes", [1, 3, 16, 17, 100])
+    def test_list_pr_fix_queued_max_workers_capped(self, n_lanes):
+        from bridge.claim import MAX_LANE_WORKERS
+        assert self._captured_max_workers("list_pr_fix_queued", n_lanes) == min(n_lanes, MAX_LANE_WORKERS)
+
+    def test_queues_zero_lanes_spawns_no_executor(self):
+        # min(0, MAX_LANE_WORKERS) == 0, but ThreadPoolExecutor rejects
+        # max_workers=0, so the empty-lane path must short-circuit before
+        # constructing the pool.
+        import bridge.claim as claim_mod
+        from unittest.mock import patch
+
+        created = []
+
+        class _SpyExecutor(claim_mod.ThreadPoolExecutor):
+            def __init__(self, *args, **kwargs):
+                created.append(kwargs.get("max_workers"))
+                super().__init__(*args, **kwargs)
+
+        c = _client(lambda url, headers: {"items": []})
+        with patch.object(claim_mod, "ThreadPoolExecutor", _SpyExecutor):
+            assert c.queues("a/b", []) == {}
+        assert created == []
+
+    def test_list_pr_fix_queued_zero_lanes_spawns_no_executor(self):
+        import bridge.claim as claim_mod
+        from unittest.mock import patch
+
+        created = []
+
+        class _SpyExecutor(claim_mod.ThreadPoolExecutor):
+            def __init__(self, *args, **kwargs):
+                created.append(kwargs.get("max_workers"))
+                super().__init__(*args, **kwargs)
+
+        c = _client(lambda url, headers: [])
+        with patch.object(claim_mod, "ThreadPoolExecutor", _SpyExecutor):
+            assert c.list_pr_fix_queued([]) == []
+        assert created == []
+
+    def test_queues_still_returns_all_lanes_above_cap(self):
+        c = _client(lambda url, headers: {"items": []})
+        lanes = [f"lane{i}" for i in range(20)]
+        assert c.queues("a/b", lanes) == {lane: [] for lane in lanes}
+
+    def test_list_pr_fix_queued_still_returns_all_lanes_above_cap(self):
+        c = _client(lambda url, headers: [])
+        lanes = [f"lane{i}" for i in range(20)]
+        assert c.list_pr_fix_queued(lanes) == []
+
+    def test_warn_if_lane_cap_exceeded_logs_once(self, caplog):
+        import bridge.claim as claim_mod
+        claim_mod._lane_cap_warned = False
+        try:
+            with caplog.at_level("WARNING", logger="bridge.claim"):
+                claim_mod.warn_if_lane_cap_exceeded([f"lane{i}" for i in range(20)])
+                claim_mod.warn_if_lane_cap_exceeded([f"lane{i}" for i in range(20)])
+            warnings = [r for r in caplog.records if r.levelname == "WARNING" and "DISPATCH_LANES" in r.getMessage()]
+            assert len(warnings) == 1
+            assert "20" in warnings[0].getMessage()
+        finally:
+            claim_mod._lane_cap_warned = False
+
+    def test_warn_silent_at_or_below_cap(self, caplog):
+        import bridge.claim as claim_mod
+        claim_mod._lane_cap_warned = False
+        try:
+            with caplog.at_level("WARNING", logger="bridge.claim"):
+                claim_mod.warn_if_lane_cap_exceeded(["local", "cloud", "frontier"])
+            assert not [r for r in caplog.records if "DISPATCH_LANES" in r.getMessage()]
+        finally:
+            claim_mod._lane_cap_warned = False
+
+    def test_warn_gated_by_env_flag(self, caplog, monkeypatch):
+        import bridge.claim as claim_mod
+        claim_mod._lane_cap_warned = False
+        monkeypatch.setenv("DISPATCH_LANES_WARN", "0")
+        try:
+            with caplog.at_level("WARNING", logger="bridge.claim"):
+                claim_mod.warn_if_lane_cap_exceeded([f"lane{i}" for i in range(20)])
+            assert not [r for r in caplog.records if "DISPATCH_LANES" in r.getMessage()]
+        finally:
+            claim_mod._lane_cap_warned = False
