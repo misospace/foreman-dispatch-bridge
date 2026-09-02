@@ -204,18 +204,15 @@ def transition_to_in_review(
                     continue
                 if dispatch is not None and repo and issue_number:
                     try:
-                        dispatch.apply_label(
-                            repo, issue_number, NEEDS_HUMAN_LABEL
-                        )
+                        dispatch.add_label(item, NEEDS_HUMAN_LABEL)
                     except Exception:
                         # Label application is best-effort: the status flip
                         # above already breaks the reconciliation loop, and a
                         # second pass will retry the label.
                         pass
                     try:
-                        dispatch.comment(
-                            repo,
-                            issue_number,
+                        dispatch.post_comment(
+                            item,
                             _parked_for_human_comment(
                                 repo, issue_number, reason
                             ),

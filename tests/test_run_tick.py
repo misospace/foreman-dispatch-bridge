@@ -180,3 +180,186 @@ def test_workload_within_ttl_is_left_alone():
     })
     run_tick(api, StubDispatch(), _cfg(), _http_get)
     assert not [c for c in api.calls if c[0] == "delete"], api.calls
+
+
+def test_run_tick_go_no_pr_dispatches_full_park_flow() -> None:
+    """Driving a tick where the bridge writes a Completed Workload with
+    verdict=GO and no PR must (a) flip status to backlog via
+    DispatchClient.update_status, (b) call DispatchClient.add_label with the
+    needs-human label, (c) call DispatchClient.post_comment with a body that
+    surfaces the commitSHA and branch, and (d) on a second tick over the same
+    parked issue dedupe via issue_is_parked so that update_status, add_label
+    and post_comment are NOT re-invoked.
+
+    This is the production-wiring assertion that issue #261 calls out:
+    transition_to_in_review needs dispatch= wired AND the calls need to be
+    the real DispatchClient methods (add_label / post_comment on the item
+    dict), not the non-existent apply_label / comment.
+    """
+
+    class _ParkDispatch:
+        def __init__(self) -> None:
+            self.update_status_calls: list[tuple[dict, str, str, str]] = []
+            self.add_label_calls: list[tuple[dict, str]] = []
+            self.post_comment_calls: list[tuple[dict, str]] = []
+            self.issue_is_parked_calls: list[tuple[str, int, str]] = []
+            # First tick: issue is not yet parked. Second tick: it is.
+            self._parked = False
+
+        # --- real DispatchClient signatures (see bridge/claim.py) ---
+        def update_status(self, item, status, agent, reason=""):
+            self.update_status_calls.append((dict(item), status, agent, reason))
+            return True
+
+        def add_label(self, item, label):
+            self.add_label_calls.append((dict(item), label))
+            self._parked = True
+            return True
+
+        def post_comment(self, item, body):
+            self.post_comment_calls.append((dict(item), body))
+            return True
+
+        def issue_is_parked(self, repo, num, label):
+            self.issue_is_parked_calls.append((repo, num, label))
+            return self._parked
+
+        # --- other surface used by run_tick ---
+        def list_claimed_issues(self):
+            return []
+
+        def list_claimed(self, agent_name, status=None):
+            return []
+
+        def claim(self, issue_id, repo_full_name, number):
+            return None
+
+        def claim_one(self, agent_name, lane):
+            return None
+
+        def queue(self, agent_name, lane=None):
+            return []
+
+        def comment_with_patch(self, item, body, patch_url):
+            return None
+
+        def reopen(self, item):
+            return None
+
+        def update_label(self, item, label):
+            return None
+
+        def remove_label(self, item, label):
+            return None
+
+        def release(self, issue_id, repo_full_name, number):
+            return None
+
+        def get_issue_body(self, repo_full_name, number):
+            return ""
+
+        def get_issue_comments(self, repo_full_name, number):
+            return []
+
+    workload_name = "wl-go-no-pr-1"
+    item = {
+        "issueId": "iss-77",
+        "repoFullName": "misospace/foreman-dispatch-bridge",
+        "number": 77,
+    }
+    task = {
+        "name": "coder",
+        "agent": "coder-agent",
+        "status": {
+            "phase": "Completed",
+            "verdict": "GO",
+            "result": {
+                "summary": "all green",
+                "extra": {
+                    "commitSHA": "deadbeef",
+                    "branch": "fix-77",
+                },
+            },
+        },
+    }
+
+    def _api_with_workload() -> RecordingApi:
+        wl = _completed_workload()
+
+        class _TaskAwareApi(RecordingApi):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                self._task_response = {"items": [dict(task)]}
+
+            def list_namespaced_custom_object(self, **kw):
+                if kw.get("plural") == "agentictasks":
+                    self.calls.append(
+                        (
+                            "list",
+                            kw.get("plural"),
+                            kw.get("label_selector"),
+                        )
+                    )
+                    return self._task_response
+                return super().list_namespaced_custom_object(**kw)
+
+        return _TaskAwareApi(
+            workloads={
+                "created-by=dispatch-bridge": [wl],
+                "created-by=dispatch-bridge-prfix": [],
+            }
+        )
+
+    def _completed_workload(name: str = workload_name) -> dict:
+        wl = {
+            "metadata": {
+                "name": name,
+                "uid": "uid-77",
+                "annotations": {"foreman.llmkube.dev/issue-id": item["issueId"]},
+            },
+            "spec": {
+                "repo": item["repoFullName"],
+                "issues": [item["number"]],
+            },
+            "status": {"phase": "Completed"},
+        }
+        return wl
+
+    api = _api_with_workload()
+    dispatch = _ParkDispatch()
+    run_tick(api, dispatch, _cfg(), _http_get)
+
+    # (a) status flip happened.
+    assert any(
+        call[0].get("number") == 77 and call[1] == "backlog"
+        for call in dispatch.update_status_calls
+    ), dispatch.update_status_calls
+    # (b) needs-human label applied via the real DispatchClient signature.
+    assert (
+        (item, "needs-human") in dispatch.add_label_calls
+    ), dispatch.add_label_calls
+    # (c) explanatory comment posted with commitSHA + branch info surfaced.
+    assert len(dispatch.post_comment_calls) == 1
+    _, comment_body = dispatch.post_comment_calls[0]
+    assert "deadbeef" in comment_body
+    assert "fix-77" in comment_body
+
+    # (d) second tick: issue_is_parked is True (carried by the real client
+    #     after add_label landed in tick #1), so the dedupe branch must
+    #     short-circuit and NOT re-flip / re-label / re-comment.
+    api2 = _api_with_workload()
+    dispatch2 = _ParkDispatch()
+    dispatch2._parked = True
+
+    run_tick(api2, dispatch2, _cfg(), _http_get)
+
+    assert dispatch2.update_status_calls == [], dispatch2.update_status_calls
+    assert dispatch2.add_label_calls == [], dispatch2.add_label_calls
+    assert dispatch2.post_comment_calls == [], dispatch2.post_comment_calls
+    # issue_is_parked was queried on the second tick so the dedupe path
+    # could fire.
+    assert any(
+        num == 77
+        and label == "needs-human"
+        for (_, num, label) in dispatch2.issue_is_parked_calls
+    ), dispatch2.issue_is_parked_calls
