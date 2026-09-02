@@ -88,15 +88,12 @@ def _format_escalation_comment(item: "ClaimedItem", reason: str, branch: "str | 
 
 ClaimOne = Callable[[str, str], Optional[ClaimedItem]]  # (agent_name, lane) -\u003e item | None
 
-DELETE_WORKLOAD_TIMEOUT_S = int(os.environ.get("DELETE_WORKLOAD_TIMEOUT_S", "60"))
-
-
 def _delete_workload(
     api: client.CustomObjectsApi,
     namespace: str,
     name: str,
     *,
-    timeout: int = DELETE_WORKLOAD_TIMEOUT_S,
+    timeout: int = 60,
 ) -> None:
     """Delete a Workload CR and poll until it disappears.
 
@@ -663,6 +660,7 @@ class TickConfig:
     max_in_progress: int
     coder_slots: dict
     fix_first_agents: set
+    delete_workload_timeout_s: int = 60
 
 
 def run_tick(
@@ -689,7 +687,7 @@ def run_tick(
     # The behaviours below used to live as closures inlined here; they are now
     # sourced from a single BridgeRuntime instance so production and tests share
     # one implementation (#199).
-    bridge = BridgeRuntime(api=api, namespace=cfg.namespace, prfix_created_by=PRFIX_CREATED_BY)
+    bridge = BridgeRuntime(api=api, namespace=cfg.namespace, prfix_created_by=PRFIX_CREATED_BY, delete_workload_timeout_s=cfg.delete_workload_timeout_s)
     list_bridge_workloads = bridge.list_bridge_workloads
     list_failed_workloads = bridge.list_failed_workloads
     count_active_workloads = bridge.count_active_workloads
@@ -1198,6 +1196,7 @@ def _real_main() -> None:  # pragma: no cover - thin wiring, exercised in the cl
     namespace = os.environ.get("FOREMAN_NAMESPACE", "llm")
     gate_profiles = parse_gate_profiles(os.environ.get("GATEPROFILE_MAP"))
     max_attempts = int(os.environ.get("RETRY_MAX_ATTEMPTS", str(DEFAULT_MAX_ATTEMPTS)))
+    delete_workload_timeout_s = int(os.environ.get("DELETE_WORKLOAD_TIMEOUT_S", "60"))
     # Lane -> coder Agent map, e.g. '{"*": "coder", "frontier": "coder-frontier"}'.
     lane_coder_agents = parse_lane_coder_agents(os.environ.get("LANE_CODER_AGENTS"))
     # Lane -> revision-tuned coder Agent map (Workload.spec.revisionCoderAgentRef).
@@ -1279,6 +1278,7 @@ def _real_main() -> None:  # pragma: no cover - thin wiring, exercised in the cl
         max_in_progress=max_in_progress,
         coder_slots=coder_slots,
         fix_first_agents=fix_first_agents,
+        delete_workload_timeout_s=delete_workload_timeout_s,
     )
     probe_model = None
     probe_enabled = os.environ.get("INFRA_PROBE_ENABLED", "true").strip().lower() not in ("false", "0", "no")
@@ -1458,10 +1458,12 @@ class BridgeRuntime:
         api: client.CustomObjectsApi,
         namespace: str,
         prfix_created_by: str,
+        delete_workload_timeout_s: int = 60,
     ) -> None:
         self.api = api
         self.namespace = namespace
         self.prfix_created_by = prfix_created_by
+        self.delete_workload_timeout_s = delete_workload_timeout_s
 
     def list_bridge_workloads(self) -> List[Dict[str, Any]]:
         return _list_bridge_workloads(self.api, self.namespace)
@@ -1493,7 +1495,7 @@ class BridgeRuntime:
 
     def delete_workload(self, name: str) -> None:
         _delete_workload(
-            self.api, self.namespace, name, timeout=DELETE_WORKLOAD_TIMEOUT_S
+            self.api, self.namespace, name, timeout=self.delete_workload_timeout_s
         )
 
 

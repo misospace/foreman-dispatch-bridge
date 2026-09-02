@@ -240,6 +240,55 @@ def test_parse_json_map_invalid_pr_fix_lane_agents_raises_value_error():
         assert bad[:80] in msg
 
 
+def test_import_bridge_with_garbage_delete_workload_timeout_s():
+    """A malformed DELETE_WORKLOAD_TIMEOUT_S must not crash import bridge (#252)."""
+    import os
+    import subprocess
+    import sys
+
+    # Simulate the Dockerfile HEALTHCHECK: python -c "import bridge; print('ok')"
+    env = dict(os.environ)
+    env["DELETE_WORKLOAD_TIMEOUT_S"] = "60s"  # garbage value
+    result = subprocess.run(
+        [sys.executable, "-c", "import bridge; print('ok')"],
+        capture_output=True, text=True, env=env, timeout=30,
+    )
+    assert result.returncode == 0, f"import bridge crashed: {result.stderr}"
+    assert "ok" in result.stdout
+
+
+def test_import_bridge_with_integer_delete_workload_timeout_s():
+    """A valid integer DELETE_WORKLOAD_TIMEOUT_S must not crash import bridge."""
+    import os
+    import subprocess
+    import sys
+
+    env = dict(os.environ)
+    env["DELETE_WORKLOAD_TIMEOUT_S"] = "120"
+    result = subprocess.run(
+        [sys.executable, "-c", "import bridge; print('ok')"],
+        capture_output=True, text=True, env=env, timeout=30,
+    )
+    assert result.returncode == 0, f"import bridge crashed: {result.stderr}"
+    assert "ok" in result.stdout
+
+
+def test_import_bridge_with_unset_delete_workload_timeout_s():
+    """Unset DELETE_WORKLOAD_TIMEOUT_S must not crash import bridge."""
+    import os
+    import subprocess
+    import sys
+
+    env = dict(os.environ)
+    env.pop("DELETE_WORKLOAD_TIMEOUT_S", None)
+    result = subprocess.run(
+        [sys.executable, "-c", "import bridge; print('ok')"],
+        capture_output=True, text=True, env=env, timeout=30,
+    )
+    assert result.returncode == 0, f"import bridge crashed: {result.stderr}"
+    assert "ok" in result.stdout
+
+
 def test_delete_workload_respects_timeout():
     """Assert delete_workload exits within the configured timeout window."""
     from unittest.mock import MagicMock
