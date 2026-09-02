@@ -1,4 +1,5 @@
 import logging
+import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Callable, Optional
 from urllib.parse import urlencode
@@ -6,6 +7,43 @@ from bridge.models import ClaimedItem
 from bridge.http_retry import _redact_token
 
 logger = logging.getLogger("bridge.claim")
+
+# Upper bound on the ThreadPoolExecutor size used by DispatchClient.queues()
+# and DispatchClient.list_pr_fix_queued(). DISPATCH_LANES is a freely
+# configurable comma list, so without a cap a misconfigured value (e.g. 200
+# lanes) would spawn one thread — and one in-flight dispatch HTTP request —
+# per lane on every tick, OOMKilling the CronJob pod and saturating
+# dispatch's connection pool (#255).
+MAX_LANE_WORKERS = 16
+
+# Process-lifetime latch so the over-cap DISPATCH_LANES warning is emitted
+# once per process instead of once per tick.
+_lane_cap_warned = False
+
+
+def warn_if_lane_cap_exceeded(lanes):
+    """Log a single WARNING if ``lanes`` exceeds MAX_LANE_WORKERS.
+
+    Called from ``bridge.main._real_main`` once per process. The warning is
+    gated by the DISPATCH_LANES_WARN env var (default on) so a misconfigured
+    deployment surfaces the issue without spamming the logs every tick.
+    """
+    global _lane_cap_warned
+    if _lane_cap_warned:
+        return
+    if len(lanes) <= MAX_LANE_WORKERS:
+        return
+    if os.environ.get("DISPATCH_LANES_WARN", "1").strip().lower() in ("0", "false", "no"):
+        return
+    _lane_cap_warned = True
+    logger.warning(
+        "DISPATCH_LANES has %d lanes but the bridge caps concurrent lane "
+        "fetches at %d workers; lanes beyond the cap are still watched, "
+        "just with fewer in-flight requests per tick. Split into multiple "
+        "bridge deployments if you need more concurrency. Set "
+        "DISPATCH_LANES_WARN=0 to silence this warning.",
+        len(lanes), MAX_LANE_WORKERS,
+    )
 
 # The only issue states issue_state will report. Anything else is reported as
 # unknown (None), so a caller fails open instead of acting on a value it does not
@@ -158,7 +196,7 @@ class DispatchClient:
             return {}
 
         results = {}
-        with ThreadPoolExecutor(max_workers=len(lanes)) as executor:
+        with ThreadPoolExecutor(max_workers=min(len(lanes), MAX_LANE_WORKERS)) as executor:
             futures = {executor.submit(self.queue, agent_name, lane): lane for lane in lanes}
             for future in as_completed(futures):
                 lane = futures[future]
@@ -289,7 +327,7 @@ class DispatchClient:
             return data if isinstance(data, list) else []
 
         results = {}
-        with ThreadPoolExecutor(max_workers=len(lanes)) as executor:
+        with ThreadPoolExecutor(max_workers=min(len(lanes), MAX_LANE_WORKERS)) as executor:
             futures = {executor.submit(_fetch_lane, lane): lane for lane in lanes}
             for future in as_completed(futures):
                 lane = futures[future]
