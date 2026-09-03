@@ -237,6 +237,8 @@ PENDING_STATUSES = frozenset({"queued", "in_progress", "waiting", "pending", "re
 _TERMINAL = ("Succeeded", "Completed", "Failed")
 
 # PR lifecycle states that no amount of coder work can advance.
+# Merge states that mean the head branch has diverged from its base.
+_CONFLICTING = ("dirty", "conflicting")
 _TERMINAL_PR = ("merged", "closed")
 
 
@@ -312,15 +314,18 @@ def reconcile_pr_fixes(list_prfix_workloads, delete_workload, create_workload,
                        mark_pr_fix, pr_is_mergeable=lambda repo, pr: "ok", max_attempts=3,
                        lane_agents=None,
                        get_pr_fix_signature=lambda repo, pr: "",
+                       update_pr_branch=lambda repo, pr: False,
                        progress_max_attempts=PR_FIX_PROGRESS_MAX_ATTEMPTS) -> list:
     """Settle prior fix Workloads: Succeeded -> verify the PR is actually
     mergeable (pr_is_mergeable) before marking FIXED, delete only if the mark
     succeeded (else leave the tombstone so the next tick retries the mark);
     a Succeeded Workload whose PR is still conflicting is treated like a
     Failed one (retried under the attempt cap, or BLOCKED at the cap) since
-    the fix workload's own success says nothing about mergeability; Failed
-    under the attempt cap -> delete + recreate at attempt+1; Failed at
-    the cap -> mark BLOCKED + leave a tombstone. Non-terminal Workloads are
+    the fix workload's own success says nothing about mergeability; a
+    conflicting PR is first offered a branch update (update_pr_branch) and,
+    if that does not clear it, retried like any other failure so a coder can
+    rebase it (#269); Failed under the attempt cap -> delete + recreate at
+    attempt+1; Failed at the cap -> mark BLOCKED + leave a tombstone. Non-terminal Workloads are
     untouched. Per-Workload isolation so one wedged delete/create/mark cannot
     abort the pass or the drain that follows."""
     results = []
@@ -341,6 +346,20 @@ def reconcile_pr_fixes(list_prfix_workloads, delete_workload, create_workload,
             # to fix something that had already landed (#118).
             if repo and pr is not None:
                 merge_status = pr_is_mergeable(repo, pr)
+
+            # A conflict on a foreman branch is foreman's to resolve (#269).
+            # Try the cheap fix first: most are just the base having moved, and
+            # a branch update costs no coder attempt. Re-probe afterwards so the
+            # branches below classify the PR as it now is. If it is still
+            # conflicting, fall through to the ordinary retry path and let a
+            # coder rebase it under the attempt cap.
+            if merge_status in _CONFLICTING and repo and pr is not None:
+                try:
+                    updated = bool(update_pr_branch(repo, pr))
+                except Exception:
+                    updated = False
+                if updated:
+                    merge_status = pr_is_mergeable(repo, pr)
 
             # A merged or closed PR is terminal: resolve the item and drop the
             # Workload instead of retrying or escalating. Resolving it also keeps
@@ -370,20 +389,6 @@ def reconcile_pr_fixes(list_prfix_workloads, delete_workload, create_workload,
             # an attempt. (#228)
             elif mark_failed:
                 results.append(f"{name}:mark-failed:{attempt}/{max_attempts}")
-            # Genuine merge conflict (DIRTY/CONFLICTING). A coder cannot resolve
-            # a conflict introduced by an unrelated merge; one determination is
-            # enough, and the conflict will not resolve itself between ticks.
-            # Mark BLOCKED + drop the Workload without burning the attempt
-            # budget. (#163)
-            elif merge_status in ("dirty", "conflicting"):
-                if repo and pr is not None:
-                    mark_pr_fix(
-                        repo, pr, "BLOCKED",
-                        f"foreman fix abandoned: PR has a merge conflict; "
-                        f"coder cannot resolve ({name})",
-                    )
-                delete_workload(name)
-                results.append(f"{name}:not-mergeable-giveup:{attempt}/{max_attempts}")
             # A reviewer requested changes. This is the case the pr-fix loop
             # exists for, so retire the finished Workload and let the next
             # drain create a fresh one against the new feedback. Previously

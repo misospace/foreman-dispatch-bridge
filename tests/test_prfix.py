@@ -326,9 +326,9 @@ def test_reconcile_escalated_at_max_marks_blocked():
 
 def test_reconcile_succeeded_but_pr_conflicting_does_not_mark_fixed():
     """Fix workload succeeded, but the PR is still CONFLICTING/DIRTY on GitHub
-    (the KubeTix#198 case): must not mark FIXED, must one-shot the giveup. The
-    coder cannot resolve a conflict introduced by an unrelated merge, so a
-    one-tick determination is enough. (#163)"""
+    (the KubeTix#198 case): must not mark FIXED. A conflict on a foreman branch
+    is foreman's to resolve, so it retries under the attempt cap like any other
+    failure rather than being abandoned. (#269, replacing #163)"""
     marks, deleted, created = [], [], []
     out = reconcile_pr_fixes(
         list_prfix_workloads=lambda: [_wl(198, "Succeeded", attempt=1)],
@@ -337,11 +337,10 @@ def test_reconcile_succeeded_but_pr_conflicting_does_not_mark_fixed():
         pr_is_mergeable=lambda repo, pr: "conflicting",
         max_attempts=3,
     )
-    assert marks[0][:3] == ("o/r", 198, "BLOCKED")
-    assert "conflict" in marks[0][3].lower()
+    assert marks == []  # not marked FIXED, and not abandoned as BLOCKED either
     assert deleted == ["prfix-o-r-198"]
-    assert created == []  # no recreate: a conflict will not resolve itself
-    assert out == ["prfix-o-r-198:not-mergeable-giveup:1/3"]
+    assert len(created) == 1  # recreated so a coder can rebase it
+    assert out == ["prfix-o-r-198:retry:2/3"]
 
 
 def test_reconcile_succeeded_and_mergeable_marks_fixed():
@@ -364,10 +363,9 @@ def test_reconcile_succeeded_and_mergeable_marks_fixed():
 
 
 def test_reconcile_succeeded_still_conflicting_at_max_marks_blocked_not_fixed():
-    """A conflicting PR is one-shot: the attempt count does not matter, the
-    first tick already marked it BLOCKED and dropped the Workload. This test
-    still asserts the mark-Pr-FIXED path is not taken, for regression
-    coverage. (#163)"""
+    """A conflict that survives every attempt escalates like any other
+    exhausted failure: BLOCKED at the cap, never FIXED. It reaches that point
+    by spending attempts on coder rebases, not by giving up on tick 1. (#269)"""
     marks, deleted, created = [], [], []
     out = reconcile_pr_fixes(
         list_prfix_workloads=lambda: [_wl(198, "Succeeded", attempt=3)],
@@ -377,10 +375,10 @@ def test_reconcile_succeeded_still_conflicting_at_max_marks_blocked_not_fixed():
         max_attempts=3,
     )
     assert marks[0][:3] == ("o/r", 198, "BLOCKED")     # not silently dropped, and not FIXED
-    assert "conflict" in marks[0][3].lower()
-    assert out == ["prfix-o-r-198:not-mergeable-giveup:3/3"]
-    assert deleted == ["prfix-o-r-198"]                # one-shot: drop, same as tick 1
-    assert created == []
+    assert "exhausted" in marks[0][3].lower()
+    assert out == ["prfix-o-r-198:giveup:3/3"]        # the generic exhaustion path
+    assert "not-mergeable-giveup" not in out[0]       # not the old conflict special case
+    assert created == []                               # at the cap, nothing is recreated
 
 
 def test_reconcile_default_pr_is_mergeable_preserves_prior_behavior():
@@ -504,10 +502,9 @@ def test_reconcile_checks_failed_retries_under_cap():
     assert out == ["prfix-o-r-5:not-mergeable-retry:2/3"]
 
 
-def test_reconcile_dirty_status_gives_up_one_shot():
-    """When mergeable_state is dirty (a real merge conflict, not new
-    commits) the coder cannot resolve it. One determination is enough:
-    mark BLOCKED, drop the Workload, do not burn the attempt budget. (#163)"""
+def test_reconcile_dirty_status_retries_under_the_cap():
+    """A dirty PR is a real merge conflict. It is foreman's branch, so it gets
+    a coder attempt like any other failure instead of being abandoned. (#269)"""
     marks, deleted, created = [], [], []
 
     def _mark(repo, pr, status, note):
@@ -522,18 +519,14 @@ def test_reconcile_dirty_status_gives_up_one_shot():
         pr_is_mergeable=lambda repo, pr: "dirty",
         max_attempts=3,
     )
-    # Workload is dropped, not recreated — a conflict will not resolve itself.
     assert deleted == ["prfix-o-r-5"]
-    assert created == []
-    # PR is marked BLOCKED with a conflict-specific note.
-    assert marks == [("o/r", 5, "BLOCKED")]
-    assert "merge conflict" in marks[0][2] or "conflict" in marks[0][2].lower() or True
-    assert out == ["prfix-o-r-5:not-mergeable-giveup:1/3"]
+    assert len(created) == 1
+    assert marks == []
+    assert out == ["prfix-o-r-5:retry:2/3"]
 
 
-def test_reconcile_conflicting_status_gives_up_one_shot():
-    """CONFLICTING is the same one-shot path as dirty — coder cannot
-    resolve a conflict introduced by an unrelated merge. (#163)"""
+def test_reconcile_conflicting_status_retries_under_the_cap():
+    """CONFLICTING takes the same path as dirty. (#269)"""
     marks, deleted, created = [], [], []
 
     def _mark(repo, pr, status, note):
@@ -549,9 +542,72 @@ def test_reconcile_conflicting_status_gives_up_one_shot():
         max_attempts=3,
     )
     assert deleted == ["prfix-o-r-7"]
-    assert created == []
-    assert marks == [("o/r", 7, "BLOCKED")]
-    assert out == ["prfix-o-r-7:not-mergeable-giveup:1/3"]
+    assert len(created) == 1
+    assert marks == []
+    assert out == ["prfix-o-r-7:retry:2/3"]
+
+
+def test_reconcile_conflicting_tries_a_branch_update_first():
+    """The cheap fix first: most conflicts on a foreman branch are just the
+    base having moved, and a branch update costs no coder attempt. (#269)"""
+    marks, deleted, created, updates = [], [], [], []
+    probes = iter(["conflicting", "ok"])
+
+    def _mark(repo, pr, status, note):
+        marks.append((repo, pr, status))
+        return True
+
+    out = reconcile_pr_fixes(
+        list_prfix_workloads=lambda: [_wl(9, "Succeeded", attempt=1)],
+        delete_workload=deleted.append,
+        create_workload=created.append,
+        mark_pr_fix=_mark,
+        pr_is_mergeable=lambda repo, pr: next(probes),
+        update_pr_branch=lambda repo, pr: updates.append((repo, pr)) or True,
+        max_attempts=3,
+    )
+    assert updates == [("o/r", 9)]      # the update was attempted
+    assert created == []                # and no coder attempt was spent
+    assert marks == [("o/r", 9, "FIXED")]
+    assert out == ["prfix-o-r-9:fixed"]
+
+
+def test_reconcile_conflicting_retries_when_the_branch_update_fails():
+    """An update that cannot clear the conflict falls through to the coder
+    rather than being treated as terminal. (#269)"""
+    created, updates = [], []
+    out = reconcile_pr_fixes(
+        list_prfix_workloads=lambda: [_wl(11, "Failed", attempt=1)],
+        delete_workload=lambda n: None,
+        create_workload=created.append,
+        mark_pr_fix=lambda repo, pr, status, note: True,
+        pr_is_mergeable=lambda repo, pr: "conflicting",
+        update_pr_branch=lambda repo, pr: updates.append((repo, pr)) or False,
+        max_attempts=3,
+    )
+    assert updates == [("o/r", 11)]
+    assert len(created) == 1
+    assert out == ["prfix-o-r-11:retry:2/3"]
+
+
+def test_reconcile_conflicting_survives_a_raising_branch_update():
+    """A failing update call must not abort the pass. (#269)"""
+    created = []
+
+    def _boom(repo, pr):
+        raise RuntimeError("github down")
+
+    out = reconcile_pr_fixes(
+        list_prfix_workloads=lambda: [_wl(13, "Failed", attempt=1)],
+        delete_workload=lambda n: None,
+        create_workload=created.append,
+        mark_pr_fix=lambda repo, pr, status, note: True,
+        pr_is_mergeable=lambda repo, pr: "dirty",
+        update_pr_branch=_boom,
+        max_attempts=3,
+    )
+    assert len(created) == 1
+    assert out == ["prfix-o-r-13:retry:2/3"]
 
 
 def test_reconcile_blocked_status_skips_without_burning_attempts():
@@ -898,10 +954,10 @@ def test_reconcile_blocked_with_failing_check_retries_normally():
     assert out == ["prfix-o-r-40:not-mergeable-retry:2/3"]
 
 
-def test_reconcile_dirty_does_not_loop_across_ticks():
-    """End-to-end: a genuinely conflicting PR must not consume all three
-    attempts across ticks — the first tick marks it BLOCKED and drops the
-    Workload, so the second tick has nothing to do. (#163)"""
+def test_reconcile_dirty_retries_across_ticks_then_blocks_at_the_cap():
+    """End-to-end: a genuinely conflicting PR is retried under the attempt cap
+    like any other failure, and only escalates once the budget is spent — it is
+    never abandoned on the first tick. (#269, replacing #163)"""
     marks, deleted, created = [], [], []
 
     def http_get(url, headers=None, **kwargs):
@@ -914,40 +970,40 @@ def test_reconcile_dirty_does_not_loop_across_ticks():
 
     from bridge.main import check_pr_mergeable
 
-    # Tick 1: conflict detected, Workload dropped, PR marked BLOCKED.
+    def _mergeable(repo, pr):
+        return check_pr_mergeable(repo, pr, http_get=http_get, github_token="")
+
+    def _mark(repo, pr, status, note):
+        marks.append((repo, pr, status))
+        return True
+
+    # Tick 1: under the cap, so the Workload is recreated for a coder rebase.
     out1 = reconcile_pr_fixes(
         list_prfix_workloads=lambda: [_wl(783, "Succeeded", attempt=1)],
         delete_workload=deleted.append,
         create_workload=created.append,
-        mark_pr_fix=lambda repo, pr, status, note: (
-            marks.append((repo, pr, status)) or True
-        ),
-        pr_is_mergeable=lambda repo, pr: check_pr_mergeable(
-            repo, pr, http_get=http_get, github_token=""
-        ),
+        mark_pr_fix=_mark,
+        pr_is_mergeable=_mergeable,
         max_attempts=3,
     )
-    assert out1 == ["prfix-o-r-783:not-mergeable-giveup:1/3"]
-    assert marks == [("o/r", 783, "BLOCKED")]
-    assert created == [], "must not recreate a conflict workload"
+    assert out1 == ["prfix-o-r-783:retry:2/3"]
+    assert marks == [], "a retry must not mark the PR BLOCKED"
+    assert len(created) == 1, "the conflict gets a coder attempt"
 
-    # Tick 2: the Workload is gone, so reconcile has nothing to do for it.
+    # Tick 3: the budget is spent, so it escalates like any other exhaustion.
+    created.clear()
     out2 = reconcile_pr_fixes(
-        list_prfix_workloads=lambda: [],  # dropped after tick 1
+        list_prfix_workloads=lambda: [_wl(783, "Failed", attempt=3)],
         delete_workload=deleted.append,
         create_workload=created.append,
-        mark_pr_fix=lambda *a: True,
-        pr_is_mergeable=lambda repo, pr: "dirty",
+        mark_pr_fix=_mark,
+        pr_is_mergeable=_mergeable,
         max_attempts=3,
     )
-    assert out2 == []
-    assert [m for m in marks if m[2] == "BLOCKED"] == [("o/r", 783, "BLOCKED")]
-
-
-# ---------------------------------------------------------------------------
-# Issue #133: signature-aware attempt budgeting
-# ---------------------------------------------------------------------------
-
+    assert marks == [("o/r", 783, "BLOCKED")]
+    assert created == []
+    assert out2 == ["prfix-o-r-783:giveup:3/3"]       # generic exhaustion, not a conflict special case
+    assert "not-mergeable-giveup" not in out2[0]
 
 def _wl_with_sig(repo, pr, attempt, sig, lane="NORMAL", name="prfix", phase="Failed"):
     return {
