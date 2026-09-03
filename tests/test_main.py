@@ -426,3 +426,58 @@ def test_no_slots_configured_keeps_legacy_behavior():
                    agent_load={"coder": 99})
     assert res[0] == "local:created:wl-a-b-4"
     assert created[0]["spec"]["coderAgentRef"]["name"] == "coder"
+
+
+class _Resp:
+    def __init__(self, status_code):
+        self.status_code = status_code
+
+
+def test_update_pull_request_branch_accepted():
+    """202 means GitHub merged the base in server-side: no coder attempt spent."""
+    from bridge.main import update_pull_request_branch
+
+    calls = []
+
+    def _put(url, headers=None, json=None, **kw):
+        calls.append((url, headers))
+        return _Resp(202)
+
+    assert update_pull_request_branch("o/r", 7, http_put=_put, github_token="t") is True
+    assert calls[0][0] == "https://api.github.com/repos/o/r/pulls/7/update-branch"
+    assert calls[0][1]["Authorization"] == "Bearer t"
+
+
+def test_update_pull_request_branch_conflict_returns_false():
+    """422 is GitHub saying it cannot merge the base in — that is the coder's job."""
+    from bridge.main import update_pull_request_branch
+
+    assert update_pull_request_branch(
+        "o/r", 7, http_put=lambda *a, **k: _Resp(422), github_token="t"
+    ) is False
+
+
+def test_update_pull_request_branch_survives_transport_failure():
+    """A raise must not abort the reconcile pass; falling through to the coder
+    is the right outcome for any reason the update could not be done."""
+    from bridge.main import update_pull_request_branch
+
+    def _boom(*a, **k):
+        raise RuntimeError("network down")
+
+    assert update_pull_request_branch(
+        "o/r", 7, http_put=_boom, github_token="t"
+    ) is False
+
+
+def test_update_pull_request_branch_omits_auth_without_a_token():
+    from bridge.main import update_pull_request_branch
+
+    seen = {}
+
+    def _put(url, headers=None, json=None, **kw):
+        seen.update(headers or {})
+        return _Resp(200)
+
+    assert update_pull_request_branch("o/r", 7, http_put=_put, github_token="") is True
+    assert "Authorization" not in seen

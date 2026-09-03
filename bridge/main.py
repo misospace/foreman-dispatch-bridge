@@ -171,6 +171,42 @@ def _parse_fix_first_agents(raw: Optional[str]) -> set:
     return {p for p in parts if p}
 
 
+
+def update_pull_request_branch(repo, pr, *, http_put, github_token) -> bool:
+    """Merge the base branch into a conflicting PR's head branch.
+
+    The cheap half of #269: most conflicts on a foreman branch are just the
+    base having moved, and GitHub resolves those server-side for free. A real
+    content conflict returns 422, which is the signal to let a coder rebase it
+    instead. Never raises — any failure here means the caller falls through to
+    the coder path, which is the correct outcome for every reason this could
+    not be done.
+    """
+    headers = {"Accept": "application/vnd.github+json"}
+    if github_token:
+        headers["Authorization"] = f"Bearer {github_token}"
+    try:
+        r = http_put(
+            f"https://api.github.com/repos/{repo}/pulls/{pr}/update-branch",
+            headers=headers,
+            json={},
+        )
+    except Exception as e:
+        logger.info(
+            "prfix-branch-update-failed",
+            extra={"repo": repo, "pr": pr, "error": _redact_token(repr(e))},
+        )
+        return False
+    if r.status_code in (200, 202):
+        logger.info("prfix-branch-updated", extra={"repo": repo, "pr": pr})
+        return True
+    logger.info(
+        "prfix-branch-update-declined",
+        extra={"repo": repo, "pr": pr, "status": r.status_code},
+    )
+    return False
+
+
 def check_pr_mergeable(repo, pr, *, http_get, github_token) -> str:
     """Return a mergeability status string.
 
@@ -1092,6 +1128,13 @@ def run_tick(
                 repo, pr, http_get=http_get, github_token=cfg.github_token
             )
 
+        def update_pr_branch(repo, pr) -> bool:
+            from bridge.http_retry import http_put
+
+            return update_pull_request_branch(
+                repo, pr, http_put=http_put, github_token=cfg.github_token
+            )
+
         # Build a one-per-tick {repo, pr} -> failure-signature map so the
         # reconcile path can compare the *current* failure surface against
         # the signature stored on each fix Workload's annotation (#133).
@@ -1119,6 +1162,7 @@ def run_tick(
             max_attempts=cfg.pr_fix_max_attempts,
             lane_agents=cfg.pr_fix_lane_agents,
             get_pr_fix_signature=get_pr_fix_signature,
+            update_pr_branch=update_pr_branch,
         ):
             logger.info(line)
 
