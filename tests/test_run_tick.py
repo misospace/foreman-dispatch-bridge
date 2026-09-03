@@ -98,7 +98,7 @@ class StubDispatch:
     def __init__(self):
         self.calls: List[str] = []
 
-    def claim_one(self, agent_name, lane):
+    def claim_one(self, agent_name, lane, queue_for=None):
         self.calls.append(f"claim_one:{lane}")
         return None
 
@@ -234,7 +234,7 @@ def test_run_tick_go_no_pr_dispatches_full_park_flow() -> None:
         def claim(self, issue_id, repo_full_name, number):
             return None
 
-        def claim_one(self, agent_name, lane):
+        def claim_one(self, agent_name, lane, queue_for=None):
             return None
 
         def queue(self, agent_name, lane=None):
@@ -363,3 +363,108 @@ def test_run_tick_go_no_pr_dispatches_full_park_flow() -> None:
         and label == "needs-human"
         for (_, num, label) in dispatch2.issue_is_parked_calls
     ), dispatch2.issue_is_parked_calls
+
+
+
+
+
+def test_run_tick_makes_one_snapshot_for_lanes_retry_and_drain() -> None:
+    """Issue #256: a single run_tick must issue exactly N (lanes) + 1
+    (pr-fix-queue) HTTP GETs to /api/agents/{agent}/queue across the three
+    consumers, not 3N (lane_index + find_issue_id + claim_one). With M
+    retries that need an issue-id backfill and a busy lane that fills
+    headroom, claim_one may run multiple times in the same tick — every
+    call must read from the snapshot, not refetch.
+    """
+    from urllib.parse import urlparse, parse_qs
+    from bridge import main as main_mod
+    from bridge.claim import DispatchClient
+
+    lanes = ["base", "frontier", "coder"]
+    pr_fix_lane = "pr-fix"
+    cfg = _cfg(lanes=lanes + [pr_fix_lane])
+
+    queue_calls: list[str] = []
+
+    def fake_http_get(url, headers=None, allow_404=False):
+        q = parse_qs(urlparse(url).query)
+        lane = q.get("lane", [""])[0]
+        if "/api/agents/" in url and "queue" in url:
+            queue_calls.append(lane)
+        if lane == "base":
+            return [
+                {"issueId": "i1", "repoFullName": "r/a", "number": 1,
+                 "status": "status/ready", "claimable": True, "title": "t1"},
+                {"issueId": "i2", "repoFullName": "r/a", "number": 2,
+                 "status": "status/ready", "claimable": True, "title": "t2"},
+            ]
+        if lane == "frontier":
+            return [
+                {"issueId": "i3", "repoFullName": "r/a", "number": 3,
+                 "status": "status/ready", "claimable": True, "title": "t3"},
+                {"issueId": "i4", "repoFullName": "r/a", "number": 4,
+                 "status": "status/ready", "claimable": True, "title": "t4"},
+            ]
+        return []
+
+    def fake_http_post(url, headers=None, json=None, allow_404=False):
+        return None
+
+    d = DispatchClient("http://dispatch", "tok", fake_http_get, fake_http_post)
+
+    api = RecordingApi({
+        "created-by=dispatch-bridge": [],
+        "created-by=dispatch-bridge-prfix": [],
+    })
+
+    main_mod.run_tick(api, d, cfg, fake_http_get, fake_http_post)
+
+    # N lane queues (parallel snapshot batch) + 1 pr-fix-queue fetch. Anything
+    # more means one of the three consumers refetched.
+    assert len(queue_calls) == len(lanes) + 1, queue_calls
+    # claim_one was used through the snapshot path.
+
+
+def test_run_tick_drain_loop_does_not_refetch_per_claim() -> None:
+    """Issue #256: when claim_one is called multiple times for the same lane
+    inside a tick (drain loop), it must NEVER call self.queue() again —
+    the snapshot is canonical for the tick.
+    """
+    from urllib.parse import urlparse, parse_qs
+    from bridge import main as main_mod
+    from bridge.claim import DispatchClient
+
+    lanes = ["base"]
+    cfg = _cfg(lanes=lanes)
+    queue_calls: list[str] = []
+
+    def fake_http_get(url, headers=None, allow_404=False):
+        q = parse_qs(urlparse(url).query)
+        lane = q.get("lane", [""])[0]
+        if "/queue" in url:
+            queue_calls.append(lane)
+        # Five items so claim_one is called five times in the drain loop.
+        if lane == "base":
+            return [
+                {"issueId": f"i{n}", "repoFullName": "r/a", "number": n,
+                 "status": "status/ready", "claimable": True, "title": f"t{n}"}
+                for n in range(1, 6)
+            ]
+        return []
+
+    def fake_http_post(url, headers=None, json=None, allow_404=False):
+        return None
+
+    d = DispatchClient("http://dispatch", "tok", fake_http_get, fake_http_post)
+
+    api = RecordingApi({
+        "created-by=dispatch-bridge": [],
+        "created-by=dispatch-bridge-prfix": [],
+    })
+
+    main_mod.run_tick(api, d, cfg, fake_http_get, fake_http_post)
+    # Exactly one queue GET per lane (the snapshot), even though claim_one
+    # fired multiple times.
+    assert queue_calls.count("base") == 1, queue_calls
+
+

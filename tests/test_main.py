@@ -11,7 +11,7 @@ def _claim_stub(mapping):
     # None, so run_once's per-lane drain loop terminates.
     served = set()
 
-    def claim_one(agent_name, lane):
+    def claim_one(agent_name, lane, queue_for=None):
         if lane in served:
             return None
         served.add(lane)
@@ -64,7 +64,7 @@ def test_no_gate_profiles_leaves_workload_without_one():
 
 def test_passes_agent_name_and_lane_through():
     seen = []
-    def claim_one(agent_name, lane):
+    def claim_one(agent_name, lane, queue_for=None):
         seen.append((agent_name, lane))
         return None
     run_once(LANES, "foreman/coder", claim_one, lambda m: None, namespace="llm")
@@ -98,7 +98,7 @@ def test_drains_lane_up_to_headroom():
     items = [ClaimedItem(repo="a/b", issue_number=n, intent="x", lane="local")
              for n in (1, 2, 3)]
 
-    def claim_one(agent_name, lane):
+    def claim_one(agent_name, lane, queue_for=None):
         return items.pop(0) if lane == "local" and items else None
 
     res = run_once(["local"], "foreman/coder", claim_one, created.append,
@@ -113,7 +113,7 @@ def test_drains_whole_lane_when_uncapped():
     items = [ClaimedItem(repo="a/b", issue_number=n, intent="x", lane="local")
              for n in (1, 2, 3)]
 
-    def claim_one(agent_name, lane):
+    def claim_one(agent_name, lane, queue_for=None):
         return items.pop(0) if lane == "local" and items else None
 
     res = run_once(["local"], "foreman/coder", claim_one, created.append,
@@ -372,7 +372,7 @@ def test_lane_does_not_claim_when_every_coder_is_full():
     created, claimed = [], []
     item = ClaimedItem(repo="a/b", issue_number=3, intent="fix", lane="local")
 
-    def claim_one(agent_name, lane):
+    def claim_one(agent_name, lane, queue_for=None):
         claimed.append(lane)
         return item
 
@@ -407,7 +407,7 @@ def test_load_updates_within_a_tick_so_later_claims_see_it():
     ]
     served = iter(items)
 
-    def claim_one(agent_name, lane):
+    def claim_one(agent_name, lane, queue_for=None):
         return next(served, None)
 
     run_once(["local"], "foreman/coder", claim_one, created.append, namespace="llm",
