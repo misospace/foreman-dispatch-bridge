@@ -81,6 +81,22 @@ def feedback_from_tasks(tasks: list) -> str:
             err = ex.get("error") or ""
             if err:
                 notes.append(f"Previous coder attempt failed: {err}")
+            # A failed attempt may still have pushed a commit (e.g. the push
+            # was rejected after the work was done, or the run ran out of
+            # budget mid-edit). The retry starts on that branch, so the commit
+            # is already in its workspace — name it so the coder builds on it
+            # instead of spending its edit budget rediscovering its own work.
+            commit = ex.get("commitSHA") or ""
+            branch = ex.get("branch") or ""
+            summary = ex.get("modelSummary") or ""
+            if commit:
+                where = f" on {branch}" if branch else ""
+                what = f": {summary}" if summary else ""
+                notes.append(
+                    f"Previous coder attempt pushed {commit}{where}{what}. "
+                    "That work is in your workspace and has NOT shipped — the "
+                    "issue is still open. Build on it; do not redo it."
+                )
     if not notes:
         return ""
     text = (
@@ -93,7 +109,9 @@ def feedback_from_tasks(tasks: list) -> str:
 # The escalation reasons a coder may declare. Anything else is ignored (treated as
 # no declaration), so a typo or a future value cannot silently divert work out of
 # the loop — the same reasoning as ISSUE_STATES in claim.py.
-DECLARED_ESCALATIONS = frozenset({"DESIGN-DECISION", "NO-TECHNICAL-FIX"})
+DECLARED_ESCALATIONS = frozenset(
+    {"DESIGN-DECISION", "NO-TECHNICAL-FIX", "BUDGET-EXHAUSTED"}
+)
 
 
 def declared_escalation(tasks: list) -> Optional[str]:
