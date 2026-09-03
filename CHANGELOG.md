@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.7.7](https://github.com/misospace/foreman-dispatch-bridge/compare/v0.7.6...v0.7.7) (2026-09-03)
+
+
+### Bug Fixes
+
+* **bridge:** move DELETE_WORKLOAD_TIMEOUT_S parsing into _real_main ([#263](https://github.com/misospace/foreman-dispatch-bridge/issues/263)) ([d579e62](https://github.com/misospace/foreman-dispatch-bridge/commit/d579e62475209d56d5a5139290eff6fc251b0413)), closes [#252](https://github.com/misospace/foreman-dispatch-bridge/issues/252)
+* **bridge:** wire is_parked_for_human callback into prune_workloads ([#262](https://github.com/misospace/foreman-dispatch-bridge/issues/262)) ([#270](https://github.com/misospace/foreman-dispatch-bridge/issues/270)) ([0bad0ff](https://github.com/misospace/foreman-dispatch-bridge/commit/0bad0ffaab44efdd1385e3d0395fcbc04b6420dd))
+* **deps:** update dependency ruff (0.16.5 → 0.16.6) ([#271](https://github.com/misospace/foreman-dispatch-bridge/issues/271)) ([fe6a84c](https://github.com/misospace/foreman-dispatch-bridge/commit/fe6a84c58a80d55400f09358b6d7cbfdf6711225))
+* **prfix:** resolve merge conflicts instead of abandoning them ([#275](https://github.com/misospace/foreman-dispatch-bridge/issues/275)) ([3b1bc41](https://github.com/misospace/foreman-dispatch-bridge/commit/3b1bc41d1b743cb0166ff69d038ad6b73f9715a1)), closes [#269](https://github.com/misospace/foreman-dispatch-bridge/issues/269)
+* **retry:** name the prior attempt's pushed commit in retry feedback ([#273](https://github.com/misospace/foreman-dispatch-bridge/issues/273)) ([32d4215](https://github.com/misospace/foreman-dispatch-bridge/commit/32d42150fc585afe88680e334506815f0b7601b3)), closes [#272](https://github.com/misospace/foreman-dispatch-bridge/issues/272)
+* **review-transition:** wire dispatch into GO-no-PR parking path ([#266](https://github.com/misospace/foreman-dispatch-bridge/issues/266)) ([d7de5b6](https://github.com/misospace/foreman-dispatch-bridge/commit/d7de5b6a69170e56796d4139e5d94b94c273fa7c)), closes [#261](https://github.com/misospace/foreman-dispatch-bridge/issues/261)
+
+
+### Performance Improvements
+
+* **bridge:** share one lane-queue snapshot per run_tick ([#268](https://github.com/misospace/foreman-dispatch-bridge/issues/268)) ([e331809](https://github.com/misospace/foreman-dispatch-bridge/commit/e33180968fe24ad83912c30b1fe36c5432ed561e)), closes [#256](https://github.com/misospace/foreman-dispatch-bridge/issues/256)
+
 ## [0.7.6](https://github.com/misospace/foreman-dispatch-bridge/compare/v0.7.5...v0.7.6) (2026-09-01)
 
 
