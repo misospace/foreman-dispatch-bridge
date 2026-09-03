@@ -113,6 +113,16 @@ DECLARED_ESCALATIONS = frozenset(
     {"DESIGN-DECISION", "NO-TECHNICAL-FIX", "BUDGET-EXHAUSTED"}
 )
 
+# Of those, the ones that mean a person is needed. They are *determinations*:
+# the model looked at the work and concluded code cannot settle it, so re-running
+# it would spend an attempt on a decision already made.
+#
+# BUDGET-EXHAUSTED is deliberately not among them. Running out of turns is a
+# resource limit, not a judgement about the work, and the right answer is another
+# attempt — under the ordinary cap, and consuming one, so a coder cannot buy
+# unlimited turns by declaring it repeatedly (#274).
+PARKING_ESCALATIONS = frozenset({"DESIGN-DECISION", "NO-TECHNICAL-FIX"})
+
 
 def declared_escalation(tasks: list) -> Optional[str]:
     """Return the escalation reason a coder declared on this Workload, if any.
@@ -662,6 +672,16 @@ def reconcile_failures(
                     "declared-escalation-lookup-failed",
                     extra={"workload": name, "error": repr(e)},
                 )
+            if reason and reason not in PARKING_ESCALATIONS:
+                # A non-parking declaration (BUDGET-EXHAUSTED) is a request for
+                # another go, not for a person. Fall through to the ordinary
+                # retry path below, which charges an attempt and escalates at
+                # the cap like any other failure.
+                logger.info(
+                    "declared-escalation-retrying",
+                    extra={"workload": name, "reason": reason},
+                )
+                reason = None
             if reason:
                 item_h = refresh_lane(item_from_workload(wl), current_lane_for)
                 if not item_h.issue_id and lookup_issue_id:
