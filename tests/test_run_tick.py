@@ -363,3 +363,157 @@ def test_run_tick_go_no_pr_dispatches_full_park_flow() -> None:
         and label == "needs-human"
         for (_, num, label) in dispatch2.issue_is_parked_calls
     ), dispatch2.issue_is_parked_calls
+
+
+# ---------------------------------------------------------------------------
+# #262: prune_workloads must receive the is_parked_for_human callback from
+# run_tick so parked-for-human Failed Workloads are tombstone-retired without
+# their issue being reset back to "ready". PR #232 (9a1e9a3) added the
+# callback parameter; the wiring through bridge/main.py was missing, so the
+# oscillate-and-burn bug from #227 was effectively live again.
+# ---------------------------------------------------------------------------
+
+
+class _ParkedForHumanDispatch(StubDispatch):
+    """Dispatch stub whose issue is parked-for-human (needs-human label
+    present) and whose issue_state is "closed".
+
+    The "closed" state makes reconcile_failures skip the workload (line 766
+    of bridge/retry.py), so the workload survives until prune_workloads runs
+    and the parked-skip branch can be exercised.
+    """
+
+    def issue_state(self, repo, issue_number):
+        self.calls.append(("issue_state", repo, issue_number))
+        return "closed"
+
+    def issue_is_parked(self, repo, number, label):
+        self.calls.append(("issue_is_parked", repo, number, label))
+        return True
+
+
+class _NotParkedForHumanDispatch(StubDispatch):
+    """Dispatch stub whose issue is NOT parked-for-human (no needs-human
+    label) and whose issue_state is "closed" so reconcile skips.
+
+    Falls through to the legacy reset path in prune_workloads: delete +
+    reset_issue.
+    """
+
+    def issue_state(self, repo, issue_number):
+        self.calls.append(("issue_state", repo, issue_number))
+        return "closed"
+
+    def issue_is_parked(self, repo, number, label):
+        self.calls.append(("issue_is_parked", repo, number, label))
+        return False
+
+
+def test_run_tick_skips_reset_when_failed_workload_is_parked_for_human():
+    """#262 regression guard.
+
+    A Failed Workload past its TTL whose corresponding issue carries the
+    needs-human label must be tombstone-retired by prune WITHOUT its issue
+    being reset to "ready". Without this, parked-for-human Failed Workloads
+    are reset every prune TTL, the coder re-claims them, and the coder
+    oscillates-and-burns on them (issue #227, regression of PR #232).
+    """
+    wl = _wl("wl-parked-failed", "Failed", created=OLD)
+    wl["metadata"]["annotations"]["foreman.llmkube.dev/terminal-since-Failed"] = OLD
+    api = RecordingApi({
+        "created-by=dispatch-bridge": [wl],
+        "created-by=dispatch-bridge-prfix": [],
+    })
+    dispatch = _ParkedForHumanDispatch()
+    run_tick(api, dispatch, _cfg(), _http_get)
+
+    # (1) The tombstone was retired via delete.
+    assert ("delete", "workloads", "wl-parked-failed") in api.calls, api.calls
+    # (2) _reset_issue was NOT invoked → DispatchClient.update_status was NOT
+    #     called with "ready". This is the contract PR #232 promised.
+    assert "update_status" not in dispatch.calls, (
+        f"parked-for-human Failed Workload must not be reset to ready, "
+        f"got dispatch.calls={dispatch.calls!r}"
+    )
+    # (3) The parked-skip branch fired, so the callback was consulted.
+    assert any(
+        isinstance(c, tuple) and c[0] == "issue_is_parked"
+        for c in dispatch.calls
+    ), dispatch.calls
+
+
+def test_run_tick_resets_failed_workload_when_not_parked_for_human():
+    """Regression guard for the ordinary GC behaviour PR #232 preserved.
+
+    A Failed Workload past its TTL whose issue does NOT carry the
+    needs-human label must still be tombstone-retired AND its issue reset
+    to "ready" so the coder can re-claim it. If this stops happening, the
+    coder's terminal Workload queue fills with stale tombstones and the
+    bridge stops processing work.
+    """
+    wl = _wl("wl-failed-not-parked", "Failed", created=OLD)
+    wl["metadata"]["annotations"]["foreman.llmkube.dev/terminal-since-Failed"] = OLD
+    api = RecordingApi({
+        "created-by=dispatch-bridge": [wl],
+        "created-by=dispatch-bridge-prfix": [],
+    })
+    dispatch = _NotParkedForHumanDispatch()
+    run_tick(api, dispatch, _cfg(), _http_get)
+
+    # (1) The tombstone was retired via delete.
+    assert ("delete", "workloads", "wl-failed-not-parked") in api.calls, api.calls
+    # (2) _reset_issue WAS invoked → DispatchClient.update_status was called
+    #     (the legacy GC behaviour PR #232 explicitly preserved).
+    assert "update_status" in dispatch.calls, (
+        f"non-parked Failed Workload must be reset to ready, "
+        f"got dispatch.calls={dispatch.calls!r}"
+    )
+    # (3) The callback was still consulted so we can distinguish
+    #     "callback returned False (legacy path)" from "callback missing
+    #     entirely" — the latter is the bug #262 is fixing.
+    assert any(
+        isinstance(c, tuple) and c[0] == "issue_is_parked"
+        for c in dispatch.calls
+    ), dispatch.calls
+
+
+def test_run_tick_is_parked_for_human_callback_is_best_effort():
+    """#262 best-effort semantics.
+
+    An issue_is_parked failure (transport, 404, malformed response) must
+    NOT crash the prune pass. The callback must return False so the Workload
+    falls through to the legacy reset path; the GC pass completes either
+    way. This matches the treat-as-not-parked semantics documented in
+    bridge/prune.py:196-201.
+    """
+    wl = _wl("wl-failed-parked-check-errs", "Failed", created=OLD)
+    wl["metadata"]["annotations"]["foreman.llmkube.dev/terminal-since-Failed"] = OLD
+    api = RecordingApi({
+        "created-by=dispatch-bridge": [wl],
+        "created-by=dispatch-bridge-prfix": [],
+    })
+
+    class _ParkedCheckExplodes(StubDispatch):
+        # Make reconcile skip this workload via the issue_state=="closed"
+        # short-circuit, so the failure on issue_is_parked (below) does not
+        # get muddied by reconcile-side noise.
+
+        def issue_state(self, repo, issue_number):
+            self.calls.append(("issue_state", repo, issue_number))
+            return "closed"
+
+        def issue_is_parked(self, repo, number, label):
+            self.calls.append(("issue_is_parked", repo, number, label))
+            raise RuntimeError("simulated transport failure")
+
+    dispatch = _ParkedCheckExplodes()
+    # Must not raise — the callback swallows transport-level errors.
+    run_tick(api, dispatch, _cfg(), _http_get)
+
+    # (1) Tombstone retired.
+    assert ("delete", "workloads", "wl-failed-parked-check-errs") in api.calls
+    # (2) Treated as "not parked" → legacy reset path fired.
+    assert "update_status" in dispatch.calls, (
+        f"failure on issue_is_parked must be treated as not-parked, "
+        f"got dispatch.calls={dispatch.calls!r}"
+    )
