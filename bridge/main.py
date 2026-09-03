@@ -1197,11 +1197,38 @@ def run_tick(
         }
         dispatch.update_status(item, "ready", cfg.agent_name)
 
+    def _is_parked_for_human(wl: dict) -> bool:
+        """True if the Workload's issue is parked for a human (needs-human).
+
+        Used by prune_workloads to tombstone-retire a Failed Workload whose
+        issue has been deliberately parked (declared-escalation path in
+        bridge/retry.py) without resetting the issue back to ready. Without
+        this callback the parked-Failed oscillate-and-burn bug from issue #227
+        comes back: every prune TTL flips the parked issue to ready, the coder
+        re-claims it, and the coder burns attempt budgets forever (#262).
+
+        Best-effort: any failure (transport, 404, malformed response) is
+        treated as "not parked" so prune still completes the GC pass; this
+        matches the treat-as-not-parked semantics in bridge/prune.py.
+        """
+        spec = wl.get("spec") or {}
+        issues = spec.get("issues") or [0]
+        repo = spec.get("repo", "")
+        try:
+            number = int(issues[0])
+        except (TypeError, ValueError):
+            return False
+        try:
+            return bool(dispatch.issue_is_parked(repo, number, "needs-human"))
+        except Exception:  # noqa: BLE001 - best-effort, fail-open
+            return False
+
     for line in prune_workloads(
         list_terminal_candidates, delete_workload,
         completed_ttl_seconds=cfg.prune_completed_after_h * 3600,
         failed_ttl_seconds=cfg.prune_failed_after_h * 3600,
         reset_issue=_reset_issue,
+        is_parked_for_human=_is_parked_for_human,
     ):
         logger.info(line)
 
