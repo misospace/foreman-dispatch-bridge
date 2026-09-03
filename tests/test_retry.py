@@ -1422,3 +1422,53 @@ def test_failed_model_still_reads_a_plain_model_mention():
         },
     }
     assert failed_model([task]) == "llama-strix"
+
+
+def test_budget_exhausted_retries_instead_of_parking():
+    """Running out of turns is a resource limit, not a determination that the
+    work needs a person. It must consume an attempt and go round again. (#274)"""
+    parked = []
+    r = _Recorder([_failed_wl("wl-misospace-dispatch-7", attempt=1)])
+    out = _reconcile(
+        r,
+        declared_escalation_for=lambda name: "BUDGET-EXHAUSTED",
+        park_for_human=lambda item, reason: parked.append((item.issue_number, reason)) or True,
+    )
+    assert parked == []                              # no human involved
+    assert out and "human-escalation" not in out[0]  # took the ordinary retry path
+    assert len(r.created) == 1                       # and consumed an attempt
+
+
+def test_budget_exhausted_still_escalates_at_the_cap():
+    """It buys another attempt, not unlimited ones: at the cap it escalates
+    through the ordinary exhaustion path like any other failure. (#274)"""
+    r = _Recorder([_failed_wl("wl-misospace-dispatch-7", attempt=3)])
+    out = _reconcile(
+        r,
+        declared_escalation_for=lambda name: "BUDGET-EXHAUSTED",
+        park_for_human=lambda item, reason: True,
+        attempts=3,
+    )
+    assert r.created == []                           # no fresh attempt past the cap
+    assert out and "human-escalation:BUDGET-EXHAUSTED" not in out[0]
+
+
+def test_parking_escalations_are_unchanged_by_the_budget_case():
+    """The two determinations still park without consuming an attempt."""
+    from bridge.retry import PARKING_ESCALATIONS, DECLARED_ESCALATIONS
+
+    assert PARKING_ESCALATIONS == {"DESIGN-DECISION", "NO-TECHNICAL-FIX"}
+    assert "BUDGET-EXHAUSTED" in DECLARED_ESCALATIONS
+    assert "BUDGET-EXHAUSTED" not in PARKING_ESCALATIONS
+
+    for reason in sorted(PARKING_ESCALATIONS):
+        parked = []
+        r = _Recorder([_failed_wl("wl-misospace-dispatch-7", attempt=1)])
+        out = _reconcile(
+            r,
+            declared_escalation_for=lambda name, _r=reason: _r,
+            park_for_human=lambda item, rsn: parked.append(rsn) or True,
+        )
+        assert parked == [reason]
+        assert out == [f"wl-misospace-dispatch-7:human-escalation:{reason}"]
+        assert r.created == []
