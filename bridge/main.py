@@ -86,7 +86,7 @@ def _format_escalation_comment(item: "ClaimedItem", reason: str, branch: "str | 
     return "\n".join(lines)
 
 
-ClaimOne = Callable[[str, str], Optional[ClaimedItem]]  # (agent_name, lane) -\u003e item | None
+ClaimOne = Callable[..., Optional[ClaimedItem]]  # (agent_name, lane) -\u003e item | None
 
 def _delete_workload(
     api: client.CustomObjectsApi,
@@ -342,6 +342,7 @@ def run_once(
     agent_load: Optional[dict] = None,
     agent_slots: Optional[dict] = None,
     fix_first_agents: Optional[set] = None,
+    queue_for: Optional[Callable[[str], list]] = None,
 ) -> list:
     """Claim one ready issue per lane and materialize a Workload for each. Returns per-lane outcomes.
 
@@ -409,7 +410,7 @@ def run_once(
                     busy = ",".join(sorted(candidates))
                     results.append(f"{lane}:coders-busy:{busy}")
                 break
-            item = claim_one(agent_name, lane)
+            item = claim_one(agent_name, lane, queue_for=queue_for)
             if item is None:
                 if created_here == 0:
                     results.append(f"{lane}:empty")
@@ -894,7 +895,10 @@ def run_tick(
 
     def lookup_issue_id(item: ClaimedItem) -> str:
         try:
-            return dispatch.find_issue_id(cfg.agent_name, cfg.lanes, item.repo, item.issue_number)
+            return dispatch.find_issue_id(
+                cfg.agent_name, cfg.lanes, item.repo, item.issue_number,
+                queue_snapshot=queue_snapshot,
+            )
         except Exception as e:  # best-effort; missing id just means no escalation
             logger.warning(
                 "issue-id-lookup-failed",
@@ -913,11 +917,29 @@ def run_tick(
         )
         return dispatch.escalate(item, cfg.escalation_lane, reason, cfg.agent_name)
 
+    # Single per-tick snapshot of every lane queue, reused by every consumer
+    # below so the bridge makes one parallel batch of GETs to
+    # /api/agents/{agent}/queue instead of three (issue #256). When the snapshot
+    # fetch fails we fall back to the empty map and let the consumers re-fetch
+    # on demand, preserving the previous best-effort behaviour.
+    try:
+        queue_snapshot = dispatch.queues(cfg.agent_name, cfg.lanes)
+    except Exception as e:  # best-effort; consumers fall back to per-call GETs
+        queue_snapshot = {}
+        logger.warning(
+            "queue-snapshot-failed", extra={"error": _redact_token(repr(e))}
+        )
+
+    def queue_for(lane: str) -> list:
+        return queue_snapshot.get(lane, [])
+
     # A Workload's lane label froze when it was created, so a retry cannot see a
     # lane that changed since. One pass over the queues gives every retry in this
     # tick dispatch's current view.
     try:
-        current_lane_for = dispatch.lane_index(cfg.agent_name, cfg.lanes)
+        current_lane_for = dispatch.lane_index(
+            cfg.agent_name, cfg.lanes, queue_snapshot=queue_snapshot,
+        )
     except Exception as e:  # best-effort; falling back to the label is the old behavior
         current_lane_for = {}
         logger.warning("lane-index-failed", extra={"error": _redact_token(repr(e))})
@@ -1037,6 +1059,7 @@ def run_tick(
         self_go=cfg.self_go,
         agent_load=coder_load, agent_slots=cfg.coder_slots,
         fix_first_agents=cfg.fix_first_agents,
+        queue_for=queue_for,
     ):
         logger.info(line)
 

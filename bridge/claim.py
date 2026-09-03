@@ -217,12 +217,24 @@ class DispatchClient:
         # http_post returns None on 409 (already claimed by someone else).
         return self._http_post(f"{self._base}/api/issues/claim", payload) is not None
 
-    def claim_one(self, agent_name: str, lane: str) -> Optional[ClaimedItem]:
+    def claim_one(
+        self,
+        agent_name: str,
+        lane: str,
+        queue_for: Optional[Callable[[str], list]] = None,
+    ) -> Optional[ClaimedItem]:
         """Claim the first queue candidate that can be claimed, skipping any whose
         claim POST fails (e.g. 409 already-claimed). Returns None only when the
         queue has no candidate the agent can claim, so a single stuck head-of-queue
-        item no longer starves the lane."""
-        for item in select_candidates(self.queue(agent_name, lane), lane):
+        item no longer starves the lane.
+
+        ``queue_for(lane) -> list`` is an optional injectable override used by
+        ``run_tick`` to read the lane from a single per-tick snapshot instead of
+        issuing a fresh HTTP GET for every lane in every claim attempt (#256).
+        """
+        if queue_for is None:
+            queue_for = lambda lane_name: self.queue(agent_name, lane_name)  # noqa: E731
+        for item in select_candidates(queue_for(lane), lane):
             try:
                 if self.claim(item, agent_name):
                     return to_claimed_item(item, lane)
@@ -262,21 +274,40 @@ class DispatchClient:
                 return True  # already released / terminal — effectively unclaimed
             raise
 
-    def find_issue_id(self, agent_name: str, lanes: list, repo: str, issue_number: int) -> str:
+    def find_issue_id(
+        self,
+        agent_name: str,
+        lanes: list,
+        repo: str,
+        issue_number: int,
+        queue_snapshot: Optional[dict] = None,
+    ) -> str:
         """Recover a dispatch issue id by repo+number from the lane queues
         (includeClaimed=true, so claimed items are visible). Used to backfill
-        Workloads whose issue-id annotation predates bridge 0.3.0."""
-        all_queues = self.queues(agent_name, lanes)
+        Workloads whose issue-id annotation predates bridge 0.3.0.
+
+        ``queue_snapshot`` is an optional pre-fetched {lane: [items]} map used
+        by ``run_tick`` so the per-tick snapshot is reused instead of refetching
+        every lane from dispatch (#256). When omitted, falls back to issuing a
+        fresh parallel HTTP batch via ``self.queues``.
+        """
+        if queue_snapshot is None:
+            queue_snapshot = self.queues(agent_name, lanes)
         # Preserve original lane order for deterministic first-match semantics.
         for lane in lanes:
-            for item in all_queues.get(lane, []):
+            for item in queue_snapshot.get(lane, []):
                 if not isinstance(item, dict):
                     continue
                 if item.get("repoFullName") == repo and int(_number(item) or 0) == issue_number:
                     return str(item.get("issueId") or item.get("id") or "")
         return ""
 
-    def lane_index(self, agent_name: str, lanes: list) -> dict:
+    def lane_index(
+        self,
+        agent_name: str,
+        lanes: list,
+        queue_snapshot: Optional[dict] = None,
+    ) -> dict:
         """Map (repo, issue number) -> the lane dispatch currently has it in.
 
         One pass over the same lane queues find_issue_id walks
@@ -284,13 +315,19 @@ class DispatchClient:
         Workload's lane off its label, which froze at creation time; this is how
         they see a lane that changed underneath them (a manual de-escalation, or
         a groomer reclassification).
+
+        ``queue_snapshot`` is an optional pre-fetched {lane: [items]} map used
+        by ``run_tick`` so the per-tick snapshot is reused instead of refetching
+        every lane from dispatch (#256). When omitted, falls back to issuing a
+        fresh parallel HTTP batch via ``self.queues``.
         """
-        all_queues = self.queues(agent_name, lanes)
+        if queue_snapshot is None:
+            queue_snapshot = self.queues(agent_name, lanes)
         index: dict = {}
         # Reverse lane order so the first lane listed wins on a duplicate, matching
         # find_issue_id's first-match semantics.
         for lane in reversed(lanes):
-            for item in all_queues.get(lane, []):
+            for item in queue_snapshot.get(lane, []):
                 if not isinstance(item, dict):
                     continue
                 repo = item.get("repoFullName")
