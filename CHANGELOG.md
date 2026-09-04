@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.7.8](https://github.com/misospace/foreman-dispatch-bridge/compare/v0.7.7...v0.7.8) (2026-09-04)
+
+
+### Bug Fixes
+
+* **bridge:** default DISPATCH_AGENT_NAME to dash-delimited foreman-coder ([#279](https://github.com/misospace/foreman-dispatch-bridge/issues/279)) ([784c9d7](https://github.com/misospace/foreman-dispatch-bridge/commit/784c9d77fb15b21acf935ae92bb3d82d53f2015f)), closes [#253](https://github.com/misospace/foreman-dispatch-bridge/issues/253)
+* **bridge:** wrap kubernetes CustomObjectsApi calls in transient-error retry ([#278](https://github.com/misospace/foreman-dispatch-bridge/issues/278)) ([a226b3e](https://github.com/misospace/foreman-dispatch-bridge/commit/a226b3e2c082627611589f63b8b011c5d305bb03))
+* **env:** make the verify step opt-in ([#280](https://github.com/misospace/foreman-dispatch-bridge/issues/280)) ([fa8d070](https://github.com/misospace/foreman-dispatch-bridge/commit/fa8d0700f04b4d11e8b7222db64739ec5c312a98))
+* **retry:** BUDGET-EXHAUSTED buys another attempt instead of a human ([#276](https://github.com/misospace/foreman-dispatch-bridge/issues/276)) ([c63cb1a](https://github.com/misospace/foreman-dispatch-bridge/commit/c63cb1a3ac8c1129e9755b1ab6c7add49124eaa9)), closes [#274](https://github.com/misospace/foreman-dispatch-bridge/issues/274)
+
 ## [0.7.7](https://github.com/misospace/foreman-dispatch-bridge/compare/v0.7.6...v0.7.7) (2026-09-03)
 
 
