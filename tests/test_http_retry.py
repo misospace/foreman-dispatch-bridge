@@ -10,6 +10,8 @@ from bridge.http_retry import (
     retry_request,
     http_get,
     http_post,
+    _retry_k8s_request,
+    _is_k8s_retryable,
 )
 
 
@@ -355,3 +357,139 @@ def test_redact_token_lives_in_http_retry_and_is_shared():
     # Both modules must use the exact same shared objects, not local copies.
     assert main._redact_token is http_retry._redact_token
     assert claim._redact_token is http_retry._redact_token
+
+
+# ── kubernetes client retry wrapper (issue #257) ────────────────────────────
+
+
+def _k8s_exc(status: int):
+    """Build a kubernetes.client.ApiException with the given status."""
+    from kubernetes.client.exceptions import ApiException
+
+    return ApiException(status=status, reason="boom")
+
+
+def test_k8s_retry_503_eventually_succeeds():
+    calls = {"n": 0}
+
+    def call():
+        calls["n"] += 1
+        if calls["n"] < 2:
+            raise _k8s_exc(503)
+        return {"items": []}
+
+    with patch("time.sleep") as mock_sleep:
+        result = _retry_k8s_request(call, base_delay=0.01)
+
+    assert result == {"items": []}
+    assert calls["n"] == 2
+    mock_sleep.assert_called_once()
+
+
+def test_k8s_retry_504_eventually_succeeds():
+    calls = {"n": 0}
+
+    def call():
+        calls["n"] += 1
+        if calls["n"] < 3:
+            raise _k8s_exc(504)
+        return "ok"
+
+    with patch("time.sleep"):
+        assert _retry_k8s_request(call, base_delay=0.01) == "ok"
+    assert calls["n"] == 3
+
+
+def test_k8s_retry_429_eventually_succeeds():
+    calls = {"n": 0}
+
+    def call():
+        calls["n"] += 1
+        if calls["n"] < 2:
+            raise _k8s_exc(429)
+        return {}
+
+    with patch("time.sleep"):
+        assert _retry_k8s_request(call, base_delay=0.01) == {}
+    assert calls["n"] == 2
+
+
+def test_k8s_retry_4xx_raised_immediately():
+    calls = {"n": 0}
+
+    def call():
+        calls["n"] += 1
+        raise _k8s_exc(404)
+
+    with patch("time.sleep") as mock_sleep:
+        with pytest.raises(Exception):
+            _retry_k8s_request(call, base_delay=0.01)
+
+    assert calls["n"] == 1
+    mock_sleep.assert_not_called()
+
+
+def test_k8s_retry_403_never_retried():
+    """RBAC Forbidden is never retried — it just amplifies noise."""
+    calls = {"n": 0}
+
+    def call():
+        calls["n"] += 1
+        raise _k8s_exc(403)
+
+    with patch("time.sleep") as mock_sleep:
+        with pytest.raises(Exception):
+            _retry_k8s_request(call, base_delay=0.01)
+
+    assert calls["n"] == 1
+    mock_sleep.assert_not_called()
+
+
+def test_k8s_retry_exhausted_raises_original():
+    """After exhausting retries the original ApiException propagates."""
+    from kubernetes.client.exceptions import ApiException
+
+    sentinel = _k8s_exc(503)
+    calls = {"n": 0}
+
+    def call():
+        calls["n"] += 1
+        raise sentinel
+
+    with patch("time.sleep"):
+        with pytest.raises(ApiException) as excinfo:
+            _retry_k8s_request(call, retries=2, base_delay=0.01)
+
+    assert excinfo.value is sentinel
+    assert calls["n"] == 3  # initial + 2 retries
+
+
+def test_k8s_retry_non_api_exception_propagates_immediately():
+    class NotAnApiException(Exception):
+        pass
+
+    calls = {"n": 0}
+
+    def call():
+        calls["n"] += 1
+        raise NotAnApiException("nope")
+
+    with patch("time.sleep") as mock_sleep:
+        with pytest.raises(NotAnApiException):
+            _retry_k8s_request(call, base_delay=0.01)
+
+    assert calls["n"] == 1
+    mock_sleep.assert_not_called()
+
+
+def test_is_k8s_retryable_classifies_status_codes():
+    assert _is_k8s_retryable(_k8s_exc(429))
+    assert _is_k8s_retryable(_k8s_exc(500))
+    assert _is_k8s_retryable(_k8s_exc(502))
+    assert _is_k8s_retryable(_k8s_exc(503))
+    assert _is_k8s_retryable(_k8s_exc(504))
+    assert not _is_k8s_retryable(_k8s_exc(400))
+    assert not _is_k8s_retryable(_k8s_exc(403))
+    assert not _is_k8s_retryable(_k8s_exc(404))
+    assert not _is_k8s_retryable(_k8s_exc(409))
+    assert not _is_k8s_retryable(RuntimeError("not an api exception"))

@@ -1,6 +1,9 @@
 import pytest
+from kubernetes.client import ApiException
+
+from bridge import main
+from bridge.main import BridgeRuntime, _parse_bool_env, run_once
 from bridge.models import ClaimedItem
-from bridge.main import run_once, _parse_bool_env
 from bridge.workload import _parse_json_map
 
 LANES = ["local", "cloud", "frontier"]
@@ -481,3 +484,23 @@ def test_update_pull_request_branch_omits_auth_without_a_token():
 
     assert update_pull_request_branch("o/r", 7, http_put=_put, github_token="") is True
     assert "Authorization" not in seen
+
+
+def test_k8s_503_retry_keeps_bridge_working(monkeypatch):
+    monkeypatch.setattr(main.time, "sleep", lambda _delay: None)
+
+    class FakeK8s:
+        def __init__(self):
+            self.calls = 0
+
+        def list_namespaced_custom_object(self, **_kwargs):
+            self.calls += 1
+            if self.calls == 1:
+                raise ApiException(status=503, reason="Service Unavailable")
+            return {"items": []}
+
+    api = FakeK8s()
+    runtime = BridgeRuntime(api, "ns-1", "dispatch-bridge-prfix")
+
+    assert runtime.load_by_coder_agent() == {}
+    assert api.calls == 3
