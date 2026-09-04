@@ -15,6 +15,65 @@ logger = logging.getLogger(__name__)
 # Status codes that indicate a transient condition worth retrying.
 _RETRYABLE_STATUS_CODES = frozenset((429, 500, 502, 503, 504))
 
+# Kubernetes API client status codes that indicate a transient condition
+# worth retrying. 5xx (apiserver overload, HAProxy timeout, etcd sync lag)
+# and 429 (apiserver rate-limiting) are retried; 4xx other than 429 indicate
+# client / RBAC errors that retrying cannot fix.
+_K8S_RETRYABLE_STATUS_CODES = frozenset((429, 500, 502, 503, 504))
+
+
+def _is_k8s_retryable(exc):
+    """Return True when *exc* is a transient kubernetes API exception."""
+    # Local import so unit tests that import http_retry without the kubernetes
+    # package installed can still exercise the requests-based helpers.
+    try:
+        from kubernetes import client as _k8s_client  # type: ignore
+    except Exception:  # pragma: no cover - kubernetes is a hard dep here
+        _k8s_client = None
+
+    api_exc = getattr(_k8s_client, "ApiException", None)
+    if api_exc is not None and isinstance(exc, api_exc):
+        status = getattr(exc, "status", None)
+        if status is None:
+            return False
+        # 403 (Forbidden) is RBAC — retrying amplifies the noise without
+        # changing the outcome, so it is never retried.
+        if status == 403:
+            return False
+        return status in _K8S_RETRYABLE_STATUS_CODES
+    return False
+
+
+def _retry_k8s_request(callable, *, retries=2, base_delay=0.5, max_delay=16.0,
+                       backoff_factor=2.0):
+    """Run a kubernetes client call with exponential-backoff retry on 5xx/429.
+
+    Mirrors :func:`retry_request` but is parameterised for
+    ``kubernetes.client.ApiException`` instead of ``requests``. 4xx errors
+    other than 429 (including 403 Forbidden, which is an RBAC failure) are
+    raised immediately — retrying them just amplifies noise.
+    """
+    last_exc = None
+    for attempt in range(retries + 1):
+        try:
+            return callable()
+        except Exception as exc:  # noqa: BLE001 - we re-raise below
+            last_exc = exc
+            if not _is_k8s_retryable(exc) or attempt == retries:
+                raise
+            delay = min(base_delay * (backoff_factor ** attempt), max_delay)
+            logger.warning(
+                "k8s-retry: attempt %d failed (%s), retrying in %.1fs",
+                attempt + 1, exc, delay,
+            )
+            time.sleep(delay)
+
+    # Defensive: should not reach here because the loop either returns or
+    # re-raises the last exception. Re-raise for safety.
+    if last_exc is not None:
+        raise last_exc
+    raise RuntimeError("unexpected k8s retry loop exit")
+
 # Matches a Bearer token in log/error strings so it can be redacted before
 # the string is written to a log or surfaced to the user.
 _TOKEN_RE = re.compile(

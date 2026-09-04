@@ -50,7 +50,7 @@ from bridge.prfix import (
 from bridge.prune import prune_workloads, stamp_terminal_since, terminal_since_key
 from bridge.reconcile import reconcile_stranded_issues, release_stuck_claims
 from bridge.review_transition import transition_to_in_review
-from bridge.http_retry import _redact_token
+from bridge.http_retry import _redact_token, _retry_k8s_request
 
 
 logger = logging.getLogger("bridge.main")
@@ -100,27 +100,27 @@ def _delete_workload(
     Raises ``TimeoutError`` if the resource is still present after *timeout* seconds.
     """
     try:
-        api.delete_namespaced_custom_object(
+        _retry_k8s_request(lambda: api.delete_namespaced_custom_object(
             group="foreman.llmkube.dev",
             version="v1alpha1",
             namespace=namespace,
             plural="workloads",
             name=name,
             body=client.V1DeleteOptions(propagation_policy="Foreground"),
-        )
+        ))
     except client.exceptions.ApiException as exc:
         if exc.status == 404:  # already gone
             return
         raise
     for _ in range(timeout):
         try:
-            api.get_namespaced_custom_object(
+            _retry_k8s_request(lambda: api.get_namespaced_custom_object(
                 group="foreman.llmkube.dev",
                 version="v1alpha1",
                 namespace=namespace,
                 plural="workloads",
                 name=name,
-            )
+            ))
         except client.exceptions.ApiException as exc:
             if exc.status == 404:
                 return
@@ -515,13 +515,13 @@ def _list_workloads_by_label(
     label_selector: str,
 ) -> List[Dict[str, Any]]:
     """Return all Workload items matching *label_selector* in *namespace*."""
-    response = api.list_namespaced_custom_object(
+    response = _retry_k8s_request(lambda: api.list_namespaced_custom_object(
         group="foreman.llmkube.dev",
         version="v1alpha1",
         namespace=namespace,
         plural="workloads",
         label_selector=label_selector,
-    )
+    ))
     return list(response.get("items", []))
 
 
@@ -541,13 +541,13 @@ def _list_agentic_tasks_by_workload(
     to fail closed and keep every coder ref busy for the tick.
     """
     try:
-        response = api.list_namespaced_custom_object(
+        response = _retry_k8s_request(lambda: api.list_namespaced_custom_object(
             group="foreman.llmkube.dev",
             version="v1alpha1",
             namespace=namespace,
             plural="agentictasks",
             label_selector=_TASK_WORKLOAD_LABEL,
-        )
+        ))
         items = response.get("items", [])
         if not isinstance(items, list):
             return None
@@ -713,10 +713,10 @@ def run_tick(
 
     def create_workload(manifest: dict) -> None:
         try:
-            api.create_namespaced_custom_object(
+            _retry_k8s_request(lambda: api.create_namespaced_custom_object(
                 group="foreman.llmkube.dev", version="v1alpha1",
                 namespace=cfg.namespace, plural="workloads", body=manifest,
-            )
+            ))
         except client.exceptions.ApiException as e:
             if e.status != 409:  # 409 = Workload already exists -> idempotent no-op
                 raise
@@ -839,10 +839,10 @@ def run_tick(
 
     def model_for_agent(agent_name: str) -> str:
         try:
-            response = api.get_namespaced_custom_object(
+            response = _retry_k8s_request(lambda: api.get_namespaced_custom_object(
                 group="foreman.llmkube.dev", version="v1alpha1",
                 namespace=cfg.namespace, plural="agents", name=agent_name,
-            )
+            ))
             spec = response.get("spec") or {}
             return str((spec.get("providerConfig") or {}).get("model") or spec.get("model") or agent_name)
         except Exception:
@@ -1490,7 +1490,7 @@ def _list_terminal_candidates(
         if not name:
             continue
         try:
-            api.patch_namespaced_custom_object(
+            _retry_k8s_request(lambda: api.patch_namespaced_custom_object(
                 group="foreman.llmkube.dev",
                 version="v1alpha1",
                 namespace=namespace,
@@ -1501,7 +1501,7 @@ def _list_terminal_candidates(
                         "annotations": {annotation_key: stamp},
                     },
                 },
-            )
+            ))
         except client.ApiException as exc:
             # stamp_terminal_since mutated this manifest in place. The PATCH did
             # not land, so drop the annotation again: leaving it makes
