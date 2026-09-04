@@ -14,6 +14,7 @@ from typing import Any, Dict, List
 import pytest
 from kubernetes.client.rest import ApiException
 
+import bridge.main as main
 from bridge.prune import terminal_since_key
 from bridge.main import (
     BridgeRuntime,
@@ -649,6 +650,22 @@ class TestListWorkloadTasks:
             responses={"list_namespaced_custom_object": [{"items": []}]}
         )
         assert _list_workload_tasks(api, "ns", "wl-1") == []
+
+    def test_503_retries_and_continues(self, monkeypatch) -> None:
+        monkeypatch.setattr(main.time, "sleep", lambda _delay: None)
+        api = FakeAPI(
+            responses={"list_namespaced_custom_object": [
+                {"items": [{"metadata": {"name": "t1"}}]},
+            ]},
+            errors={"list_namespaced_custom_object": [
+                (503, "Service Unavailable"),
+            ]},
+        )
+
+        result = _list_workload_tasks(api, "ns", "wl-1")
+
+        assert result == [{"metadata": {"name": "t1"}}]
+        assert len(api.calls) == 2
 
 
 # ---------------------------------------------------------------------------

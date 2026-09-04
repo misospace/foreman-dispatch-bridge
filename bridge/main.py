@@ -1101,10 +1101,15 @@ def run_tick(
 
     if cfg.pr_fix_enabled:
         def list_prfix_workloads() -> list:
-            resp = api.list_namespaced_custom_object(
-                group="foreman.llmkube.dev", version="v1alpha1",
-                namespace=cfg.namespace, plural="workloads",
-                label_selector=f"created-by={PRFIX_CREATED_BY}",
+            resp = _retry_k8s_request(
+                lambda: api.list_namespaced_custom_object(
+                    group="foreman.llmkube.dev", version="v1alpha1",
+                    namespace=cfg.namespace, plural="workloads",
+                    label_selector=f"created-by={PRFIX_CREATED_BY}",
+                ),
+                retries=2,
+                base_delay=0.5,
+                max_delay=16.0,
             )
             return resp.get("items", [])
 
@@ -1531,12 +1536,17 @@ def _list_workload_tasks(
     workload_name: str,
 ) -> List[Dict[str, Any]]:
     """Return AgenticTask items belonging to *workload_name*."""
-    response = api.list_namespaced_custom_object(
-        group="foreman.llmkube.dev",
-        version="v1alpha1",
-        namespace=namespace,
-        plural="agentictasks",
-        label_selector=f"foreman.llmkube.dev/workload={workload_name}",
+    response = _retry_k8s_request(
+        lambda: api.list_namespaced_custom_object(
+            group="foreman.llmkube.dev",
+            version="v1alpha1",
+            namespace=namespace,
+            plural="agentictasks",
+            label_selector=f"foreman.llmkube.dev/workload={workload_name}",
+        ),
+        retries=2,
+        base_delay=0.5,
+        max_delay=16.0,
     )
     return list(response.get("items", []))
 
