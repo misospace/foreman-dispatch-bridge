@@ -6,27 +6,32 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1
 
-# TEMPORARY (remove me): CVE-2026-53615 is a HIGH in util-linux 2.41-5, which the
-# pinned python:3.14-slim base still ships. Debian fixed it in 2.41.5-0+deb13u1,
-# but the upstream image has not rebuilt against that snapshot, so the release
-# Trivy gate fails on nine packages that all come from this one source. Pull the
-# fixed packages straight from Debian until the base catches up.
+# TEMPORARY (remove me): this layer backports OS packages the pinned
+# python:3.14-slim base has not yet rebuilt, so the release Trivy gate
+# (CRITICAL,HIGH) would fail. Tracking issue: #254 — the release workflow
+# queries the base image and fails loudly once it ships the fixes, so this
+# layer cannot linger silently as dead weight across releases.
 #
-# Drop this layer once the base ships the fix, i.e. when
+# This layer currently patches SEVEN packages across TWO CVEs. Keep the
+# enumeration below in sync with the pins in the RUN block (a test enforces it).
+#
+# CVE-2026-53615 (HIGH, util-linux 2.41-5): Debian fixed it in 2.41.5-0+deb13u1.
+# Patches: util-linux, bsdutils, mount, login. Drop these four pins once
 #   docker run --rm <base-digest> dpkg-query -W -f='${Version}\n' util-linux
-# reports 2.41.5-0+deb13u1 or newer. At that point it is a no-op costing build time.
+# reports 2.41.5-0+deb13u1 or newer.
+#
+# CVE-2026-14456 (HIGH, openssl 3.5.6-1~deb13u2, QUIC server unbounded memory
+# growth): Debian fixed it in 3.5.7-1~deb13u2; the base still ships 3.5.6, so
+# bumping the pin does not help. Patches: openssl, libssl3t64,
+# openssl-provider-legacy. Drop these three pins once
+#   docker run --rm <base-digest> dpkg-query -W -f='${Version}\n' openssl
+# reports 3.5.7-1~deb13u2 or newer.
+#
 # Versions are pinned so this layer is deterministic: a bare `apt-get install`
 # would resolve against whatever the mirror holds at build time, which is the
 # same reproducibility hole that argues against a blanket `apt-get upgrade`.
 # If Debian supersedes these, the build fails loudly rather than drifting, which
 # is the reminder to check whether the base has caught up and this can go.
-#
-# Same situation for CVE-2026-14456, a HIGH in openssl 3.5.6-1~deb13u2 (QUIC
-# server unbounded memory growth). Debian fixed it in 3.5.7-1~deb13u2; the base
-# still ships 3.5.6, verified against the current 3.14-slim digest, so bumping
-# the pin does not help. Drop these three lines when
-#   docker run --rm <base-digest> dpkg-query -W -f='${Version}\n' openssl
-# reports 3.5.7-1~deb13u2 or newer.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends --only-upgrade \
         util-linux=2.41.5-0+deb13u1 \
