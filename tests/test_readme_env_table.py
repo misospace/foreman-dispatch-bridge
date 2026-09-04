@@ -75,6 +75,45 @@ def test_env_registry_covers_every_env_var_the_bridge_reads():
     )
 
 
+def test_dispatch_agent_name_default_agrees_across_readme_registry_and_code():
+    """The DISPATCH_AGENT_NAME default must agree in all three places.
+
+    Issue #253: the README row documented ``foreman/coder`` while its own
+    description said "use a dash, not a slash", and the same slashed default
+    lived in ``bridge/env.py``'s ``OPTIONAL_VARS`` and the
+    ``os.environ.get(...)`` fallback in ``bridge/main.py``. This test pins the
+    README row, the env registry, and the code default to a single value so
+    the three cannot drift apart again.
+    """
+    from bridge.env import OPTIONAL_VARS
+
+    text = README_PATH.read_text(encoding="utf-8")
+    config_match = re.search(r"^## Configuration.*?(?=^## |\Z)", text, re.MULTILINE | re.DOTALL)
+    section = config_match.group(0) if config_match else text
+    row = re.search(r"\|\s*`DISPATCH_AGENT_NAME`\s*\|\s*`([^`]*)`\s*\|", section)
+    assert row is not None, "DISPATCH_AGENT_NAME row missing from README Configuration table"
+    readme_default = row.group(1).strip()
+
+    registry_default = OPTIONAL_VARS["DISPATCH_AGENT_NAME"]
+
+    main_src = (BRIDGE_DIR / "main.py").read_text(encoding="utf-8")
+    code_match = re.search(
+        r'os\.environ\.get\(\s*["\']DISPATCH_AGENT_NAME["\']\s*,\s*["\']([^"\']*)["\']\s*\)',
+        main_src,
+    )
+    assert code_match is not None, "DISPATCH_AGENT_NAME os.environ.get default missing from bridge/main.py"
+    code_default = code_match.group(1)
+
+    assert readme_default == registry_default == code_default, (
+        f"DISPATCH_AGENT_NAME defaults disagree: README={readme_default!r}, "
+        f"bridge/env.py={registry_default!r}, bridge/main.py={code_default!r}. See issue #253."
+    )
+    assert "/" not in readme_default, (
+        f"DISPATCH_AGENT_NAME default {readme_default!r} contains a slash; "
+        "the README row itself says to use a dash, not a slash. See issue #253."
+    )
+
+
 def test_readme_does_not_claim_a_wrong_default_for_max_in_progress():
     """The MAX_IN_PROGRESS default in code is "0"; README must match.
 
