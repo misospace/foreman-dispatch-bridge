@@ -31,7 +31,7 @@ issue per lane.
 |---|---|---|
 | `DISPATCH_URL` | `http://dispatch.llm:3000` | dispatch base URL |
 | `DISPATCH_AGENT_TOKEN` | *(required)* | Bearer token for the dispatch API |
-| `DISPATCH_AGENT_NAME` | `foreman/coder` | queue identity (use a dash, not a slash) |
+| `DISPATCH_AGENT_NAME` | `foreman-coder` | queue identity (use a dash, not a slash) |
 | `DISPATCH_LANES` | `local,cloud,frontier` | lanes polled per tick. Concurrent lane fetches are soft-capped at 16 workers per tick (`MAX_LANE_WORKERS`); lanes beyond the cap are still polled, just with fewer in-flight requests. If you need to watch more than 16 lanes with full concurrency, split into multiple bridge deployments. An over-cap value logs a one-time `WARNING` (silence with `DISPATCH_LANES_WARN=0`). |
 | `DISPATCH_LANES_WARN` | `1` | log a one-time `WARNING` when `DISPATCH_LANES` exceeds the 16-worker cap; set `0` to silence |
 | `FOREMAN_NAMESPACE` | `llm` | namespace for Workloads |

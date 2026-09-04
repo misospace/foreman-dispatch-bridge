@@ -1291,7 +1291,7 @@ def _real_main() -> None:  # pragma: no cover - thin wiring, exercised in the cl
     base_url = os.environ.get("DISPATCH_URL", "http://dispatch.llm:3000")
     _check_dispatch_url(base_url)
     token = os.environ["DISPATCH_AGENT_TOKEN"]
-    agent_name = os.environ.get("DISPATCH_AGENT_NAME", "foreman/coder")
+    agent_name = os.environ.get("DISPATCH_AGENT_NAME", "foreman-coder")
     lanes = [part.strip() for part in os.environ.get("DISPATCH_LANES", "local,cloud,frontier").split(",") if part.strip()]
     warn_if_lane_cap_exceeded(lanes)
     namespace = os.environ.get("FOREMAN_NAMESPACE", "llm")

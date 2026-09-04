@@ -17,7 +17,7 @@ REQUIRED_VARS: List[str] = [
 # Optional env vars with their defaults (documented for reference).
 OPTIONAL_VARS: Dict[str, str] = {
     "DISPATCH_URL": "http://dispatch.llm:3000",
-    "DISPATCH_AGENT_NAME": "foreman/coder",
+    "DISPATCH_AGENT_NAME": "foreman-coder",
     "DISPATCH_LANES": "local,cloud,frontier",
     "DISPATCH_LANES_WARN": "1",
     "FOREMAN_NAMESPACE": "llm",
