@@ -53,3 +53,36 @@ def test_error_message_names_missing_var():
         output = stderr_capture.getvalue()
         assert "DISPATCH_AGENT_TOKEN" in output
         assert "FATAL" in output
+
+
+# --- Documented defaults must match the ones the bridge actually applies ---
+
+
+def test_verify_enabled_documented_default_matches_the_applied_default():
+    """OPTIONAL_VARS documents defaults; _real_main decides them. Two sources of
+    truth, and only one of them is read at runtime.
+
+    VERIFY_ENABLED is opt-in: the deployment relies on repository CI and has no
+    verifier Agent, so a silent flip back to on would emit verify steps whose
+    agentRef does not resolve. _real_main is `pragma: no cover` thin wiring, so
+    the applied default is asserted from source rather than by calling it.
+    """
+    import re
+    from pathlib import Path
+
+    from bridge.env import OPTIONAL_VARS
+    from bridge.main import _parse_bool_env
+
+    documented = _parse_bool_env(OPTIONAL_VARS["VERIFY_ENABLED"])
+    assert documented is False, "VERIFY_ENABLED must be documented as off by default"
+
+    source = (Path(__file__).resolve().parent.parent / "bridge" / "main.py").read_text()
+    m = re.search(
+        r'VERIFY_ENABLED"\s*,\s*""\s*\)\s*,\s*default=(True|False)\s*\)', source
+    )
+    assert m, "could not find the VERIFY_ENABLED default in bridge/main.py"
+    applied = m.group(1) == "True"
+    assert applied == documented, (
+        f"bridge/main.py applies default={m.group(1)} while OPTIONAL_VARS documents "
+        f"{OPTIONAL_VARS['VERIFY_ENABLED']!r}"
+    )

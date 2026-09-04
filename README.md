@@ -18,8 +18,9 @@ dispatch lanes ──claim──► bridge ──create──► Workload ──
                                  claims them there with that lane's coder Agent
 ```
 
-`[verify]` is optional — controlled by `VERIFY_ENABLED`. When disabled the bridge
-relies on repository CI instead of the Foreman gate. Requires Foreman >= 0.9.9.
+`[verify]` is opt-in — controlled by `VERIFY_ENABLED`, off by default. Enable it
+to run the Foreman gate; left off, the bridge relies on repository CI. Enabling
+requires Foreman >= 0.9.9.
 
 Each tick (one CronJob run): reconcile failures first, then claim one ready
 issue per lane.
@@ -44,7 +45,7 @@ issue per lane.
 | `PR_FIX_MAX_ATTEMPTS` | `3` | pr-fix attempts before BLOCKED/tombstone |
 | `FIX_FIRST_AGENTS` | *(empty)* | JSON list `["coder"]` (or comma-separated names) of agents that only join the issue rotation when their fix lane is idle (no fix work in flight, a free slot). Fixes stay first-priority on an uncontended slot. See issue #134. |
 | `GITHUB_TOKEN` | *(empty)* | used to check a PR's `mergeable_state` before marking a pr-fix FIXED (unauthenticated if unset) |
-| `VERIFY_ENABLED` | `true` | set to `false` to omit the verify step and rely on repository CI (requires Foreman >= 0.9.9). Older Foreman versions reject Workloads without the required `verifierAgentRef`. |
+| `VERIFY_ENABLED` | `false` | set to `true` to add the verify step and run the Foreman gate. Requires Foreman >= 0.9.9 and a verifier Agent; older Foreman versions reject Workloads without the required `verifierAgentRef`, so a deployment on one of those must set this. |
 | `VERDICT_SELF_GO` | _(unset)_ | Comma-separated lanes whose terminal Workload verdict the bridge is allowed to auto-mark `selfGo` (recommended for use with `foreman dispatch run --wait`) |
 | `MAX_IN_PROGRESS` | `0` | Maximum concurrent in-progress Workloads per lane (`0` disables the cap, i.e. unlimited) |
 | `PRUNE_COMPLETED_AFTER_HOURS` | `6` | GC age, in hours, after which Completed Workloads are pruned (set to `0` to disable the sweeper) |

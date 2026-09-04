@@ -28,7 +28,7 @@ OPTIONAL_VARS: Dict[str, str] = {
     "BASE_CODER_AGENTS": "",
     "CODER_AGENT_SLOTS": "",
     "ESCALATION_LANE": "",
-    "VERIFY_ENABLED": "true",
+    "VERIFY_ENABLED": "false",
     "VERDICT_SELF_GO": "",
     "PR_FIX_ENABLED": "",
     "PR_FIX_MAX_ATTEMPTS": "3",
