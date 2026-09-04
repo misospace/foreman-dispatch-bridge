@@ -1310,7 +1310,7 @@ def _real_main() -> None:  # pragma: no cover - thin wiring, exercised in the cl
     # When set, exhausted Workloads outside this lane escalate into it (re-lane +
     # unclaim) instead of tombstoning. Empty disables escalation.
     escalation_lane = os.environ.get("ESCALATION_LANE", "").strip()
-    verify_enabled = _parse_bool_env(os.environ.get("VERIFY_ENABLED", ""), default=True)
+    verify_enabled = _parse_bool_env(os.environ.get("VERIFY_ENABLED", ""), default=False)
     self_go = parse_self_go(os.environ.get("VERDICT_SELF_GO"))
     pr_fix_enabled = os.environ.get("PR_FIX_ENABLED", "").strip().lower() in ("1", "true", "yes")
     pr_fix_max_attempts = int(os.environ.get("PR_FIX_MAX_ATTEMPTS", "3"))
