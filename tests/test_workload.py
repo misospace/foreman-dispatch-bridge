@@ -75,10 +75,9 @@ def test_build_workload_omits_gate_profile_by_default():
 
 def test_build_workload_stamps_retry_annotations():
     item = ClaimedItem(repo="a/b", issue_number=9, intent="x", lane="local", issue_id="id-9")
-    ann = build_workload(item, namespace="llm", agent_name="foreman-coder", attempt=2)["metadata"]["annotations"]
+    ann = build_workload(item, namespace="llm", attempt=2)["metadata"]["annotations"]
     assert ann["foreman.llmkube.dev/attempt"] == "2"
     assert ann["foreman.llmkube.dev/issue-id"] == "id-9"
-    assert ann["foreman.llmkube.dev/agent-name"] == "foreman-coder"
 
 
 def test_build_workload_defaults_attempt_to_one():

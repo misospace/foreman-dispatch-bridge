@@ -23,7 +23,6 @@ INFRA_ATTEMPT_ANNOTATION = "foreman.llmkube.dev/infra-attempt"
 SIGNATURE_ANNOTATION = "foreman.llmkube.dev/failure-signature"
 PROGRESS_ANNOTATION = "foreman.llmkube.dev/progress-attempts"
 ISSUE_ID_ANNOTATION = "foreman.llmkube.dev/issue-id"
-AGENT_NAME_ANNOTATION = "foreman.llmkube.dev/agent-name"
 
 
 def _parse_json_map(raw: Optional[str], name: str = "config") -> dict:
@@ -547,13 +546,12 @@ def build_workload(
             "labels": {"created-by": "dispatch-bridge", "lane": item.lane},
             # attempt drives the verdict retry cap; infra-attempt is a separate
             # counter for infra-classified failures so the verdict budget is not
-            # burned by persistent backend errors. issue-id + agent-name let the
-            # retry loop unclaim the dispatch issue when retries are exhausted.
+            # burned by persistent backend errors. issue-id lets the retry loop
+            # unclaim the dispatch issue when retries are exhausted.
             "annotations": {
                 ATTEMPT_ANNOTATION: str(attempt),
                 INFRA_ATTEMPT_ANNOTATION: str(infra_attempt),
                 ISSUE_ID_ANNOTATION: item.issue_id,
-                AGENT_NAME_ANNOTATION: agent_name,
             },
         },
         "spec": spec,
