@@ -237,16 +237,25 @@ def transition_to_in_review(
     return results
 
 
-def _parked_for_human_comment(repo: str, issue_number: int, reason: str) -> str:
+def _parked_for_human_comment(
+    repo: str, issue_number: int, reason: str, path: str = "go-no-pr"
+) -> str:
     """Format the ``needs-human`` comment for a parked GO-with-no-PR outcome.
 
     Mirrors the escalation comment style used by ``bridge.main.park_for_human``
     so a human reading the issue sees the same shape regardless of which path
     parked it. Kept local to this file to avoid the circular import
     ``bridge.main`` would create (it imports this module).
+
+    ``path`` is rendered as a stable ``path: <value>`` tag in the header so a
+    triage flow can grep on ``path:`` to group issues by cause without opening
+    the Workload (issue #260).
     """
+    header = ":rotating_light: coder reported GO but no PR was opened."
+    if path:
+        header += f" (`path: {path}`)"
     lines = [
-        ":rotating_light: coder reported GO but no PR was opened.",
+        header,
         "",
         f"**Reason:** {reason}",
         "",

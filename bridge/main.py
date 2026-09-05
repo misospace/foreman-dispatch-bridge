@@ -60,7 +60,12 @@ logger = logging.getLogger("bridge.main")
 NEEDS_HUMAN_LABEL = "needs-human"
 
 
-def _format_escalation_comment(item: "ClaimedItem", reason: str, branch: "str | None" = None) -> str:
+def _format_escalation_comment(
+    item: "ClaimedItem",
+    reason: str,
+    branch: "str | None" = None,
+    path: "str | None" = None,
+) -> str:
     """Render the comment body for a parked-for-human escalation.
 
     NOTE: the body deliberately does NOT use an ``@foreman`` mention form,
@@ -70,9 +75,19 @@ def _format_escalation_comment(item: "ClaimedItem", reason: str, branch: "str | 
     work, and this loop parks work often. The project name collides with
     a real handle and must stay in plain text. If you are tempted to add
     a mention here, don't — see issue #142.
+
+    The ``path`` argument (one of ``"declared-human"``,
+    ``"exhausted-attempts"``, ``"exhausted-infra"``, ``"go-no-pr"``) is
+    rendered as a stable ``path: <value>`` tag in the header so a triage
+    flow can grep on ``path:`` to group issues by cause without opening
+    the Workload. A future contributor adding a fifth parking path must
+    thread a new ``path`` value through here.
     """
+    header = "**Needs a human decision**"
+    if path:
+        header += f" (`path: {path}`)"
     lines = [
-        "**Needs a human decision**",
+        header,
         "",
         reason,
     ]
@@ -744,13 +759,15 @@ def run_tick(
             )
             return None
 
-    def park_for_human(item: ClaimedItem, reason: str) -> bool:
+    def park_for_human(item: ClaimedItem, reason: str, path: str = "declared-human") -> bool:
         """Move a declared-escalation issue to status/backlog and announce it.
 
         backlog is the right resting place: the agent queue treats it as
         triage-only, so the issue is neither re-claimed nor invisible. Returns
         False on failure so the caller can fall through to a normal retry rather
-        than dropping the work."""
+        than dropping the work. ``path`` is the parking-path tag rendered into
+        the comment header so triage can tell the four parking paths apart
+        (issue #260)."""
         if not item.issue_id:
             logger.warning(
                 "park-for-human-skipped-no-issue-id",
@@ -789,7 +806,7 @@ def run_tick(
             try:
                 comment_posted = bool(
                     dispatch.post_comment(
-                        payload, _format_escalation_comment(item, reason)
+                        payload, _format_escalation_comment(item, reason, path=path)
                     )
                 )
             except Exception:
@@ -858,7 +875,17 @@ def run_tick(
         safe_model = re.sub(r"[^A-Za-z0-9._/-]+", "-", model).strip("-")[:50] or "unknown"
         if not dispatch.update_status(payload, "backlog", cfg.agent_name):
             return False
-        return dispatch.replace_labels(
+        # Dedupe BEFORE the label is applied below: replace_labels stamps
+        # needs-human itself, so a post-apply check would always read True
+        # and the comment would never post.
+        already_parked = False
+        try:
+            already_parked = bool(
+                dispatch.issue_is_parked(item.repo, item.issue_number, NEEDS_HUMAN_LABEL)
+            )
+        except Exception:
+            already_parked = False
+        labels_ok = dispatch.replace_labels(
             payload,
             [NEEDS_HUMAN_LABEL, "status/blocked"],
             [
@@ -867,6 +894,28 @@ def run_tick(
                 f"{INFRA_ATTEMPT_LABEL_PREFIX}{count}",
             ],
         )
+        # Post the same tagged escalation comment the other parking paths use
+        # (issue #260): a triage flow filtering on `needs-human` previously saw
+        # no comment at all on this path, only the blocked/infra* labels.
+        # Best-effort and deduped on the needs-human label, like park_for_human.
+        try:
+            if not already_parked:
+                dispatch.post_comment(
+                    payload,
+                    _format_escalation_comment(
+                        item,
+                        f"infrastructure retries exhausted: {count} attempts "
+                        f"against model '{model}' (e.g. model 403 or network "
+                        "error that never reached the agent)",
+                        path="exhausted-infra",
+                    ),
+                )
+        except Exception:
+            logger.exception(
+                "park-infra-comment-failed",
+                extra={"repo": item.repo, "number": item.issue_number, "model": model},
+            )
+        return bool(labels_ok)
 
     def issue_state_for(item: ClaimedItem) -> "str | None":
         """Cached state of the workload's issue, or None when unknown.

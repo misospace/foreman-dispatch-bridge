@@ -24,6 +24,23 @@ def test_format_includes_reason_verbatim():
     assert "Needs a human decision" in body
 
 
+def test_format_emits_path_tag_for_each_parking_path():
+    """Each of the four parking paths renders its stable `path:` tag in the
+    header so triage can grep on `path:` without opening the Workload
+    (issue #260)."""
+    for path in ("declared-human", "exhausted-attempts", "exhausted-infra", "go-no-pr"):
+        body = _format_escalation_comment(_item(), "some reason", path=path)
+        assert f"`path: {path}`" in body, body
+        # the tag sits on the header line, before the reason
+        assert body.startswith(f"**Needs a human decision** (`path: {path}`)"), body
+
+
+def test_format_omits_path_tag_when_not_supplied():
+    body = _format_escalation_comment(_item(), "some reason")
+    assert "path:" not in body
+    assert body.startswith("**Needs a human decision**\n"), body
+
+
 def test_format_includes_branch_link_when_supplied():
     body = _format_escalation_comment(
         _item(), "DESIGN-DECISION", branch="foreman/wl-x-y/issue-142"

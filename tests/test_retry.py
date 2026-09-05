@@ -517,12 +517,27 @@ def test_declared_escalation_parks_and_does_not_retry():
     out = _reconcile(
         r,
         declared_escalation_for=lambda name: "DESIGN-DECISION",
-        park_for_human=lambda item, reason: parked.append((item.issue_number, reason)) or True,
+        park_for_human=lambda item, reason, **_kw: parked.append((item.issue_number, reason)) or True,
     )
     assert out == ["wl-misospace-dispatch-7:human-escalation:DESIGN-DECISION"]
     assert parked == [(7, "DESIGN-DECISION")]
     assert r.created == []          # no attempt consumed
     assert r.deleted == []          # tombstone left to triage from
+
+
+def test_declared_escalation_parks_with_declared_human_path_tag():
+    """The declared-escalation branch tags its park with path=declared-human
+    so the comment header can distinguish it from the other parking paths
+    (issue #260)."""
+    kwargs = []
+    r = _Recorder([_failed_wl("wl-misospace-dispatch-7", attempt=1)])
+    out = _reconcile(
+        r,
+        declared_escalation_for=lambda name: "DESIGN-DECISION",
+        park_for_human=lambda item, reason, **kw: kwargs.append(kw) or True,
+    )
+    assert out == ["wl-misospace-dispatch-7:human-escalation:DESIGN-DECISION"]
+    assert kwargs == [{"path": "declared-human"}], kwargs
 
 
 def test_declared_escalation_first_park_still_posts_comment():
@@ -532,7 +547,7 @@ def test_declared_escalation_first_park_still_posts_comment():
         r,
         declared_escalation_for=lambda name: "DESIGN-DECISION",
         needs_human_for=lambda item: False,
-        park_for_human=lambda item, reason: comments.append(reason) or True,
+        park_for_human=lambda item, reason, **_kw: comments.append(reason) or True,
         ensure_human_label=lambda item: pytest.fail("first park must not use label-only path"),
     )
     assert out == ["wl-misospace-dispatch-7:human-escalation:DESIGN-DECISION"]
@@ -544,7 +559,7 @@ def test_declared_escalation_repeat_skips_comment_and_repairs_label():
     label_repairs = []
     wl = _failed_wl("wl-misospace-dispatch-7", attempt=1)
 
-    def park(item, reason):
+    def park(item, reason, **_kw):
         comments.append(reason)
         return True
 
@@ -583,7 +598,7 @@ def test_declared_escalation_repeat_keeps_tombstone_when_label_repair_fails():
         declared_escalation_for=lambda name: "DESIGN-DECISION",
         needs_human_for=lambda item: True,
         ensure_human_label=lambda item: False,
-        park_for_human=lambda item, reason: pytest.fail("repeat must not repost"),
+        park_for_human=lambda item, reason, **_kw: pytest.fail("repeat must not repost"),
     )
     assert out == ["wl-misospace-dispatch-7:human-escalation:DESIGN-DECISION"]
     assert r.created == []
@@ -594,7 +609,7 @@ def test_declared_escalation_retries_after_a_failed_first_park():
     comments = []
     park_calls = []
 
-    def park(item, reason):
+    def park(item, reason, **_kw):
         park_calls.append(reason)
         if len(park_calls) == 1:
             return False
@@ -633,7 +648,7 @@ def test_declared_escalation_does_not_escalate_to_the_frontier_lane():
     out = _reconcile(
         r, attempts=3,
         declared_escalation_for=lambda name: "NO-TECHNICAL-FIX",
-        park_for_human=lambda item, reason: True,
+        park_for_human=lambda item, reason, **_kw: True,
         escalate=lambda item: escalated.append(item.issue_number) or True,
         escalation_lane="frontier",
     )
@@ -647,7 +662,7 @@ def test_retries_normally_when_parking_fails():
     out = _reconcile(
         r,
         declared_escalation_for=lambda name: "DESIGN-DECISION",
-        park_for_human=lambda item, reason: False,
+        park_for_human=lambda item, reason, **_kw: False,
     )
     assert out == ["wl-misospace-dispatch-7:retry:2/3"]
     assert len(r.created) == 1
@@ -656,7 +671,7 @@ def test_retries_normally_when_parking_fails():
 def test_retries_normally_when_no_escalation_is_declared():
     r = _Recorder([_failed_wl("wl-misospace-dispatch-7", attempt=1)])
     out = _reconcile(r, declared_escalation_for=lambda name: None,
-                     park_for_human=lambda item, reason: True)
+                     park_for_human=lambda item, reason, **_kw: True)
     assert out == ["wl-misospace-dispatch-7:retry:2/3"]
     assert len(r.created) == 1
 
@@ -666,7 +681,7 @@ def test_retries_normally_when_the_escalation_lookup_raises():
         raise RuntimeError("kube unreachable")
 
     r = _Recorder([_failed_wl("wl-misospace-dispatch-7", attempt=1)])
-    out = _reconcile(r, declared_escalation_for=boom, park_for_human=lambda i, x: True)
+    out = _reconcile(r, declared_escalation_for=boom, park_for_human=lambda i, x, **_kw: True)
     assert out == ["wl-misospace-dispatch-7:retry:2/3"]
     assert len(r.created) == 1
 
@@ -1001,7 +1016,7 @@ def test_infra_recovery_probes_once_per_model_and_redrives_healthy_records():
         {"issueId": "b", "repoFullName": "o/r", "number": 2, "labels": ["blocked/infra", "blocked/infra-model/model-a", "blocked/infra-attempt/4"]},
     ]
     probes, redriven, cleared = [], [], []
-    out = reconcile_infra_parked(lambda: records, lambda model: probes.append(model) or True, lambda record, count: True, lambda record: cleared.append(record["number"]) or True, lambda record, model: redriven.append(record["number"]) or True, lambda item, reason: pytest.fail("healthy dependency must not park"))
+    out = reconcile_infra_parked(lambda: records, lambda model: probes.append(model) or True, lambda record, count: True, lambda record: cleared.append(record["number"]) or True, lambda record, model: redriven.append(record["number"]) or True, lambda item, reason, **_kw: pytest.fail("healthy dependency must not park"))
     assert probes == ["model-a"]
     assert redriven == [1, 2]
     assert cleared == [1, 2]
@@ -1012,9 +1027,20 @@ def test_infra_recovery_unhealthy_escalates_to_human_after_window():
     from bridge.retry import INFRA_RECOVERY_MAX_FAILURES, reconcile_infra_parked
     records = [{"issueId": "a", "repoFullName": "o/r", "number": 1, "labels": ["blocked/infra", "blocked/infra-model/model-a", f"blocked/infra-attempt/{INFRA_RECOVERY_MAX_FAILURES - 1}"]}]
     parked = []
-    out = reconcile_infra_parked(lambda: records, lambda model: False, lambda record, count: pytest.fail("window should end"), lambda record: True, lambda record, model: pytest.fail("unhealthy must not redrive"), lambda item, reason: parked.append((item.issue_number, reason)) or True)
+    out = reconcile_infra_parked(lambda: records, lambda model: False, lambda record, count: pytest.fail("window should end"), lambda record: True, lambda record, model: pytest.fail("unhealthy must not redrive"), lambda item, reason, **_kw: parked.append((item.issue_number, reason)) or True)
     assert parked == [(1, "infrastructure dependency unavailable: model-a")]
     assert out == ["1:infra-human:model-a"]
+
+
+def test_infra_recovery_unhealthy_parks_with_exhausted_infra_path_tag():
+    """The infra-recovery giveup tags its park with path=exhausted-infra
+    (issue #260)."""
+    from bridge.retry import INFRA_RECOVERY_MAX_FAILURES, reconcile_infra_parked
+    records = [{"issueId": "a", "repoFullName": "o/r", "number": 1, "labels": ["blocked/infra", "blocked/infra-model/model-a", f"blocked/infra-attempt/{INFRA_RECOVERY_MAX_FAILURES - 1}"]}]
+    kwargs = []
+    out = reconcile_infra_parked(lambda: records, lambda model: False, lambda record, count: pytest.fail("window should end"), lambda record: True, lambda record, model: pytest.fail("unhealthy must not redrive"), lambda item, reason, **kw: kwargs.append(kw) or True)
+    assert out == ["1:infra-human:model-a"]
+    assert kwargs == [{"path": "exhausted-infra"}], kwargs
 
 
 def test_env_documents_default_max_attempts_in_sync_with_retry_default():
@@ -1037,7 +1063,7 @@ def _parks():
     """Return (hook, recorded) where recorded collects (item, reason) pairs."""
     recorded: list = []
 
-    def park(item, reason):
+    def park(item, reason, **_kw):
         recorded.append((item, reason))
         return True
 
@@ -1067,8 +1093,30 @@ def test_verdict_giveup_parks_when_escalation_is_unavailable():
     assert out == ["wl-a-b-7:giveup:3/3"]
     assert len(parked) == 1, parked
     assert "exhausted 3 attempts" in parked[0][1]
-    # Same retire-tombstone contract as the infra branch.
-    assert rec.deleted == ["wl-a-b-7"]
+
+
+def test_verdict_giveup_parks_with_exhausted_attempts_path_tag():
+    """The exhausted-attempts branch tags its park with path=exhausted-attempts
+    (issue #260)."""
+    kwargs = []
+    rec = _Recorder([_failed_wl("wl-a-b-7", attempt=3)])
+    out = _reconcile(rec, park_for_human=lambda item, reason, **kw: kwargs.append(kw) or True)
+    assert out == ["wl-a-b-7:giveup:3/3"]
+    assert kwargs == [{"path": "exhausted-attempts"}], kwargs
+
+
+def test_infra_giveup_fallback_parks_with_exhausted_infra_path_tag():
+    """When no park_infra hook is wired, the infra giveup falls back to
+    _park_exhausted tagged with path=exhausted-infra (issue #260)."""
+    kwargs = []
+    rec = _Recorder([_failed_wl_with_executor_error(
+        "w-infra-tag", attempt=1, infra_attempt=INFRA_MAX_ATTEMPTS,
+    )])
+    out = _reconcile(rec, park_for_human=lambda item, reason, **kw: kwargs.append(kw) or True)
+    assert any("giveup-infra:" in line for line in out), out
+    assert kwargs == [{"path": "exhausted-infra"}], kwargs
+    # A successful park retires the Failed tombstone.
+    assert rec.deleted == ["w-infra-tag"]
 
 
 def test_infra_giveup_isolates_a_wedged_delete():
@@ -1115,7 +1163,7 @@ def test_giveup_dedupes_park_when_issue_is_already_needs_human():
 
     park_calls: list = []
 
-    def park(item, reason):
+    def park(item, reason, **_kw):
         park_calls.append((item.issue_id, reason))
         return True
 
@@ -1206,7 +1254,7 @@ def test_under_cap_retries_are_not_parked():
 def test_park_failure_does_not_abort_the_pass():
     # Parking is best-effort: a raising hook must not lose the remaining
     # Workloads or the giveup result line.
-    def boom(item, reason):
+    def boom(item, reason, **_kw):
         raise RuntimeError("dispatch 500")
 
     rec = _Recorder([_failed_wl("wl-a-b-7", attempt=3)])
@@ -1241,7 +1289,7 @@ def test_no_park_hook_is_tolerated():
 # _park_exhausted.
 
 
-def _park_outcome(item, reason, *, status_ok, label_ok=True, comment_ok=True):
+def _park_outcome(item, reason, *, status_ok, label_ok=True, comment_ok=True, **_kw):
     """Fake park_for_human that mirrors the post-#162 contract.
 
     status_ok=False simulates update_status returning False (or raising,
@@ -1249,7 +1297,7 @@ def _park_outcome(item, reason, *, status_ok, label_ok=True, comment_ok=True):
     tests can assert that the wrapper never sees their exceptions.
     """
 
-    def _park(item, reason):
+    def _park(item, reason, **_kw):
         if not status_ok:
             # Status failure is reported by returning False (no exception).
             # The retry wrapper is expected to surface it as a full failure.
@@ -1329,7 +1377,7 @@ def test_park_status_exception_is_reported_as_failed(caplog):
 
     caplog.set_level(logging.ERROR, logger="bridge.retry")
 
-    def _boom(item, reason):
+    def _boom(item, reason, **_kw):
         raise RuntimeError("dispatch transport 500")
 
     rec = _Recorder([_failed_wl("wl-a-b-7", attempt=3)])
@@ -1432,7 +1480,7 @@ def test_budget_exhausted_retries_instead_of_parking():
     out = _reconcile(
         r,
         declared_escalation_for=lambda name: "BUDGET-EXHAUSTED",
-        park_for_human=lambda item, reason: parked.append((item.issue_number, reason)) or True,
+        park_for_human=lambda item, reason, **_kw: parked.append((item.issue_number, reason)) or True,
     )
     assert parked == []                              # no human involved
     assert out and "human-escalation" not in out[0]  # took the ordinary retry path
@@ -1446,7 +1494,7 @@ def test_budget_exhausted_still_escalates_at_the_cap():
     out = _reconcile(
         r,
         declared_escalation_for=lambda name: "BUDGET-EXHAUSTED",
-        park_for_human=lambda item, reason: True,
+        park_for_human=lambda item, reason, **_kw: True,
         attempts=3,
     )
     assert r.created == []                           # no fresh attempt past the cap
@@ -1467,7 +1515,7 @@ def test_parking_escalations_are_unchanged_by_the_budget_case():
         out = _reconcile(
             r,
             declared_escalation_for=lambda name, _r=reason: _r,
-            park_for_human=lambda item, rsn: parked.append(rsn) or True,
+            park_for_human=lambda item, rsn, **_kw: parked.append(rsn) or True,
         )
         assert parked == [reason]
         assert out == [f"wl-misospace-dispatch-7:human-escalation:{reason}"]

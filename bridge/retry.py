@@ -199,11 +199,11 @@ def branch_pushed(tasks: list, remote_branch_exists: bool = False) -> bool:
 
 
 def _park_exhausted_factory(
-    park_for_human: Optional[Callable[[ClaimedItem, str], bool]],
+    park_for_human: Optional[Callable[..., bool]],
     current_lane_for: Optional[dict],
     lookup_issue_id: Optional[LookupIssueId],
     needs_human_for: Optional[NeedsHumanFor] = None,
-) -> Callable[[dict, str], bool]:
+) -> Callable[..., bool]:
     """Build the _park_exhausted closure used by the giveup branches.
 
     Parking is best-effort: a failure here must not abort the reconcile pass,
@@ -219,7 +219,7 @@ def _park_exhausted_factory(
     dedupe the declared-escalation path already uses.
     """
 
-    def _park_exhausted(wl: dict, reason: str) -> bool:
+    def _park_exhausted(wl: dict, reason: str, path: str = "exhausted-attempts") -> bool:
         if park_for_human is None:
             return False
         try:
@@ -229,7 +229,7 @@ def _park_exhausted_factory(
             if needs_human_for is not None and needs_human_for(item) is True:
                 # Already parked by an earlier tick — do not double-comment.
                 return True
-            return bool(park_for_human(item, reason))
+            return bool(park_for_human(item, reason, path=path))
         except Exception:
             logger.exception(
                 "park-exhausted-failed",
@@ -399,7 +399,7 @@ def reconcile_infra_parked(
     record_failure: Callable[[dict, int], bool],
     clear_marker: Callable[[dict], bool],
     redrive: Callable[[dict, str], bool],
-    park_for_human: Callable[[ClaimedItem, str], bool],
+    park_for_human: Callable[..., bool],
     max_failures: int = INFRA_RECOVERY_MAX_FAILURES,
 ) -> list[str]:
     """Recover issue markers left after an infrastructure Workload was deleted."""
@@ -446,6 +446,7 @@ def reconcile_infra_parked(
                     park_for_human(
                         claimed_item_from_issue(record),
                         f"infrastructure dependency unavailable: {model}",
+                        path="exhausted-infra",
                     )
                 )
             except Exception:
@@ -547,7 +548,7 @@ def reconcile_failures(
     branch_pushed_for: Optional[BranchPushedFor] = None,
     issue_state_for: Optional[IssueStateFor] = None,
     declared_escalation_for: Optional[DeclaredEscalationFor] = None,
-    park_for_human: Optional[Callable[[ClaimedItem, str], bool]] = None,
+    park_for_human: Optional[Callable[..., bool]] = None,
     infra_max_attempts: int = INFRA_MAX_ATTEMPTS,
     tasks_for: Optional[TasksFor] = None,
     failed_model_for: Optional[FailedModelFor] = None,
@@ -729,7 +730,7 @@ def reconcile_failures(
                     parked = False
                     if park_for_human is not None:
                         try:
-                            parked = bool(park_for_human(item_h, reason))
+                            parked = bool(park_for_human(item_h, reason, path="declared-human"))
                         except Exception as e:
                             logger.warning(
                                 "park-for-human-failed",
@@ -779,6 +780,7 @@ def reconcile_failures(
                 parked = _park_exhausted(
                     wl, f"infra failure after {attempt} attempts (e.g. model 403 "
                     "or network error that never reached the agent)",
+                    path="exhausted-infra",
                 )
             results.append(f"{name}:giveup-infra:{infra_attempt}/{infra_max_attempts}")
             # Tombstone is retired only after the issue marker is safely written;
