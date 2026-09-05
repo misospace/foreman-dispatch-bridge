@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.7.9](https://github.com/misospace/foreman-dispatch-bridge/compare/v0.7.8...v0.7.9) (2026-09-05)
+
+
+### Bug Fixes
+
+* **retry:** make branch_pushed_for honor the GitHub branch lookup ([#283](https://github.com/misospace/foreman-dispatch-bridge/issues/283)) ([f62a424](https://github.com/misospace/foreman-dispatch-bridge/commit/f62a424408713bbe38245d7fcb0d46486fe8a342)), closes [#282](https://github.com/misospace/foreman-dispatch-bridge/issues/282)
+* **workload:** make workload_name case-faithful so mixed-case repos don't collide ([#286](https://github.com/misospace/foreman-dispatch-bridge/issues/286)) ([53625f8](https://github.com/misospace/foreman-dispatch-bridge/commit/53625f80f2f2bfdb104dcc58f7143d257054e69f)), closes [#258](https://github.com/misospace/foreman-dispatch-bridge/issues/258)
+
+
+### Chores
+
+* **docker:** track the TEMPORARY OS-package patch layer so it cannot be forgotten ([#281](https://github.com/misospace/foreman-dispatch-bridge/issues/281)) ([b71a277](https://github.com/misospace/foreman-dispatch-bridge/commit/b71a277cf0e0821e0e2340c92a42c564e0dea1f3)), closes [#254](https://github.com/misospace/foreman-dispatch-bridge/issues/254)
+* **escalation:** tag parked-for-human comments with the parking path ([#284](https://github.com/misospace/foreman-dispatch-bridge/issues/284)) ([f87f2e4](https://github.com/misospace/foreman-dispatch-bridge/commit/f87f2e490605dac2e88701047848d45564d58aa6)), closes [#260](https://github.com/misospace/foreman-dispatch-bridge/issues/260)
+
 ## [Unreleased]
 
 ### Migration note (Workload name is now case-faithful)
