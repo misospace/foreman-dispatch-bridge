@@ -459,3 +459,15 @@ class TestNoPrVerdictRouting:
         assert len(updated) == 1
         assert updated[0][1] == "blocked"
         assert any("blocked" in line for line in out)
+
+
+def test_parked_for_human_comment_carries_go_no_pr_path_tag():
+    """The GO-with-no-PR comment carries the stable `path: go-no-pr` tag so
+    triage can grep on `path:` without opening the Workload (issue #260)."""
+    from bridge.review_transition import _parked_for_human_comment
+
+    body = _parked_for_human_comment("misospace/dispatch", 7, "Coder reported GO but no PR was opened.")
+    assert "`path: go-no-pr`" in body, body
+    assert body.startswith(
+        ":rotating_light: coder reported GO but no PR was opened. (`path: go-no-pr`)"
+    ), body

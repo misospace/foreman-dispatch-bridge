@@ -65,6 +65,17 @@ reuses the existing spec, so toggling this env variable after a PR-fix Workload 
 has no effect on its retries. Issue-path retries always pick up the **current** env value
 each attempt because they rebuild from scratch via `build_workload`.
 
+**Backward-compat note (parked-for-human comments):** every comment the bridge
+posts for a `needs-human` issue now carries a stable `path: <value>` tag in its
+header — `declared-human`, `exhausted-attempts`, `exhausted-infra`, or
+`go-no-pr` — so triage can group issues by cause without opening the Workload
+(issue #260). The header line is the closest thing to a contract: it is now
+`**Needs a human decision** (`path: <value>`)` (or the GO-with-no-PR variant
+with the same tag), so any operator script that matched the bare
+`**Needs a human decision**` line exactly should match on the prefix instead.
+The reason text, `Issue:`/`Workload/branch:` lines, and the footer are
+unchanged.
+
 ## RBAC
 
 The bridge needs, in `FOREMAN_NAMESPACE`:
