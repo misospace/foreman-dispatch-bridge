@@ -957,7 +957,11 @@ def run_tick(
             r = http_get(url, headers=gh_headers, allow_404=True)
         except Exception:
             r = None
-        if r is not None and getattr(r, "status_code", 0) == 200:
+        # http_get returns the parsed JSON body (a dict) on a 200, the raw
+        # response object only for a 404 (allow_404), and raises on
+        # transport/5xx (caught above -> None). So a non-None result that is
+        # not a 404 response means the branch exists on the remote.
+        if r is not None and getattr(r, "status_code", 200) != 404:
             return True
         try:
             return branch_pushed(tasks, remote_branch_exists=False)

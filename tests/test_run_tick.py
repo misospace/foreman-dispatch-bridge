@@ -620,3 +620,124 @@ def test_run_tick_drain_loop_does_not_refetch_per_claim() -> None:
     # Exactly one queue GET per lane (the snapshot), even though claim_one
     # fired multiple times.
     assert queue_calls.count("base") == 1, queue_calls
+
+
+# ---------------------------------------------------------------------------
+# #282: branch_pushed_for's GitHub branch lookup was dead code. The local
+# http_get closure (bridge/main.py, _real_main) returns the parsed JSON body
+# (a dict) on a 200, the raw response object only for a 404 (allow_404), and
+# raises on transport/5xx. branch_pushed_for checked
+# `getattr(r, "status_code", 0) == 200` against that return value, which is a
+# dict on a 200, so the guard never matched a successful lookup and every hit
+# silently fell through to the task-CR scan. The recovery class the docstring
+# promises — a Workload that died without recording a verdict but had already
+# pushed — was lost.
+#
+# These drive a full tick with a Failed Workload (attempt 1 < max_attempts 3)
+# so reconcile_failures consults branch_pushed_for, and assert on the
+# reviseFromBranch/allowOverwrite the retry manifest carries.
+# ---------------------------------------------------------------------------
+
+_WL_NAME = "wl-o-r-7"
+_BRANCH = "foreman/wl-o-r-7/issue-7"
+
+
+def _failed_wl() -> dict:
+    return {
+        "metadata": {
+            "name": _WL_NAME,
+            "labels": {"created-by": "dispatch-bridge"},
+            "annotations": {
+                "foreman.llmkube.dev/attempt": "1",
+                "foreman.llmkube.dev/issue-id": "id-7",
+            },
+        },
+        "spec": {"repo": "o/r", "issues": [7], "intent": "fix it"},
+        "status": {"phase": "Failed"},
+    }
+
+
+def _api_with_tasks(tasks: list) -> RecordingApi:
+    class _TaskApi(RecordingApi):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self._tasks = tasks
+            self.created: List[dict] = []
+
+        def list_namespaced_custom_object(self, **kw):
+            if kw.get("plural") == "agentictasks":
+                return {"items": list(self._tasks)}
+            return super().list_namespaced_custom_object(**kw)
+
+        def create_namespaced_custom_object(self, **kw):
+            super().create_namespaced_custom_object(**kw)
+            self.created.append(kw.get("body"))
+
+    return _TaskApi({
+        "created-by=dispatch-bridge": [_failed_wl()],
+        "created-by=dispatch-bridge-prfix": [],
+    })
+
+
+def _retry_manifest(api) -> dict:
+    assert len(api.created) == 1, api.created
+    return api.created[0]
+
+
+def test_branch_pushed_for_returns_true_on_github_200_without_task_scan():
+    """#282 fast path: a 200 from GET /branches/<branch> (http_get returns the
+    parsed JSON body, a dict) must make branch_pushed_for return True WITHOUT
+    consulting the task-CR scan. The tasks list is empty, so if the scan were
+    consulted it would return False and the retry would carry no
+    reviseFromBranch — the presence of the field proves the fast path fired."""
+    def gh_200(url, headers=None, allow_404=False):
+        # The http_get closure returns r.json() on a 200 — a plain dict.
+        return {"name": "main", "commit": {"sha": "deadbeef"}}
+
+    api = _api_with_tasks([])
+    run_tick(api, StubDispatch(), _cfg(), gh_200)
+
+    m = _retry_manifest(api)
+    assert m["spec"]["reviseFromBranch"] == _BRANCH, m["spec"]
+    assert m["spec"]["allowOverwrite"] is True, m["spec"]
+
+
+def test_branch_pushed_for_falls_through_to_task_scan_on_404():
+    """#282: a 404 (branch absent) is returned as the raw response object by
+    http_get (allow_404) and must fall through to the task-CR scan. Here the
+    task carries a pullRequestURL, so the scan returns True and the retry
+    revises from the branch."""
+    def gh_404(url, headers=None, allow_404=False):
+        class R:
+            status_code = 404
+            text = ""
+            def json(self):
+                return {}
+        return R()
+
+    tasks = [{
+        "spec": {"kind": "issue-fix"},
+        "status": {"result": {"extra": {"pullRequestURL": "https://github.com/o/r/pull/1"}}},
+    }]
+    api = _api_with_tasks(tasks)
+    run_tick(api, StubDispatch(), _cfg(), gh_404)
+
+    m = _retry_manifest(api)
+    assert m["spec"]["reviseFromBranch"] == _BRANCH, m["spec"]
+    assert m["spec"]["allowOverwrite"] is True, m["spec"]
+
+
+def test_branch_pushed_for_falls_through_to_task_scan_on_transport_error():
+    """#282: a transport/5xx failure (http_get raises) must fail closed and fall
+    through to the task-CR scan. Here a review task ran, so the scan returns
+    True and the retry revises from the branch."""
+    def gh_boom(url, headers=None, allow_404=False):
+        raise RuntimeError("simulated transport failure")
+
+    tasks = [{"spec": {"kind": "review"}, "status": {"verdict": "NO-GO"}}]
+    api = _api_with_tasks(tasks)
+    run_tick(api, StubDispatch(), _cfg(), gh_boom)
+
+    m = _retry_manifest(api)
+    assert m["spec"]["reviseFromBranch"] == _BRANCH, m["spec"]
+    assert m["spec"]["allowOverwrite"] is True, m["spec"]
