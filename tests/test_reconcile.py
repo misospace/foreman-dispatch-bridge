@@ -168,10 +168,12 @@ class TestReconcileStrandedIssues:
         assert results == []
 
     def test_workload_naming_uses_repo_and_number(self, dispatch):
-        """Workload name is derived as wl-<owner-lower>-<repo-lower>-<number>
-        matching bridge.workload.workload_name."""
+        """Workload name is derived as wl-<owner>-<repo>-<number> with a
+        case-preserving slug, matching bridge.workload.workload_name (issue
+        #258): an uppercase letter is encoded as 'u'+lowercase, so 'Owner/Repo'
+        maps to 'uowner-urepo' rather than the old lowercased 'owner-repo'."""
         dispatch._claimed = [_claimed(number=7, repo="Owner/Repo")]
-        workload_names = {"wl-owner-repo-7"}
+        workload_names = {"wl-uowner-urepo-7"}
 
         results = reconcile_stranded_issues(dispatch, "test-agent", workload_names)
 
