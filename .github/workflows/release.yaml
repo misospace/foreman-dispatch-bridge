@@ -43,6 +43,42 @@ jobs:
             ghcr.io/misospace/foreman-dispatch-bridge:latest
           labels: |
             org.opencontainers.image.source=https://github.com/misospace/foreman-dispatch-bridge
+      - name: Check TEMPORARY OS-package patch layer is still needed
+        # The Dockerfile carries a TEMPORARY `apt-get install --only-upgrade`
+        # layer that backports OS packages the pinned base image has not yet
+        # rebuilt (CVE-2026-53615 in util-linux, CVE-2026-14456 in openssl;
+        # tracked in #254). Its removal conditions live only in the Dockerfile
+        # comment, so every base-image bump is a chance to forget the layer and
+        # let it linger as dead weight. This step queries the base image named
+        # in the Dockerfile and fails the release loudly once it ships the
+        # fixes, which is the reminder to delete the layer.
+        run: |
+          set -euo pipefail
+          base=$(grep -m1 '^FROM ' Dockerfile | awk '{print $2}')
+          echo "checking base image: $base"
+          # package|pinned-version pairs, kept in sync with the Dockerfile layer.
+          # dpkg --compare-versions handles epochs (login) and tildes (openssl)
+          # correctly; a shell string comparison would not.
+          for pair in \
+            "util-linux|2.41.5-0+deb13u1" \
+            "bsdutils|1:2.41.5-0+deb13u1" \
+            "mount|2.41.5-0+deb13u1" \
+            "login|1:4.16.0-2+really2.41.5-0+deb13u1" \
+            "openssl|3.5.7-1~deb13u2" \
+            "libssl3t64|3.5.7-1~deb13u2" \
+            "openssl-provider-legacy|3.5.7-1~deb13u2"; do
+            pkg=${pair%%|*}
+            pinned=${pair##*|}
+            base_ver=$(docker run --rm "$base" dpkg-query -W -f='${Version}\n' "$pkg")
+            echo "$pkg: base $base_ver, layer pins $pinned"
+            if dpkg --compare-versions "$base_ver" ge "$pinned"; then
+              echo "ERROR: base image already ships $pkg $base_ver (>= $pinned)."
+              echo "The TEMPORARY OS-package patch layer in the Dockerfile is a"
+              echo "no-op for $pkg. Remove the layer (or this pin) per #254."
+              exit 1
+            fi
+          done
+          echo "base image still lacks the fixes; the TEMPORARY layer is still needed."
       - name: Scan image
         # One scan: both tags name the same bytes, so scanning the tarball
         # covers versioned and latest alike.
