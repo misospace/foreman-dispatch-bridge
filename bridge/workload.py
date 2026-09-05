@@ -361,9 +361,43 @@ def revision_coder_agent_for(lane: str, revision_coder_agents: dict) -> str:
     return revision_coder_agents.get(lane) or revision_coder_agents.get(LANE_CODER_WILDCARD) or ""
 
 
+def _case_preserving_slug(repo: str) -> str:
+    """RFC 1123-safe slug of a repo full name that preserves case.
+
+    Kubernetes object names must be lowercase, so case cannot ride in the name
+    verbatim. Each uppercase letter is encoded as ``u`` + its lowercase form
+    (``Owner/Repo`` -> ``uowner-urepo``); lowercase letters and other RFC 1123
+    characters pass through unchanged. The encoding is injective, so two repo
+    full names that differ only by case get distinct slugs.
+    """
+    out = []
+    for ch in repo.replace("/", "-"):
+        if ch.isupper():
+            out.append("u")
+            out.append(ch.lower())
+        else:
+            out.append(ch)
+    return "".join(out)
+
+
 def workload_name(item: ClaimedItem) -> str:
-    owner_repo = item.repo.replace("/", "-").lower()
-    return f"wl-{owner_repo}-{item.issue_number}"
+    """Deterministic Workload name: ``wl-<owner>-<repo>-<issue>``.
+
+    Strategy (issue #258): the repo full name is normalised with
+    ``_case_preserving_slug`` instead of ``.lower()``, so the name is
+    case-faithful. Two dispatch items that point at the same underlying GitHub
+    repo but arrive with inconsistent case (``Owner/Repo`` vs ``owner/Repo``)
+    get DISTINCT names, so the cluster surfaces the inconsistency on the first
+    409 instead of silently sharing one Workload across the retry/escalate/
+    prune paths. This relies on the dispatch-side assumption that the
+    canonical (GitHub-preserved) case is what dispatch serves; a dispatch that
+    serves inconsistent case for the same repo is now visible, not hidden.
+
+    All-lowercase repo names are unchanged by the encoding, so the existing
+    happy path (``misospace/dispatch#42`` -> ``wl-misospace-dispatch-42``) is
+    stable and in-flight Workloads for lowercase repos are not renamed.
+    """
+    return f"wl-{_case_preserving_slug(item.repo)}-{item.issue_number}"
 
 
 def _branch_name(item: ClaimedItem) -> str:

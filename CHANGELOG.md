@@ -1,5 +1,26 @@
 # Changelog
 
+## [Unreleased]
+
+### Migration note (Workload name is now case-faithful)
+
+`workload_name` no longer lowercases the repo full name. Each uppercase letter
+is now encoded as `u` + its lowercase form, so a repo served by dispatch with
+mixed case (e.g. `Owner/Repo`) maps to `wl-uowner-urepo-<n>` instead of the
+old `wl-owner-repo-<n>`. This stops two dispatch items that point at the same
+underlying GitHub repo but arrive with inconsistent case from colliding on one
+Workload name and silently sharing state across the retry/escalate/prune paths
+(#258).
+
+**Impact on upgrade:** Workloads for repos whose dispatch-served name is
+all-lowercase are unchanged. Workloads for repos with any uppercase letter in
+the owner or repo name are **renamed** by this change. If you upgrade mid-tick
+with such a Workload in flight, the old (lowercased) Workload is no longer
+addressable by the new bridge — its retry/prune/reconcile passes will not find
+it by name. Drain (let it finish or delete) any in-flight Workload for a
+mixed-case repo before the cutover, or let the stranded-issue reconcile reset
+its issue to `status/ready` so the next tick re-claims it under the new name.
+
 ## [0.7.8](https://github.com/misospace/foreman-dispatch-bridge/compare/v0.7.7...v0.7.8) (2026-09-04)
 
 

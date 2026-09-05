@@ -25,6 +25,31 @@ def test_workload_name_is_deterministic_and_sanitized():
     assert workload_name(ITEM) == "wl-joryirving-home-ops-42"
 
 
+def test_workload_name_happy_path_lowercase_unchanged():
+    """The all-lowercase happy path is byte-for-byte unchanged, so the rollout
+    does not silently rename in-flight Workloads for lowercase repos."""
+    item = ClaimedItem(repo="misospace/dispatch", issue_number=42,
+                       intent="fix", lane="base", issue_id="1001")
+    assert workload_name(item) == "wl-misospace-dispatch-42"
+
+
+def test_workload_name_case_preserving_does_not_collide():
+    """Two dispatch items pointing at the same canonical GitHub repo but served
+    with inconsistent case must get DISTINCT Workload names (issue #258). The
+    old .lower() collapsed both onto wl-owner-repo-N, so the second item's
+    Workload 409'd as an 'idempotent no-op' and the two issues silently shared
+    one Workload across the retry/escalate/prune paths."""
+    a = ClaimedItem(repo="Owner/Repo", issue_number=1, intent="x", lane="local")
+    b = ClaimedItem(repo="owner/Repo", issue_number=2, intent="y", lane="local")
+    name_a = workload_name(a)
+    name_b = workload_name(b)
+    assert name_a != name_b
+    # The case-faithful form is the audit trail: the uppercase letter is
+    # encoded, not dropped, so the inconsistency is visible in the name.
+    assert name_a == "wl-uowner-urepo-1"
+    assert name_b == "wl-owner-urepo-2"
+
+
 def test_build_workload_uses_single_coder_gate_reviewer():
     wl = build_workload(ITEM, namespace="llm")
     assert wl["spec"]["coderAgentRef"]["name"] == "coder"
@@ -346,7 +371,7 @@ def test_branch_name_special_chars():
         repo="Foo/Bar-Baz", issue_number=99, intent="fix",
         lane="base", issue_id="1002",
     )
-    assert _branch_name(item) == "foreman/wl-foo-bar-baz-99/issue-99"
+    assert _branch_name(item) == "foreman/wl-ufoo-ubar-ubaz-99/issue-99"
 
 
 # --- #101 follow-up: overwrite is gated on branch EVIDENCE, not the attempt counter.
