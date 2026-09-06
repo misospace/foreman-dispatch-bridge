@@ -10,12 +10,6 @@ from kubernetes import client, config
 from bridge import lanes as lane_topology
 from bridge.env import validate_env
 from bridge.logging_setup import configure as configure_logging
-
-# The lane list this bridge polled before Dispatch could describe its own
-# topology. Used only when DISPATCH_LANES is unset AND /api/lanes is
-# unavailable, so an upgrade with neither configured nor discoverable lanes
-# behaves exactly as it did before.
-DEFAULT_POLLED_LANES = ["local", "cloud", "frontier"]
 from bridge.models import ClaimedItem
 from bridge.workload import (
     _parse_json_map,
@@ -59,6 +53,12 @@ from bridge.reconcile import reconcile_stranded_issues, release_stuck_claims
 from bridge.review_transition import transition_to_in_review
 from bridge.http_retry import _redact_token, _retry_k8s_request
 
+
+# The lane list this bridge polled before Dispatch could describe its own
+# topology. Used only when DISPATCH_LANES is unset AND /api/lanes is
+# unavailable, so an upgrade with neither configured nor discoverable lanes
+# behaves exactly as it did before.
+DEFAULT_POLLED_LANES = ["local", "cloud", "frontier"]
 
 logger = logging.getLogger("bridge.main")
 
