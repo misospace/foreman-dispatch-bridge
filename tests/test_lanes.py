@@ -158,18 +158,9 @@ def test_escalation_empty_when_no_role_and_no_config():
 
 # --- integration with the real lane-keyed call sites -------------------------
 
-
-def test_pr_fix_coder_resolves_by_role():
-    """PR_FIX_LANE_AGENTS was the third spelling of this idea (NORMAL/ESCALATED).
-    Keying it by Dispatch's role names collapses it into one vocabulary."""
-    from bridge.prfix import pr_fix_coder_for
-
-    lanes.set_topology(TOPOLOGY)
-    assert pr_fix_coder_for("frontier", {"escalation": "coder-frontier"}) == "coder-frontier"
-    # id still wins
-    assert (
-        pr_fix_coder_for("frontier", {"frontier": "by-id", "escalation": "by-role"}) == "by-id"
-    )
+# NOTE: pr_fix_coder_for is deliberately NOT covered here. Its `lane` is a
+# PR-FIX lane (NORMAL / ESCALATED / NEEDS_HUMAN), a separate enum from
+# Dispatch's execution lanes, so it does not resolve by execution-lane role.
 
 
 def test_revision_coder_resolves_by_role():
