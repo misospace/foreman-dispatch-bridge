@@ -63,6 +63,11 @@ def pr_fix_coder_for(lane: str, lane_agents: dict) -> str:
     """Resolve a PrFixLane to a coder Agent name: exact, then "*", else "coder"."""
     if not lane_agents:
         return CODER_AGENT
+    # NOT bridge.lanes.lookup: `lane` here is a PR-FIX lane (NORMAL /
+    # ESCALATED / NEEDS_HUMAN, see ACTIONABLE_LANES below), which is a separate
+    # enum from Dispatch's execution lanes. Resolving it against execution-lane
+    # roles would be a category error, and would cross-talk in a deployment
+    # that happens to name an execution lane "NORMAL".
     return lane_agents.get(lane) or lane_agents.get(LANE_CODER_WILDCARD) or CODER_AGENT
 
 

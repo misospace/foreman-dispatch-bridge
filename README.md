@@ -32,14 +32,14 @@ issue per lane.
 | `DISPATCH_URL` | `http://dispatch.llm:3000` | dispatch base URL |
 | `DISPATCH_AGENT_TOKEN` | *(required)* | Bearer token for the dispatch API |
 | `DISPATCH_AGENT_NAME` | `foreman-coder` | queue identity (use a dash, not a slash) |
-| `DISPATCH_LANES` | `local,cloud,frontier` | lanes polled per tick. Concurrent lane fetches are soft-capped at 16 workers per tick (`MAX_LANE_WORKERS`); lanes beyond the cap are still polled, just with fewer in-flight requests. If you need to watch more than 16 lanes with full concurrency, split into multiple bridge deployments. An over-cap value logs a one-time `WARNING` (silence with `DISPATCH_LANES_WARN=0`). |
+| `DISPATCH_LANES` | *(empty = discover)* | lanes polled per tick. Unset, the bridge asks Dispatch for its lane topology (`GET /api/lanes`) and polls every claimable lane, so adding a lane needs no bridge change. Set explicitly to poll a subset; an explicit value always wins. Falls back to `local,cloud,frontier` only when unset AND the endpoint is unavailable. Concurrent lane fetches are soft-capped at 16 workers per tick (`MAX_LANE_WORKERS`); lanes beyond the cap are still polled, just with fewer in-flight requests. If you need to watch more than 16 lanes with full concurrency, split into multiple bridge deployments. An over-cap value logs a one-time `WARNING` (silence with `DISPATCH_LANES_WARN=0`). |
 | `DISPATCH_LANES_WARN` | `1` | log a one-time `WARNING` when `DISPATCH_LANES` exceeds the 16-worker cap; set `0` to silence |
 | `FOREMAN_NAMESPACE` | `llm` | namespace for Workloads |
 | `GATEPROFILE_MAP` | *(empty)* | JSON `{repo: GateProfile}` with `"*"` wildcard |
-| `LANE_CODER_AGENTS` | *(empty)* | JSON `{lane: coderAgentName}` with `"*"` wildcard; wins over `BASE_CODER_AGENTS` |
+| `LANE_CODER_AGENTS` | *(empty)* | JSON `{lane: coderAgentName}` with `"*"` wildcard; wins over `BASE_CODER_AGENTS` Keys accept a lane id or a Dispatch role name (`default`/`escalation`); an exact lane id wins over a role, which wins over `*`. |
 | `BASE_CODER_AGENTS` | *(empty)* | JSON `{language: coderAgentName}` with `"*"` wildcard; routes the base lane's coder by the repo's `GATEPROFILE_MAP` language |
 | `CODER_AGENT_SLOTS` | `{}` | JSON map `{coderAgent: slotCount}` capping each coder's in-flight Workloads; `"*"` wildcard covers unnamed agents. Empty keeps the legacy issue-number split. |
-| `ESCALATION_LANE` | *(empty = off)* | lane exhausted issues re-lane into |
+| `ESCALATION_LANE` | *(empty = by role)* | lane exhausted issues re-lane into. Unset, the bridge resolves the claimable lane whose Dispatch role is `escalation`, so this does not have to name a deployment-specific lane id. An explicit value always wins. Empty and unresolvable means escalation is off, as before. |
 | `RETRY_MAX_ATTEMPTS` | `3` | attempts before escalate/tombstone |
 | `PR_FIX_ENABLED` | *(off)* | enable the PR-fix drain/reconcile loop |
 | `PR_FIX_MAX_ATTEMPTS` | `3` | pr-fix attempts before BLOCKED/tombstone |
@@ -50,9 +50,9 @@ issue per lane.
 | `MAX_IN_PROGRESS` | `0` | Maximum concurrent in-progress Workloads per lane (`0` disables the cap, i.e. unlimited) |
 | `PRUNE_COMPLETED_AFTER_HOURS` | `6` | GC age, in hours, after which Completed Workloads are pruned (set to `0` to disable the sweeper) |
 | `PRUNE_FAILED_AFTER_HOURS` | `48` | GC age, in hours, after which Failed/Crashed/Cancelled Workloads are pruned (set to `0` to disable the sweeper) |
-| `REVISION_CODER_AGENTS` | `{}` | JSON map `{revisionLane: coderAgentName}` overriding the agent used when a revision prompt reaches the coder stage |
+| `REVISION_CODER_AGENTS` | `{}` | JSON map `{revisionLane: coderAgentName}` overriding the agent used when a revision prompt reaches the coder stage Keys accept a lane id or a Dispatch role name (`default`/`escalation`); an exact lane id wins over a role, which wins over `*`. |
 | `REPO_CODER_AGENTS` | `{}` | JSON map `{repoFullName: coderAgentName}` overriding the agent used when a generic revision prompt reaches the coder stage |
-| `PR_FIX_LANE_AGENTS` | `{}` | JSON map `{prFixLane: coderAgentName}` overriding the agent used when a PR-fix prompt reaches the coder stage |
+| `PR_FIX_LANE_AGENTS` | `{}` | JSON map `{prFixLane: coderAgentName}` overriding the agent used when a PR-fix prompt reaches the coder stage Keys accept a lane id or a Dispatch role name (`default`/`escalation`); an exact lane id wins over a role, which wins over `*`. |
 | `DELETE_WORKLOAD_TIMEOUT_S` | `60` | Seconds the bridge waits for the cluster to acknowledge a Workload deletion request before giving up |
 | `LOG_FORMAT` | `json` | Log line format — `json` (structured, default) or `plain` (human-readable) |
 | `LOG_LEVEL` | `INFO` | Minimum log level emitted — one of `DEBUG`, `INFO`, `WARNING`, `ERROR` |

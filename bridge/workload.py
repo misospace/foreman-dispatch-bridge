@@ -1,4 +1,5 @@
 import json
+from bridge import lanes
 from typing import Optional
 
 from bridge.models import ClaimedItem
@@ -321,8 +322,13 @@ def coder_agent_for(
     repo_coder_agents = repo_coder_agents or {}
     load = agent_load or {}
     slots = agent_slots or {}
+    # Lane id, then the lane's role, then "*" (bridge.lanes.lookup). The
+    # wildcard is applied here rather than at the end as before, because
+    # lookup() owns the whole precedence chain; the trailing wildcard branch
+    # below is now unreachable for a configured map and kept only for the
+    # empty-map case.
     explicit = _pick_coder(
-        lane_coder_agents.get(lane), issue_number, load, slots,
+        lanes.lookup(lane_coder_agents, lane), issue_number, load, slots,
         fix_first_agents=fix_first_agents,
     )
     if explicit:
@@ -354,11 +360,11 @@ def coder_agent_for(
 
 def revision_coder_agent_for(lane: str, revision_coder_agents: dict) -> str:
     """Resolve a lane's revision-tuned coder Agent (Workload.spec.revisionCoderAgentRef,
-    LLMKube#959): exact match, then "*", else "" (unset -> controller falls back to the
-    base coder and warns)."""
+    LLMKube#959): exact lane id, then the lane's role, then "*", else "" (unset ->
+    controller falls back to the base coder and warns). See bridge.lanes.lookup."""
     if not revision_coder_agents:
         return ""
-    return revision_coder_agents.get(lane) or revision_coder_agents.get(LANE_CODER_WILDCARD) or ""
+    return lanes.lookup(revision_coder_agents, lane) or ""
 
 
 def _case_preserving_slug(repo: str) -> str:

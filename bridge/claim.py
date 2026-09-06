@@ -178,6 +178,20 @@ class DispatchClient:
             exc.args = tuple(_redact_token(str(a)) for a in exc.args)
             raise
 
+    def lanes(self) -> list:
+        """Fetch Dispatch's lane topology (misospace/dispatch#947).
+
+        Best-effort by design: any failure returns [] so the caller falls back
+        to explicit configuration. A tick must not fail because this endpoint
+        is unavailable, and older Dispatch versions do not serve it at all.
+        """
+        try:
+            data = self._http_get(f"{self._base}/api/lanes")
+        except Exception as exc:  # noqa: BLE001 — best-effort discovery
+            logger.warning("lanes:unavailable:%s", exc)
+            return []
+        return data if isinstance(data, list) else []
+
     def queue(self, agent_name: str, lane: str) -> list:
         url = f"{self._base}/api/agents/{agent_name}/queue?lane={lane}&includeClaimed=true"
         data = self._http_get(url)

@@ -18,7 +18,8 @@ REQUIRED_VARS: List[str] = [
 OPTIONAL_VARS: Dict[str, str] = {
     "DISPATCH_URL": "http://dispatch.llm:3000",
     "DISPATCH_AGENT_NAME": "foreman-coder",
-    "DISPATCH_LANES": "local,cloud,frontier",
+    # Empty = discover from Dispatch GET /api/lanes; see bridge/lanes.py.
+    "DISPATCH_LANES": "",
     "DISPATCH_LANES_WARN": "1",
     "FOREMAN_NAMESPACE": "llm",
     "GATEPROFILE_MAP": "",
