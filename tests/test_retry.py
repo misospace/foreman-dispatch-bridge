@@ -1520,3 +1520,216 @@ def test_parking_escalations_are_unchanged_by_the_budget_case():
         assert parked == [reason]
         assert out == [f"wl-misospace-dispatch-7:human-escalation:{reason}"]
         assert r.created == []
+
+
+# --- rail-demoted NO-GOs (#287) ---------------------------------------------
+# A harness rail (issueAsk / scope-overlap) can rewrite a reviewer's GO to
+# NO-GO when it cannot verify something. That is a statement about
+# verification confidence, not about the change: re-running the coder cannot
+# make an unverifiable issueAsk verify, so spending the attempt budget on it
+# has no terminating condition. The bridge must park immediately with an
+# accurate reason instead of retrying.
+
+def _rail_demoted_review(by="issueAsk", claimed="GO", findings=None, reason="could not verify the issue ask"):
+    me = {"verdictDemotedBy": by, "verdictClaimed": claimed}
+    if findings is not None:
+        me["findings"] = findings
+    if reason is not None:
+        me["demotionReason"] = reason
+    return {
+        "spec": {"kind": "review"},
+        "status": {"verdict": "NO-GO", "phase": "Succeeded",
+                   "result": {"extra": {"modelExtra": me,
+                                        "modelSummary": "The change looks correct."}}},
+    }
+
+
+def test_rail_demoted_reason_detects_issue_ask():
+    from bridge.retry import rail_demoted_reason
+    tasks = [_rail_demoted_review(by="issueAsk")]
+    assert rail_demoted_reason(tasks) == ("issueAsk", "could not verify the issue ask")
+
+
+def test_rail_demoted_reason_detects_scope_overlap():
+    from bridge.retry import rail_demoted_reason
+    tasks = [_rail_demoted_review(by="scope-overlap", reason="diff touches none of the named files")]
+    assert rail_demoted_reason(tasks) == ("scope-overlap", "diff touches none of the named files")
+
+
+def test_rail_demoted_reason_falls_back_when_reason_absent():
+    from bridge.retry import rail_demoted_reason
+    tasks = [_rail_demoted_review(by="issueAsk", reason=None)]
+    assert rail_demoted_reason(tasks) == ("issueAsk", "review demoted by the issueAsk rail")
+
+
+def test_rail_demoted_reason_ignores_genuine_rejections():
+    """Each of the three conditions excludes a NO-GO the coder CAN act on."""
+    from bridge.retry import rail_demoted_reason
+    # A genuine reviewer NO-GO carries no demotion stamp at all.
+    assert rail_demoted_reason([_no_go_review(findings={"missing_tests": True})]) is None
+    # A demotion that carries findings is real work either way.
+    assert rail_demoted_reason([_rail_demoted_review(findings={"missing_tests": True})]) is None
+    # verdictClaimed != GO: the rail marked an unverified non-GO review
+    # untrusted and returned the reviewer's OWN NO-GO — a genuine rejection.
+    assert rail_demoted_reason([_rail_demoted_review(claimed="NO-GO")]) is None
+    # An unrecognised rail name is not one of the two inert rails.
+    assert rail_demoted_reason([_rail_demoted_review(by="something-else")]) is None
+    # A non-review task never counts.
+    assert rail_demoted_reason([{"spec": {"kind": "issue-fix"},
+                                 "status": {"verdict": "NO-GO",
+                                            "result": {"extra": {"modelExtra": {
+                                                "verdictDemotedBy": "issueAsk",
+                                                "verdictClaimed": "GO"}}}}}]) is None
+    assert rail_demoted_reason([]) is None
+    assert rail_demoted_reason([{"spec": {"kind": "review"}, "status": {}}]) is None
+
+
+def test_feedback_from_tasks_skips_rail_demoted_no_go():
+    """The reviewer's approval is not actionable feedback: injecting it as
+    'rejection feedback' would mislead the coder (#287)."""
+    from bridge.retry import feedback_from_tasks
+    assert feedback_from_tasks([_rail_demoted_review()]) == ""
+    # A genuine NO-GO with findings still distills.
+    fb = feedback_from_tasks([_no_go_review(findings={"missing_tests": True})])
+    assert "Reviewer rejected the previous attempt" in fb
+    # A demotion carrying findings is real work and still distills.
+    fb = feedback_from_tasks([_rail_demoted_review(findings={"scope_creep": True})])
+    assert "Reviewer rejected the previous attempt" in fb
+
+
+def test_rail_demoted_no_go_parks_immediately_without_spending_an_attempt():
+    """One attempt instead of three: the Workload is parked with an accurate
+    reason on the first tick, and no retry is created."""
+    parked = []
+    r = _Recorder([_failed_wl("wl-misospace-dispatch-7", attempt=1)])
+    out = _reconcile(
+        r,
+        tasks_for=lambda name: [_rail_demoted_review()],
+        park_for_human=lambda item, reason, **_kw: parked.append((item.issue_number, reason)) or True,
+    )
+    assert out == ["wl-misospace-dispatch-7:rail-demoted:parked"]
+    assert len(parked) == 1
+    assert parked[0][0] == 7
+    assert "review approved" in parked[0][1]
+    assert "demoted by the issueAsk rail" in parked[0][1]
+    assert "not re-runnable" in parked[0][1]
+    assert "could not verify the issue ask" in parked[0][1]
+    assert r.created == []          # no attempt consumed
+    assert r.deleted == []          # tombstone left to triage from
+
+
+def test_rail_demoted_no_go_parks_with_rail_demoted_path_tag():
+    """The park is tagged path=rail-demoted so the comment header can
+    distinguish it from the other parking paths (issue #260). The message
+    names the rail that actually demoted the verdict."""
+    calls = []
+    r = _Recorder([_failed_wl("wl-misospace-dispatch-7", attempt=1)])
+    out = _reconcile(
+        r,
+        tasks_for=lambda name: [_rail_demoted_review(by="scope-overlap")],
+        park_for_human=lambda item, reason, **kw: calls.append((reason, kw)) or True,
+    )
+    assert out == ["wl-misospace-dispatch-7:rail-demoted:parked"]
+    assert calls[0][1] == {"path": "rail-demoted"}, calls
+    assert "demoted by the scope-overlap rail" in calls[0][0]
+
+
+def test_rail_demoted_no_go_parks_even_at_the_attempt_cap():
+    """At the cap the ordinary path would escalate to a stronger coder. A
+    rail-demoted NO-GO must not spend one: re-running cannot fix it."""
+    escalated = []
+    parked = []
+    r = _Recorder([_failed_wl("wl-misospace-dispatch-7", attempt=3)])
+    out = _reconcile(
+        r, attempts=3,
+        tasks_for=lambda name: [_rail_demoted_review()],
+        park_for_human=lambda item, reason, **_kw: parked.append(reason) or True,
+        escalate=lambda item: escalated.append(item.issue_number) or True,
+        escalation_lane="frontier",
+    )
+    assert out == ["wl-misospace-dispatch-7:rail-demoted:parked"]
+    assert escalated == []
+    assert len(parked) == 1
+    assert r.created == []
+
+
+def test_rail_demoted_no_go_repeat_skips_comment_and_repairs_label():
+    """Once the issue has the durable parked marker, a repeat tick must not
+    repost the comment — mirroring the declared-escalation dedupe."""
+    comments = []
+    label_repairs = []
+    wl = _failed_wl("wl-misospace-dispatch-7", attempt=1)
+
+    def park(item, reason, **_kw):
+        comments.append(reason)
+        return True
+
+    first = _Recorder([wl])
+    out1 = _reconcile(
+        first,
+        tasks_for=lambda name: [_rail_demoted_review()],
+        needs_human_for=lambda item: False,
+        park_for_human=park,
+    )
+    assert out1 == ["wl-misospace-dispatch-7:rail-demoted:parked"]
+    assert len(comments) == 1
+
+    second = _Recorder([wl])
+    out2 = _reconcile(
+        second,
+        tasks_for=lambda name: [_rail_demoted_review()],
+        needs_human_for=lambda item: True,
+        park_for_human=park,
+        ensure_human_label=lambda item: label_repairs.append(item.issue_number) or True,
+    )
+    assert out2 == ["wl-misospace-dispatch-7:rail-demoted:parked"]
+    assert len(comments) == 1  # no duplicate comment
+    assert label_repairs == [7]
+
+
+def test_rail_demoted_no_go_retries_when_parking_fails():
+    """Do not strand the work: a failed park falls through to the retry path."""
+    r = _Recorder([_failed_wl("wl-misospace-dispatch-7", attempt=1)])
+    out = _reconcile(
+        r,
+        tasks_for=lambda name: [_rail_demoted_review()],
+        park_for_human=lambda item, reason, **_kw: False,
+    )
+    assert out == ["wl-misospace-dispatch-7:retry:2/3"]
+    assert len(r.created) == 1
+
+
+def test_rail_demoted_no_go_retries_when_no_park_hook_is_wired():
+    """Fails open: without a park callback the ordinary retry path runs."""
+    r = _Recorder([_failed_wl("wl-misospace-dispatch-7", attempt=1)])
+    out = _reconcile(r, tasks_for=lambda name: [_rail_demoted_review()])
+    assert out == ["wl-misospace-dispatch-7:retry:2/3"]
+    assert len(r.created) == 1
+
+
+def test_genuine_no_go_still_retries_normally():
+    """A reviewer NO-GO with findings is a rejection the coder can act on:
+    the ordinary retry path is untouched."""
+    r = _Recorder([_failed_wl("wl-misospace-dispatch-7", attempt=1)])
+    out = _reconcile(
+        r,
+        tasks_for=lambda name: [_no_go_review(findings={"missing_tests": True})],
+        park_for_human=lambda item, reason, **_kw: pytest.fail("genuine NO-GO must not park"),
+    )
+    assert out == ["wl-misospace-dispatch-7:retry:2/3"]
+    assert len(r.created) == 1
+
+
+def test_rail_demoted_no_go_ignores_tasks_when_the_lookup_raises():
+    """A task-lookup failure must not divert a Workload out of the loop."""
+    def boom(name):
+        raise RuntimeError("kube unreachable")
+
+    r = _Recorder([_failed_wl("wl-misospace-dispatch-7", attempt=1)])
+    out = _reconcile(
+        r,
+        tasks_for=boom,
+        park_for_human=lambda item, reason, **_kw: pytest.fail("lookup failure must not park"),
+    )
+    assert out == ["wl-misospace-dispatch-7:retry:2/3"]
+    assert len(r.created) == 1

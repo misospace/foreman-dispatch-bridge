@@ -1588,7 +1588,23 @@ def _list_workload_tasks(
     namespace: str,
     workload_name: str,
 ) -> List[Dict[str, Any]]:
-    """Return AgenticTask items belonging to *workload_name*."""
+    """Return AgenticTask items belonging to *workload_name*.
+
+    The items are passed through unchanged: the rail-demotion classifier in
+    ``bridge.retry.reconcile_failures`` (and its supporting helpers
+    ``rail_demoted_reason`` / ``feedback_from_tasks`` / ``declared_escalation``)
+    reads ``status.result.extra.modelExtra`` directly off every returned task,
+    so any layer between the k8s response and that field — adapter, projector,
+    type model — that drops or renames the subtree silently disables the
+    rail-demoted NO-GO parking path (#287). Foreman's controller is the only
+    party that populates the field; if it stops, those Workloads fall back to
+    the ordinary retry budget and the bridge will re-run a verdict a rail
+    already classified as un-actionable.
+
+    Only defensive conversions happen here: ``list(...)`` against
+    ``response.get("items", [])`` so a None-valued ``items`` becomes ``[]``
+    rather than raising downstream.
+    """
     response = _retry_k8s_request(
         lambda: api.list_namespaced_custom_object(
             group="foreman.llmkube.dev",
@@ -1650,6 +1666,12 @@ class BridgeRuntime:
         )
 
     def list_workload_tasks(self, workload_name: str) -> List[Dict[str, Any]]:
+        """Return AgenticTask items for *workload_name*.
+
+        Thin wrapper around :func:`_list_workload_tasks`. See that function's
+        docstring for the ``status.result.extra.modelExtra`` preservation
+        contract the rail-demotion classifier depends on (#287).
+        """
         return _list_workload_tasks(self.api, self.namespace, workload_name)
 
     def delete_workload(self, name: str) -> None:

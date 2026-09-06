@@ -49,6 +49,56 @@ FailedModelFor = Callable[[str], str]
 FEEDBACK_MAX_CHARS = 2000
 
 
+# The rail names that manufacture a NO-GO the coder cannot act on. A rail that
+# rewrites a GO without findings produces a rejection whose feedback is the
+# reviewer's own approval followed by an empty findings list, and re-running
+# the coder cannot change whether the rail can verify (#287).
+RAIL_DEMOTION_RAILS = frozenset({"issueAsk", "scope-overlap"})
+
+
+def rail_demoted_reason(tasks: list) -> Optional[tuple[str, str]]:
+    """Return ``(rail, reason)`` when a review NO-GO was manufactured by a
+    harness rail rather than asserted by the reviewer.
+
+    Three conditions are required, mirroring foreman's inertDemotion
+    (workload_iteration.go):
+
+    - ``verdictDemotedBy`` is the issueAsk or scope-overlap rail.
+    - ``verdictClaimed`` is GO, i.e. the rail really did rewrite the verdict.
+      An unverified non-GO review is marked untrusted and the reviewer's OWN
+      NO-GO is returned; suppressing that would discard a genuine rejection.
+    - no findings. A demotion carrying findings is real work either way.
+
+    ``rail`` is the ``verdictDemotedBy`` value and ``reason`` the
+    ``demotionReason`` string from ``modelExtra``, with a short fallback when
+    the field is absent. Returns None when the NO-GO is a genuine rejection
+    or the fields are absent.
+    """
+    for t in tasks or []:
+        spec = t.get("spec") or {}
+        if spec.get("kind") != "review":
+            continue
+        st = t.get("status") or {}
+        if st.get("verdict") != "NO-GO":
+            continue
+        me = ((st.get("result") or {}).get("extra") or {}).get("modelExtra") or {}
+        if not isinstance(me, dict):
+            continue
+        by = me.get("verdictDemotedBy")
+        if not isinstance(by, str) or by not in RAIL_DEMOTION_RAILS:
+            continue
+        if me.get("verdictClaimed") != "GO":
+            continue
+        findings = me.get("findings")
+        if findings:
+            continue
+        reason = me.get("demotionReason")
+        if not (isinstance(reason, str) and reason):
+            reason = f"review demoted by the {by} rail"
+        return by, reason
+    return None
+
+
 def feedback_from_tasks(tasks: list) -> str:
     """Distill a failed Workload's task results into a retry prompt block.
 
@@ -56,6 +106,10 @@ def feedback_from_tasks(tasks: list) -> str:
     (missing_tests / scope_creep / *_details), then reviewer summaries, then
     coder failure errors. Returns "" when there is nothing actionable, so the
     caller falls back to a plain (issues-path) retry.
+
+    Rail-demoted NO-GOs (verdictDemotedBy in issueAsk/scope-overlap,
+    verdictClaimed GO, no findings) are skipped: their "findings" are the
+    reviewer's own approval, which is not actionable feedback (#287).
     """
     notes = []
     for t in tasks or []:
@@ -65,6 +119,15 @@ def feedback_from_tasks(tasks: list) -> str:
         kind = spec.get("kind")
         if kind == "review" and st.get("verdict") == "NO-GO":
             me = ex.get("modelExtra") or {}
+            # Skip rail-demoted NO-GOs: the reviewer approved, the rail
+            # rewrote the verdict, and there are no findings to act on.
+            # Injecting the reviewer's approval text as "rejection feedback"
+            # would mislead the coder (#287).
+            by = me.get("verdictDemotedBy")
+            if (isinstance(by, str) and by in RAIL_DEMOTION_RAILS
+                    and me.get("verdictClaimed") == "GO"
+                    and not me.get("findings")):
+                continue
             findings = me.get("findings") or {}
             flags = sorted(k for k, v in findings.items() if v is True and not k.endswith("_details"))
             details = [f"{k}: {v}" for k, v in sorted(findings.items()) if isinstance(v, str) and v]
@@ -747,6 +810,90 @@ def reconcile_failures(
                 logger.warning(
                     "human-escalation-not-parked",
                     extra={"workload": name, "reason": reason},
+                )
+        # A rail-demoted NO-GO is not a rejection: the reviewer approved, a
+        # harness rail rewrote the verdict because it could not verify
+        # something, and there are no findings. Re-running the coder cannot
+        # make an unverifiable issueAsk verify, so the loop has no terminating
+        # condition — the bridge would spend the whole attempt budget on
+        # identical re-runs, then park with a reason that blames the coder
+        # (#287). Park immediately with an accurate reason instead.
+        #
+        # The reviewer's GO is foreman's to act on (opening the PR); the
+        # bridge does not override a verdict. Parking is the conservative
+        # terminal: one attempt instead of three, and a message that tells a
+        # human what actually happened.
+        #
+        # Fails open: if the park callback is missing or fails, fall through
+        # to the normal retry path rather than dropping the work on the floor.
+        if not is_infra and tasks:
+            try:
+                demoted = rail_demoted_reason(tasks)
+            except Exception as e:
+                demoted = None
+                logger.warning(
+                    "rail-demotion-lookup-failed",
+                    extra={"workload": name, "error": repr(e)},
+                )
+            if demoted:
+                demoted_rail, demoted_reason = demoted
+                item_d = refresh_lane(item_from_workload(wl), current_lane_for)
+                if not item_d.issue_id and lookup_issue_id:
+                    item_d = replace(item_d, issue_id=lookup_issue_id(item_d) or "")
+                already_parked = False
+                if needs_human_for is not None:
+                    try:
+                        already_parked = needs_human_for(item_d) is True
+                    except Exception as e:
+                        logger.warning(
+                            "needs-human-lookup-failed",
+                            extra={"workload": name, "error": repr(e)},
+                        )
+                if already_parked:
+                    if ensure_human_label is not None:
+                        try:
+                            if not ensure_human_label(item_d):
+                                logger.warning(
+                                    "ensure-needs-human-label-failed",
+                                    extra={"workload": name, "reason": demoted_reason},
+                                )
+                        except Exception as e:
+                            logger.warning(
+                                "ensure-needs-human-label-failed",
+                                extra={
+                                    "workload": name,
+                                    "reason": demoted_reason,
+                                    "error": repr(e),
+                                },
+                            )
+                    msg = f"{name}:rail-demoted:parked"
+                    logger.info(msg)
+                    results.append(msg)
+                    continue
+                parked = False
+                if park_for_human is not None:
+                    try:
+                        parked = bool(park_for_human(
+                            item_d,
+                            f"review approved; demoted by the {demoted_rail} rail, "
+                            f"not re-runnable: {demoted_reason}",
+                            path="rail-demoted",
+                        ))
+                    except Exception as e:
+                        logger.warning(
+                            "park-for-human-failed",
+                            extra={"workload": name, "reason": demoted_reason, "error": repr(e)},
+                        )
+                if parked:
+                    msg = f"{name}:rail-demoted:parked"
+                    logger.info(msg)
+                    results.append(msg)
+                    continue
+                # Could not park it — do not strand the work: fall through and
+                # retry as normal.
+                logger.warning(
+                    "rail-demotion-not-parked",
+                    extra={"workload": name, "reason": demoted_reason},
                 )
         if is_infra and infra_attempt >= infra_max_attempts:
             # Infra-error retries have their own budget so a permanently
