@@ -7,8 +7,15 @@ import urllib.parse
 from dataclasses import dataclass, replace
 from typing import Any, Callable, Dict, List, Optional
 from kubernetes import client, config
+from bridge import lanes as lane_topology
 from bridge.env import validate_env
 from bridge.logging_setup import configure as configure_logging
+
+# The lane list this bridge polled before Dispatch could describe its own
+# topology. Used only when DISPATCH_LANES is unset AND /api/lanes is
+# unavailable, so an upgrade with neither configured nor discoverable lanes
+# behaves exactly as it did before.
+DEFAULT_POLLED_LANES = ["local", "cloud", "frontier"]
 from bridge.models import ClaimedItem
 from bridge.workload import (
     _parse_json_map,
@@ -1345,8 +1352,11 @@ def _real_main() -> None:  # pragma: no cover - thin wiring, exercised in the cl
     _check_dispatch_url(base_url)
     token = os.environ["DISPATCH_AGENT_TOKEN"]
     agent_name = os.environ.get("DISPATCH_AGENT_NAME", "foreman-coder")
-    lanes = [part.strip() for part in os.environ.get("DISPATCH_LANES", "local,cloud,frontier").split(",") if part.strip()]
-    warn_if_lane_cap_exceeded(lanes)
+    # Unset means "discover from Dispatch" (bridge/lanes.py); the historical
+    # default is kept only as the fallback when discovery is unavailable too.
+    configured_lanes = [
+        part.strip() for part in os.environ.get("DISPATCH_LANES", "").split(",") if part.strip()
+    ]
     namespace = os.environ.get("FOREMAN_NAMESPACE", "llm")
     gate_profiles = parse_gate_profiles(os.environ.get("GATEPROFILE_MAP"))
     max_attempts = int(os.environ.get("RETRY_MAX_ATTEMPTS", str(DEFAULT_MAX_ATTEMPTS)))
@@ -1362,7 +1372,8 @@ def _real_main() -> None:  # pragma: no cover - thin wiring, exercised in the cl
     repo_coder_agents = parse_repo_coder_agents(os.environ.get("REPO_CODER_AGENTS"))
     # When set, exhausted Workloads outside this lane escalate into it (re-lane +
     # unclaim) instead of tombstoning. Empty disables escalation.
-    escalation_lane = os.environ.get("ESCALATION_LANE", "").strip()
+    # Unset means "the claimable lane whose role is escalation" (bridge/lanes.py).
+    configured_escalation_lane = os.environ.get("ESCALATION_LANE", "").strip()
     verify_enabled = _parse_bool_env(os.environ.get("VERIFY_ENABLED", ""), default=False)
     self_go = parse_self_go(os.environ.get("VERDICT_SELF_GO"))
     pr_fix_enabled = os.environ.get("PR_FIX_ENABLED", "").strip().lower() in ("1", "true", "yes")
@@ -1399,6 +1410,16 @@ def _real_main() -> None:  # pragma: no cover - thin wiring, exercised in the cl
         return r.json()
 
     dispatch = DispatchClient(base_url, token, http_get, http_post)
+
+    # Discovery is best-effort and never authoritative over explicit config:
+    # an unreachable /api/lanes leaves the topology empty and the configured
+    # values stand, so a tick cannot fail because a new endpoint is down.
+    lane_topology.set_topology(dispatch.lanes())
+    lanes = lane_topology.resolve_polled_lanes(
+        configured_lanes, DEFAULT_POLLED_LANES
+    )
+    warn_if_lane_cap_exceeded(lanes)
+    escalation_lane = lane_topology.resolve_escalation_lane(configured_escalation_lane)
 
     try:
         config.load_incluster_config()

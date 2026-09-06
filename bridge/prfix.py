@@ -1,6 +1,7 @@
 from dataclasses import dataclass
 from typing import Optional
 
+from bridge import lanes
 from bridge.workload import (
     CODER_AGENT, VERIFIER_AGENT, ATTEMPT_ANNOTATION, SIGNATURE_ANNOTATION,
     PROGRESS_ANNOTATION, LANE_CODER_WILDCARD, gate_profile_for,
@@ -63,7 +64,9 @@ def pr_fix_coder_for(lane: str, lane_agents: dict) -> str:
     """Resolve a PrFixLane to a coder Agent name: exact, then "*", else "coder"."""
     if not lane_agents:
         return CODER_AGENT
-    return lane_agents.get(lane) or lane_agents.get(LANE_CODER_WILDCARD) or CODER_AGENT
+    # Lane id, then the lane's role (so PR_FIX_LANE_AGENTS can be keyed
+    # "escalation" rather than one deployment's lane id), then "*".
+    return lanes.lookup(lane_agents, lane) or CODER_AGENT
 
 
 def assemble_fix_prompt(item: "PrFixItem") -> str:
