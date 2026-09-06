@@ -27,6 +27,7 @@ from bridge.main import (
     _load_by_coder_agent,
     _active_workloads,
 )
+from bridge.retry import reconcile_failures
 
 
 # ---------------------------------------------------------------------------
@@ -791,3 +792,243 @@ class TestBridgeRuntime:
         )
         result = _runtime(api).list_terminal_candidates()
         assert [w["metadata"]["name"] for w in result] == ["a", "b"]
+
+
+# ---------------------------------------------------------------------------
+# #287 -- rail-demoted NO-GO reaches reconcile_failures through the real
+# BridgeRuntime.list_workload_tasks callback wired in bridge/main.py.
+#
+# The previous test set (test_retry.py) injects already-shaped task dicts
+# straight into `tasks_for`. That proves the classifier works, but it cannot
+# prove the production wiring still delivers ``status.result.extra.modelExtra``
+# once the items have come back from the Kubernetes custom-resource API.
+# Both layers below close that gap by going through the real callback.
+# ---------------------------------------------------------------------------
+
+
+class TestRailDemotedEndToEnd:
+    """#287: the bridge/main.py callback must surface rail-demoted reviews to
+    reconcile_failures so parking happens on the first tick, not after the
+    attempt budget has been spent."""
+
+    @staticmethod
+    def _rail_demoted_agentic_task() -> dict:
+        """Mirror the exact k8s custom-resource shape foreman's controller
+        surfaces at ``status.result.extra.modelExtra``. The bridge retry path
+        reads ``status.result.extra.modelExtra`` and nothing else; if any
+        layer between here and that field strips or renames it, the rail
+        demotion goes back to spending the attempt budget (#287)."""
+        return {
+            "metadata": {
+                "name": "review-wl-1",
+                "labels": {"foreman.llmkube.dev/workload": "wl-1"},
+            },
+            "spec": {"kind": "review"},
+            "status": {
+                "verdict": "NO-GO",
+                "phase": "Succeeded",
+                "result": {
+                    "extra": {
+                        "modelExtra": {
+                            "verdictDemotedBy": "issueAsk",
+                            "verdictClaimed": "GO",
+                            "findings": {},
+                            "demotionReason": (
+                                "Could not verify `headSha` was recorded at enqueue."
+                            ),
+                        },
+                        "modelSummary": "The change looks correct.",
+                    },
+                },
+            },
+        }
+
+    def test_list_workload_tasks_preserves_model_extra(self) -> None:
+        """``list_workload_tasks`` is the callback wired as ``tasks_for=`` in
+        bridge/main.py:1057. Any k8s response shape that drops
+        ``status.result.extra.modelExtra`` would silently disable the
+        rail-demotion classifier. Lock the contract: the items returned must
+        carry the full modelExtra tree the classifier depends on."""
+        api = FakeAPI(
+            responses={
+                "list_namespaced_custom_object": [
+                    {"items": [self._rail_demoted_agentic_task()]}
+                ]
+            }
+        )
+        result = _runtime(api).list_workload_tasks("wl-1")
+        assert len(result) == 1
+        me = result[0]["status"]["result"]["extra"]["modelExtra"]
+        assert me["verdictDemotedBy"] == "issueAsk"
+        assert me["verdictClaimed"] == "GO"
+        assert me["findings"] == {}
+
+    def test_list_workload_tasks_preserves_full_k8s_item_shape(self) -> None:
+        """A real apiserver response carries the full custom-resource shape
+        (``apiVersion``, ``kind``, ``metadata.resourceVersion``,
+        ``metadata.uid``, ``metadata.creationTimestamp``, top-level
+        ``status`` with conditions, ...). The retry classifiers read
+        ``status.result.extra.modelExtra`` off the item, so the path from
+        ``response.get("items")`` to the callback return value must be a
+        pass-through: any helper that projects, transforms, or renames the
+        items would silently drop the field and re-enable the wasted attempt
+        budget (#287).
+
+        The test asserts identity on a richer k8s-shaped item so a future
+        refactor that introduces a transform is caught here rather than at
+        03:00 when foreman ships a version with renamed fields. This is the
+        strongest production-side verification we can add without a live
+        cluster: it locks the bridge-side pass-through so the only way the
+        retry classifier could miss ``modelExtra`` is a controller-side
+        rename, which would be visible in the controller's own audit
+        record.
+        """
+        full_task = {
+            "apiVersion": "foreman.llmkube.dev/v1alpha1",
+            "kind": "AgenticTask",
+            "metadata": {
+                "name": "review-wl-1",
+                "namespace": "foreman",
+                "uid": "abc-123",
+                "resourceVersion": "42",
+                "creationTimestamp": "2026-09-06T00:00:00Z",
+                "labels": {"foreman.llmkube.dev/workload": "wl-1"},
+                "annotations": {"foreman.llmkube.dev/agent": "reviewer"},
+            },
+            "spec": {
+                "kind": "review",
+                "agentRef": {"name": "reviewer-prod"},
+                "workloadRef": {"name": "wl-1"},
+            },
+            "status": {
+                "verdict": "NO-GO",
+                "phase": "Succeeded",
+                "conditions": [
+                    {
+                        "type": "Completed",
+                        "status": "True",
+                        "lastTransitionTime": "2026-09-06T00:01:00Z",
+                        "reason": "Succeeded",
+                    },
+                ],
+                "result": {
+                    "outcome": "APPROVE",
+                    "extra": {
+                        "modelExtra": {
+                            "verdictDemotedBy": "issueAsk",
+                            "verdictClaimed": "GO",
+                            "findings": {},
+                            "demotionReason": "Could not verify `headSha`.",
+                        },
+                        "modelSummary": "The change looks correct.",
+                    },
+                },
+            },
+        }
+        api = FakeAPI(
+            responses={
+                "list_namespaced_custom_object": [
+                    {"items": [full_task]},
+                ]
+            }
+        )
+        result = _runtime(api).list_workload_tasks("wl-1")
+        # Pass-through identity: every key the apiserver sent must survive
+        # the callback unchanged. The retry classifier reads
+        # ``status.result.extra.modelExtra`` off this exact dict, so any
+        # drop or rename here would silently disable the rail-demotion
+        # parking path (#287).
+        assert result[0] == full_task
+        # And the path the classifier takes is reachable end-to-end:
+        me = result[0]["status"]["result"]["extra"]["modelExtra"]
+        assert me["verdictDemotedBy"] == "issueAsk"
+
+    def test_reconcile_failures_parks_rail_demoted_via_list_workload_tasks(self) -> None:
+        """End-to-end proof: the production ``tasks_for`` callback
+        (``list_workload_tasks`` -> ``_list_workload_tasks`` -> k8s API)
+        delivers enough signal to ``reconcile_failures`` for the
+        rail-demotion branch in bridge/retry.py to fire on the first tick
+        (#287).
+
+        Without this, the production retry path would spend the whole
+        attempt budget on rail-demoted NO-GOs because the items the
+        callback returns would be missing ``modelExtra`` at the bottom of
+        the status tree."""
+
+        parked: list = []
+
+        def park_for_human(item, reason, **_kw) -> bool:
+            parked.append((item.issue_number, reason, _kw.get("path")))
+            return True
+
+        api = FakeAPI(
+            responses={
+                "list_namespaced_custom_object": [
+                    # list_failed_workloads response
+                    {"items": [{
+                        "metadata": {
+                            "name": "wl-misospace-dispatch-7",
+                            "labels": {
+                                "created-by": "dispatch-bridge",
+                                "lane": "local",
+                            },
+                            "annotations": {
+                                "foreman.llmkube.dev/attempt": "1",
+                                "foreman.llmkube.dev/issue-id": "id-7",
+                            },
+                        },
+                        "spec": {
+                            "intent": "fix it",
+                            "repo": "misospace/dispatch",
+                            "issues": [7],
+                        },
+                        "status": {"phase": "Failed"},
+                    }]},
+                    # list_workload_tasks response for the same Workload
+                    {"items": [self._rail_demoted_agentic_task()]},
+                ]
+            }
+        )
+
+        runtime = _runtime(api)
+        # Mirror bridge/main.py:1057 exactly:
+        #     tasks_for=list_workload_tasks,
+        # where list_workload_tasks is bridge.list_workload_tasks bound to a
+        # BridgeRuntime instance -- same closure shape that ``_real_main``
+        # builds at the top of its tick.
+        list_workload_tasks = runtime.list_workload_tasks
+
+        created: list = []
+        deleted: list = []
+
+        out = reconcile_failures(
+            "foreman-coder",
+            list_failed=runtime.list_failed_workloads,
+            create_workload=lambda manifest: created.append(manifest),
+            delete_workload=lambda name: deleted.append(name),
+            namespace="ns",
+            gate_profiles={"*": {"language": "generic"}},
+            max_attempts=3,
+            tasks_for=list_workload_tasks,
+            park_for_human=park_for_human,
+            # No needs_human_for: this is the first tick, the issue has not
+            # been parked yet, so the rail-demotion branch must do the work.
+        )
+
+        assert out == ["wl-misospace-dispatch-7:rail-demoted:parked"], out
+        assert parked == [
+            (
+                7,
+                (
+                    "review approved; demoted by the issueAsk rail, "
+                    "not re-runnable: Could not verify `headSha` was "
+                    "recorded at enqueue."
+                ),
+                "rail-demoted",
+            )
+        ], parked
+        # No retry attempt is spent: the whole point of the fix (#287).
+        assert created == []
+        # Tombstone stays in place for triage -- same handling as the other
+        # parking paths.
+        assert deleted == []

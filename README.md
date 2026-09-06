@@ -67,9 +67,10 @@ each attempt because they rebuild from scratch via `build_workload`.
 
 **Backward-compat note (parked-for-human comments):** every comment the bridge
 posts for a `needs-human` issue now carries a stable `path: <value>` tag in its
-header — `declared-human`, `exhausted-attempts`, `exhausted-infra`, or
-`go-no-pr` — so triage can group issues by cause without opening the Workload
-(issue #260). The header line is the closest thing to a contract: it is now
+header — `declared-human`, `exhausted-attempts`, `exhausted-infra`, `go-no-pr`,
+or `rail-demoted` (a review the issueAsk/scope-overlap rail demoted from GO,
+which re-running cannot fix, #287) — so triage can group issues by cause
+without opening the Workload (issue #260). The header line is the closest thing to a contract: it is now
 `**Needs a human decision** (`path: <value>`)` (or the GO-with-no-PR variant
 with the same tag), so any operator script that matched the bare
 `**Needs a human decision**` line exactly should match on the prefix instead.

@@ -25,10 +25,11 @@ def test_format_includes_reason_verbatim():
 
 
 def test_format_emits_path_tag_for_each_parking_path():
-    """Each of the four parking paths renders its stable `path:` tag in the
+    """Each of the parking paths renders its stable `path:` tag in the
     header so triage can grep on `path:` without opening the Workload
     (issue #260)."""
-    for path in ("declared-human", "exhausted-attempts", "exhausted-infra", "go-no-pr"):
+    for path in ("declared-human", "exhausted-attempts", "exhausted-infra",
+                 "go-no-pr", "rail-demoted"):
         body = _format_escalation_comment(_item(), "some reason", path=path)
         assert f"`path: {path}`" in body, body
         # the tag sits on the header line, before the reason
