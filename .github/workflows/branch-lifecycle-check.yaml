@@ -119,6 +119,22 @@ jobs:
 
           tracking_label="branch-lifecycle"
 
+          # Ensure the tracking label exists before filing. `gh issue create
+          # --label` hard-fails with "could not add label: 'branch-lifecycle'
+          # not found" when the label is absent, which is what has been red-ing
+          # this job on the default branch. Create it if missing; if creation
+          # is not permitted (token lacks the right), file the issue without
+          # the label rather than failing the run.
+          label_flags=()
+          if gh label list --json name --jq '.[].name' 2>/dev/null | grep -qx "$tracking_label"; then
+            label_flags=(--label "$tracking_label")
+          elif gh label create "$tracking_label" \
+            --color "B60205" \
+            --description "Stale Foreman fix branches awaiting review or merge" \
+            >/dev/null 2>&1; then
+            label_flags=(--label "$tracking_label")
+          fi
+
           existing="$(gh api "repos/${REPO}/issues?state=open&labels=${tracking_label}&per_page=1" \
             --jq '.[0].number // empty')"
 
@@ -144,7 +160,7 @@ jobs:
           else
             gh issue create \
               --title "Stale Foreman fix branches detected" \
-              --label "$tracking_label" \
+              "${label_flags[@]}" \
               --body-file body.md
             echo "Opened new tracking issue"
           fi
