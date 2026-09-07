@@ -61,14 +61,38 @@ exit 0
 """
 
 
-def _file_step_script() -> str:
+def _workflow_doc() -> dict:
     with open(WORKFLOW) as f:
-        doc = yaml.safe_load(f)
+        return yaml.safe_load(f)
+
+
+def _file_step_script() -> str:
+    doc = _workflow_doc()
     steps = doc["jobs"]["stale-branches"]["steps"]
     for step in steps:
         if step.get("name") == "File or update tracking issue":
             return step["run"]
     raise AssertionError("workflow has no 'File or update tracking issue' step")
+
+
+def test_workflow_grants_labels_write_permission():
+    """The workflow must declare `labels: write`.
+
+    The filing step creates the `branch-lifecycle` tracking label when it is
+    absent (`gh label create`). Without `labels: write` in the workflow's
+    `permissions` block, that call fails silently (its output is discarded),
+    the label is never created, and the label-based dedup lookup
+    (`issues?state=open&labels=branch-lifecycle`) never matches the previously
+    filed (unlabeled) issue — so a new tracking issue is filed on every run
+    instead of updating the existing one. This is the regression behind #313
+    and #314: the #306 fix stopped the red but could not create the label.
+    """
+    doc = _workflow_doc()
+    permissions = doc.get("permissions") or {}
+    assert permissions.get("labels") == "write", (
+        f"workflow must declare `labels: write` so the tracking label can be "
+        f"created on first use; got permissions={permissions!r}"
+    )
 
 
 def _run_step(tmp_path: Path, env_extra: dict) -> list[str]:
