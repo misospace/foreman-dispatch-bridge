@@ -27,6 +27,13 @@ on:
 permissions:
   contents: read
   issues: write
+  # `labels: write` is required for the "File or update tracking issue" step to
+  # create the `branch-lifecycle` tracking label when it is absent. Without it,
+  # `gh label create` fails silently, the label is never created, and the
+  # label-based dedup lookup (`issues?state=open&labels=branch-lifecycle`) never
+  # matches the previously filed (unlabeled) issue — so a new tracking issue is
+  # filed on every run instead of updating the existing one.
+  labels: write
 
 jobs:
   stale-branches:
