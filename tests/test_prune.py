@@ -306,7 +306,7 @@ def test_prune_workloads_noop_when_both_ttls_disabled():
 
 
 def _wl_with_identity(name, phase, *, repo="a/b", issues=None, issue_id="iss_1",
-                       agent_name="foreman-coder", last_transition=None, created=None,
+                       last_transition=None, created=None,
                        created_by="dispatch-bridge", terminal_since_stamp=None):
     """Workload manifest with spec identity fields for prune reset."""
     base = _wl(name, phase, last_transition=last_transition, created=created,
@@ -316,7 +316,6 @@ def _wl_with_identity(name, phase, *, repo="a/b", issues=None, issue_id="iss_1",
     labels["created-by"] = created_by
     ann = base["metadata"].setdefault("annotations", {})
     ann["foreman.llmkube.dev/issue-id"] = issue_id
-    ann["foreman.llmkube.dev/agent-name"] = agent_name
     return base
 
 
