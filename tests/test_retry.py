@@ -1733,3 +1733,82 @@ def test_rail_demoted_no_go_ignores_tasks_when_the_lookup_raises():
     )
     assert out == ["wl-misospace-dispatch-7:retry:2/3"]
     assert len(r.created) == 1
+
+
+# --- repeated bare coder NO-GO parks instead of burning the budget -----------
+
+
+def _coder_no_go():
+    return {"spec": {"kind": "issue-fix"}, "status": {"verdict": "NO-GO"}}
+
+
+def test_coder_said_no_detects_a_bare_coder_no_go():
+    from bridge.retry import coder_said_no
+
+    assert coder_said_no([_coder_no_go()]) is True
+    assert coder_said_no([{"spec": {"kind": "code"}, "status": {"verdict": "NO-GO"}}]) is True
+    # A reviewer NO-GO is not the coder's judgement.
+    assert coder_said_no([_no_go_review()]) is False
+    assert coder_said_no([{"spec": {"kind": "issue-fix"}, "status": {"verdict": "GO"}}]) is False
+    assert coder_said_no([]) is False
+    assert coder_said_no(None) is False
+
+
+def test_first_coder_no_go_still_retries():
+    """One NO-GO can follow a bad clone or a flaky gate. One sample is as weak
+    here as it is on the filing side, so the first still gets another go."""
+    parked = []
+    r = _Recorder([_failed_wl("wl-misospace-dispatch-7", attempt=1)])
+    out = _reconcile(
+        r,
+        tasks_for=lambda name: [_coder_no_go()],
+        park_for_human=lambda item, reason, **_kw: parked.append(reason) or True,
+    )
+    assert parked == []
+    assert r.created, "first NO-GO must still consume an attempt and retry"
+    assert out == ["wl-misospace-dispatch-7:retry:2/3"]
+
+
+def test_second_coder_no_go_parks_without_spending_the_rest_of_the_budget():
+    """The general rule: re-running a coder that already said NO twice
+    re-derives the same judgement, and each attempt is a full model run."""
+    parked = []
+    r = _Recorder([_failed_wl("wl-misospace-dispatch-7", attempt=2)])
+    out = _reconcile(
+        r,
+        tasks_for=lambda name: [_coder_no_go()],
+        park_for_human=lambda item, reason, **_kw: parked.append(reason) or True,
+    )
+    assert out == ["wl-misospace-dispatch-7:repeated-nogo:parked"]
+    assert len(parked) == 1
+    assert "two attempts" in parked[0]
+    assert r.created == [], "no third attempt may be created"
+
+
+def test_repeated_no_go_park_is_tagged_with_its_own_path():
+    """path=repeated-nogo so the comment header distinguishes this from
+    exhausted-attempts and the rail-demoted path."""
+    calls = []
+    r = _Recorder([_failed_wl("wl-misospace-dispatch-7", attempt=2)])
+    _reconcile(
+        r,
+        tasks_for=lambda name: [_coder_no_go()],
+        park_for_human=lambda item, reason, **kw: calls.append(kw.get("path")) or True,
+    )
+    assert calls == ["repeated-nogo"]
+
+
+def test_repeated_review_no_go_does_not_trigger_the_coder_rule():
+    """A reviewer rejecting twice is actionable feedback for the coder, which
+    is exactly what the retry path exists to deliver. Only the CODER declining
+    is the settled judgement."""
+    parked = []
+    r = _Recorder([_failed_wl("wl-misospace-dispatch-7", attempt=2)])
+    out = _reconcile(
+        r,
+        tasks_for=lambda name: [_no_go_review(findings={"missing_tests": True})],
+        park_for_human=lambda item, reason, **_kw: parked.append(reason) or True,
+    )
+    assert parked == []
+    assert r.created, "a repeated reviewer NO-GO must still retry"
+    assert out == ["wl-misospace-dispatch-7:retry:3/3"]

@@ -40,7 +40,7 @@ issue per lane.
 | `BASE_CODER_AGENTS` | *(empty)* | JSON `{language: coderAgentName}` with `"*"` wildcard; routes the base lane's coder by the repo's `GATEPROFILE_MAP` language |
 | `CODER_AGENT_SLOTS` | `{}` | JSON map `{coderAgent: slotCount}` capping each coder's in-flight Workloads; `"*"` wildcard covers unnamed agents. Empty keeps the legacy issue-number split. |
 | `ESCALATION_LANE` | *(empty = by role)* | lane exhausted issues re-lane into. Unset, the bridge resolves the claimable lane whose Dispatch role is `escalation`, so this does not have to name a deployment-specific lane id. An explicit value always wins. Empty and unresolvable means escalation is off, as before. |
-| `RETRY_MAX_ATTEMPTS` | `3` | attempts before escalate/tombstone |
+| `RETRY_MAX_ATTEMPTS` | `3` | attempts before escalate/tombstone A coder NO-GO repeated on a second attempt parks the issue instead of spending the rest of the budget: re-running re-derives the same judgement. |
 | `PR_FIX_ENABLED` | *(off)* | enable the PR-fix drain/reconcile loop |
 | `PR_FIX_MAX_ATTEMPTS` | `3` | pr-fix attempts before BLOCKED/tombstone |
 | `FIX_FIRST_AGENTS` | *(empty)* | JSON list `["coder"]` (or comma-separated names) of agents that only join the issue rotation when their fix lane is idle (no fix work in flight, a free slot). Fixes stay first-priority on an uncontended slot. See issue #134. |

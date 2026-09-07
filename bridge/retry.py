@@ -56,6 +56,28 @@ FEEDBACK_MAX_CHARS = 2000
 RAIL_DEMOTION_RAILS = frozenset({"issueAsk", "scope-overlap"})
 
 
+def coder_said_no(tasks: list) -> bool:
+    """True when the coder ended this Workload with a bare NO-GO.
+
+    "Bare" means the verdict alone: a coder that declared DESIGN-DECISION or
+    NO-TECHNICAL-FIX is handled by declared_escalation and parks on the first
+    occurrence, and a review NO-GO manufactured by a harness rail is handled by
+    rail_demoted_reason. What is left is a coder that read the issue and the
+    code and decided not to change anything, without saying why.
+
+    That is a JUDGEMENT, not a fault. Re-running the same coder against the same
+    issue re-derives the same judgement, so every further attempt is a full
+    model run spent to be told the same thing.
+    """
+    for t in tasks or []:
+        spec = t.get("spec") or {}
+        if spec.get("kind") not in ("issue-fix", "code"):
+            continue
+        if ((t.get("status") or {}).get("verdict")) == "NO-GO":
+            return True
+    return False
+
+
 def rail_demoted_reason(tasks: list) -> Optional[tuple[str, str]]:
     """Return ``(rail, reason)`` when a review NO-GO was manufactured by a
     harness rail rather than asserted by the reviewer.
@@ -946,6 +968,30 @@ def reconcile_failures(
                         extra={"workload": name},
                     )
             continue
+        # A coder NO-GO repeated across attempts is a settled judgement, not a
+        # transient. The first one still retries: a NO-GO can follow a bad
+        # clone or a flaky gate, and one sample is as weak here as it is on the
+        # filing side of CI-failure ingestion. A second one is a condition, and
+        # spending the rest of the budget re-asking a question already answered
+        # twice is pure model time -- on a local GPU, literal watts.
+        if not is_infra and attempt >= 2 and tasks and coder_said_no(tasks):
+            if _park_exhausted(
+                wl,
+                "coder returned NO-GO on two attempts; re-running re-derives the "
+                "same judgement, so this needs a person rather than more attempts",
+                path="repeated-nogo",
+            ):
+                msg = f"{name}:repeated-nogo:parked"
+            else:
+                msg = f"{name}:repeated-nogo:park-failed"
+            logger.info(msg)
+            results.append(msg)
+            try:
+                delete_workload(name)
+            except Exception:
+                logger.exception("repeated-nogo-delete-failed", extra={"workload": name})
+            continue
+
         if attempt >= max_attempts and not is_infra:
             item = refresh_lane(item_from_workload(wl), current_lane_for)
             if not item.issue_id and lookup_issue_id:
