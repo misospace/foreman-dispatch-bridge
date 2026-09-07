@@ -165,6 +165,38 @@ jobs:
             echo "Opened new tracking issue"
           fi
 
+      - name: Close tracking issue when no stale branches remain
+        if: steps.detect.outputs.stale_count == '0'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+
+          tracking_label="branch-lifecycle"
+
+          # The workflow files a tracking issue when stale branches exist but
+          # never closed one when they were all merged or deleted, so tracking
+          # issues (e.g. #317) lingered long after the branches they flagged
+          # were gone. Close every open tracking issue now that the audit found
+          # nothing stale.
+          mapfile -t open_issues < <(
+            gh api "repos/${REPO}/issues?state=open&labels=${tracking_label}&per_page=100" \
+              --jq '.[].number'
+          )
+
+          if [ "${#open_issues[@]}" -eq 0 ]; then
+            echo "No open tracking issue to close."
+            exit 0
+          fi
+
+          for issue in "${open_issues[@]}"; do
+            [ -z "${issue}" ] && continue
+            gh issue close "${issue}" \
+              --comment "All previously flagged Foreman fix branches have been merged or deleted; closing the tracking issue."
+            echo "Closed tracking issue #${issue}"
+          done
+
       - name: Report stale count
         if: always()
         run: |
