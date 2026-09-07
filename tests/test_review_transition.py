@@ -471,3 +471,129 @@ def test_parked_for_human_comment_carries_go_no_pr_path_tag():
     assert body.startswith(
         ":rotating_light: coder reported GO but no PR was opened. (`path: go-no-pr`)"
     ), body
+
+
+# ── Closing an already-resolved issue (#322) ───────────────────────────────
+
+
+def _task_already_resolved(summary="Already resolved on main.", resolved_by="workflow.yaml on main (5ef8591)"):
+    """A coder task reporting ALREADY-RESOLVED the way Foreman records it.
+
+    Foreman does not confirm the model: it stores its own outcome as
+    NEEDS-VERIFICATION and copies the claim to resolvedByClaimed, so both
+    shapes are present on a real task and the reader must not key off
+    extra.outcome.
+    """
+    return {
+        "spec": {"kind": "issue-fix"},
+        "status": {
+            "phase": "Succeeded",
+            "verdict": "NO-GO",
+            "result": {
+                "verdict": "NO-GO",
+                "summary": summary,
+                "extra": {
+                    "outcome": "NEEDS-VERIFICATION",
+                    "resolvedByClaimed": resolved_by,
+                    "modelExtra": {"outcome": "ALREADY-RESOLVED", "resolvedBy": resolved_by},
+                },
+            },
+        },
+    }
+
+
+class TestCloseAlreadyResolved:
+    def test_closes_issue_on_task_verdict_without_workload_condition(self):
+        """The case that actually occurs: a single-coder Workload never carries
+        AllAlreadyResolved, so the task result is the only signal. Before #322
+        this fell through to the blocked path and left the issue open."""
+        closed, updated = [], []
+        out = transition_to_in_review(
+            list_workloads=lambda: [_wl("wl-a-b-42")],
+            list_workload_tasks=lambda name: [_task_already_resolved()],
+            update_status=lambda item, status, agent, reason="": updated.append((item, status, agent)),
+            agent_name="foreman-coder",
+            close_issue=lambda repo, number, body: closed.append((repo, number, body)) or True,
+        )
+        assert updated[0][1] == "done"
+        assert len(closed) == 1
+        repo, number, body = closed[0]
+        assert repo == "misospace/foreman-dispatch-bridge"
+        assert number == 42
+        assert any("already-resolved:closed" in line for line in out)
+
+    def test_close_comment_carries_the_evidence(self):
+        """The close is made on the coder's reading of the base branch, not a
+        merged PR, so the evidence has to travel with it or nobody can check."""
+        closed = []
+        transition_to_in_review(
+            list_workloads=lambda: [_wl("wl-a-b-42")],
+            list_workload_tasks=lambda name: [
+                _task_already_resolved(summary="Fixed by PR #329.", resolved_by="retry-release.yaml (5ef8591)")
+            ],
+            update_status=lambda item, status, agent, reason="": None,
+            agent_name="foreman-coder",
+            close_issue=lambda repo, number, body: closed.append(body) or True,
+        )
+        body = closed[0]
+        assert "Fixed by PR #329." in body
+        assert "retry-release.yaml (5ef8591)" in body
+        assert "Reopen" in body
+
+    def test_a_failed_close_leaves_the_issue_done_not_stuck(self):
+        """Closing is best-effort: the status flip already released the claim,
+        so a GitHub failure costs a stale open issue, not a stuck one."""
+        updated = []
+        out = transition_to_in_review(
+            list_workloads=lambda: [_wl("wl-a-b-42")],
+            list_workload_tasks=lambda name: [_task_already_resolved()],
+            update_status=lambda item, status, agent, reason="": updated.append(status),
+            agent_name="foreman-coder",
+            close_issue=lambda repo, number, body: (_ for _ in ()).throw(RuntimeError("502")),
+        )
+        assert updated == ["done"]
+        assert any("already-resolved" in line for line in out)
+        assert not any("closed" in line for line in out)
+
+    def test_no_closer_configured_still_marks_done(self):
+        """close_issue is optional: an older deployment that does not pass one
+        keeps the pre-#322 behaviour rather than failing the tick."""
+        updated = []
+        transition_to_in_review(
+            list_workloads=lambda: [_wl("wl-a-b-42")],
+            list_workload_tasks=lambda name: [_task_already_resolved()],
+            update_status=lambda item, status, agent, reason="": updated.append(status),
+            agent_name="foreman-coder",
+        )
+        assert updated == ["done"]
+
+    def test_a_plain_no_go_is_not_closed(self):
+        """Only ALREADY-RESOLVED closes. Any other NO-GO is real unfinished
+        work and must stay open on the blocked path — closing it would delete
+        work from the queue silently."""
+        closed = []
+        transition_to_in_review(
+            list_workloads=lambda: [_wl("wl-a-b-42")],
+            list_workload_tasks=lambda name: [_task_with_signal(verdict="INCOMPLETE", summary="ran out of turns")],
+            update_status=lambda item, status, agent, reason="": None,
+            agent_name="foreman-coder",
+            close_issue=lambda repo, number, body: closed.append(body) or True,
+        )
+        assert closed == []
+
+    def test_pr_still_wins_over_already_resolved(self):
+        """A Workload that opened a PR goes to in-review; the issue is closed by
+        the merged PR, not by us."""
+        closed, updated = [], []
+        transition_to_in_review(
+            list_workloads=lambda: [_wl("wl-a-b-42")],
+            list_workload_tasks=lambda name: [
+                _task_already_resolved(),
+                _task("review", pr_url="https://github.com/a/b/pull/42"),
+            ],
+            update_status=lambda item, status, agent, reason="": updated.append(status),
+            agent_name="foreman-coder",
+            close_issue=lambda repo, number, body: closed.append(body) or True,
+        )
+        assert updated == ["in-review"]
+        assert closed == []

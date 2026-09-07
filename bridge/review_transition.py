@@ -92,6 +92,56 @@ def _workload_all_already_resolved(wl: dict) -> bool:
     return False
 
 
+def _extract_already_resolved(tasks: list) -> tuple[bool, str]:
+    """Return (is_already_resolved, evidence) from the coder's own result.
+
+    The coder reports this as ``extra.modelExtra.outcome == "ALREADY-RESOLVED"``
+    together with a ``resolvedBy`` naming the base-branch file and commit it
+    checked. Foreman records its own ``extra.outcome`` as NEEDS-VERIFICATION and
+    copies the claim to ``resolvedByClaimed``: it does not independently confirm
+    the model, so the evidence string is what a human would have to check.
+
+    Read from the task result rather than the Workload's AllAlreadyResolved
+    condition. That condition is emitted only when *every* task resolves this
+    way, which does not fire for a single-coder Workload — the case that
+    actually occurs — so relying on it alone left these issues open.
+    """
+    for t in tasks or []:
+        result = (t.get("status") or {}).get("result") or {}
+        extra = result.get("extra") or {}
+        model_extra = extra.get("modelExtra") or {}
+        if str(model_extra.get("outcome") or "") != "ALREADY-RESOLVED":
+            continue
+        evidence = str(
+            model_extra.get("resolvedBy") or extra.get("resolvedByClaimed") or ""
+        )
+        return True, evidence
+    return False, ""
+
+
+def _already_resolved_comment(summary: str, evidence: str) -> str:
+    """The comment left on an issue closed as already resolved.
+
+    States the claim and the evidence for it, because this close is made on the
+    coder's reading of the base branch rather than on a merged PR. Someone who
+    disagrees needs enough here to reopen without re-running anything.
+    """
+    lines = [
+        "Closing: the coder found this already resolved on the base branch, "
+        "so no change was made.",
+    ]
+    if summary:
+        lines += ["", summary]
+    if evidence:
+        lines += ["", "Evidence:", "", evidence]
+    lines += [
+        "",
+        "This close is based on the coder reading the base branch, not on a "
+        "merged PR. Reopen if that reading is wrong.",
+    ]
+    return "\n".join(lines)
+
+
 def _item_from_workload(wl: dict) -> dict:
     """Build the identity dict update_status consumes."""
     spec = wl.get("spec") or {}
@@ -110,6 +160,7 @@ def transition_to_in_review(
     update_status: UpdateStatus,
     agent_name: str,
     dispatch=None,
+    close_issue=None,
 ) -> list[str]:
     """Flip completed bridge Workloads with an open PR to ``status/in-review``.
 
@@ -135,15 +186,45 @@ def transition_to_in_review(
         tasks = list_workload_tasks(name)
         pr_url = _extract_pr_url(tasks)
         if not pr_url:
-            if _workload_all_already_resolved(wl):
+            resolved_by_task, evidence = _extract_already_resolved(tasks)
+            if _workload_all_already_resolved(wl) or resolved_by_task:
                 # The work already exists on main; the honest destination is
                 # status/done, which releases the in-progress claim.
+                #
+                # Closing the GitHub issue too is the point (#322). Marking the
+                # dispatch item done leaves the issue open, so the next sync
+                # re-queues it and the coder re-derives the same answer — nine
+                # such runs in one 24h window. Until 0.5.56 these were closed by
+                # accident, by a cross-workflow bug in CI-failure ingestion;
+                # with that fixed nothing closes them at all.
                 item = _item_from_workload(wl)
                 try:
                     update_status(item, "done", agent_name)
-                    results.append(f"{name}:done:already-resolved")
                 except Exception as e:
                     results.append(f"{name}:error:{e}")
+                    continue
+                closed = False
+                repo = item.get("repoFullName") or ""
+                issue_number = int(item.get("number") or 0)
+                if close_issue and repo and issue_number:
+                    _, summary, _ = _extract_task_signal(tasks)
+                    # Best-effort: the status flip above already released the
+                    # claim, so a failed close costs a stale open issue rather
+                    # than a stuck one, and the next cycle retries it.
+                    try:
+                        closed = bool(
+                            close_issue(
+                                repo,
+                                issue_number,
+                                _already_resolved_comment(summary, evidence),
+                            )
+                        )
+                    except Exception:
+                        closed = False
+                results.append(
+                    f"{name}:done:already-resolved"
+                    + (":closed" if closed else "")
+                )
                 continue
             # No PR and not AllAlreadyResolved: route on the coder task's
             # verdict instead of silently skipping (#213). A silent skip leaves
