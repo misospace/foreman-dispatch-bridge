@@ -1243,6 +1243,39 @@ def run_tick(
         ):
             logger.info(line)
 
+    def close_already_resolved_issue(repo: str, number: int, body: str) -> bool:
+        """Comment the evidence on a GitHub issue, then close it as completed.
+
+        The comment goes first: a close with no explanation is worse than an
+        open issue, so if the comment fails the issue stays open and the next
+        cycle retries the pair.
+        """
+        from bridge.http_retry import http_patch, http_post as _gh_post
+        headers = {"Accept": "application/vnd.github+json"}
+        if cfg.github_token:
+            headers["Authorization"] = f"Bearer {cfg.github_token}"
+        try:
+            c = _gh_post(
+                f"https://api.github.com/repos/{repo}/issues/{number}/comments",
+                headers=headers,
+                json={"body": body},
+            )
+            c.raise_for_status()
+            r = http_patch(
+                f"https://api.github.com/repos/{repo}/issues/{number}",
+                headers=headers,
+                json={"state": "closed", "state_reason": "completed"},
+            )
+            r.raise_for_status()
+        except Exception as e:
+            logger.warning(
+                "already-resolved-close-failed",
+                extra={"repo": repo, "issue": number, "error": _redact_token(repr(e))},
+            )
+            return False
+        logger.info("already-resolved-closed", extra={"repo": repo, "issue": number})
+        return True
+
     # Transition completed Workloads with an open PR to status/in-review.
     # Runs after claim/retry/pr-fix drains and before reconcile/prune so the
     # stranded-issue reconcile sees the updated label: a completed Workload
@@ -1256,6 +1289,7 @@ def run_tick(
         ),
         cfg.agent_name,
         dispatch=dispatch,
+        close_issue=close_already_resolved_issue,
     ):
         logger.info(line)
 

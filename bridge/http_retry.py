@@ -207,3 +207,13 @@ def http_put(url, headers=None, json=None, timeout=30, **retry_kwargs):
         return requests.put(url, headers=headers, json=json, timeout=timeout)
 
     return retry_request(_call, **retry_kwargs)
+
+
+def http_patch(url, headers=None, json=None, timeout=30, **retry_kwargs):
+    """PATCH with automatic retry on transient failures."""
+    headers = headers or {}
+
+    def _call():
+        return requests.patch(url, headers=headers, json=json, timeout=timeout)
+
+    return retry_request(_call, **retry_kwargs)
