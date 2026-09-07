@@ -138,3 +138,98 @@ def test_label_create_failure_still_files_the_issue(tmp_path):
     assert "label create" in log
     create_args = next(line for line in log if line.startswith("create-args"))
     assert "--label" not in create_args, create_args
+
+
+# --- Close tracking issue when no stale branches remain ---------------------
+#
+# The workflow filed a tracking issue when stale branches existed but never
+# closed one when they were all merged or deleted, so tracking issues (e.g.
+# #317) lingered long after the branches they flagged were gone. These tests
+# guard the new "Close tracking issue when no stale branches remain" step.
+
+FAKE_GH_CLOSE = """\
+#!/usr/bin/env bash
+log() { printf '%s\\n' "$*" >> "$GH_LOG"; }
+case "$1" in
+  api)
+    log "api $2"
+    # Emit the open tracking-issue numbers the step is expected to close.
+    if [ -n "${GH_OPEN_ISSUES:-}" ]; then
+      printf '%s\\n' "${GH_OPEN_ISSUES}"
+    fi
+    ;;
+  issue)
+    log "issue $2"
+    if [ "$2" = "close" ]; then
+      shift 2
+      log "close-args $*"
+    fi
+    ;;
+esac
+exit 0
+"""
+
+
+def _close_step_script() -> str:
+    with open(WORKFLOW) as f:
+        doc = yaml.safe_load(f)
+    steps = doc["jobs"]["stale-branches"]["steps"]
+    for step in steps:
+        if step.get("name") == "Close tracking issue when no stale branches remain":
+            return step["run"]
+    raise AssertionError("workflow has no 'Close tracking issue when no stale branches remain' step")
+
+
+def _run_close_step(tmp_path: Path, open_issues: str) -> list[str]:
+    """Execute the real close step with a fake `gh`; return the call log.
+
+    `open_issues` is a newline-separated list of issue numbers the fake `gh`
+    reports as open (empty string means none).
+    """
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    gh = bin_dir / "gh"
+    gh.write_text(FAKE_GH_CLOSE)
+    gh.chmod(gh.stat().st_mode | stat.S_IXUSR)
+
+    work = tmp_path / "work"
+    work.mkdir()
+
+    env = {
+        "PATH": f"{bin_dir}:{os.environ['PATH']}",
+        "GH_TOKEN": "fake",
+        "REPO": "misospace/foreman-dispatch-bridge",
+        "GH_LOG": str(tmp_path / "gh.log"),
+        "GH_OPEN_ISSUES": open_issues,
+    }
+
+    result = subprocess.run(
+        ["bash", "-e"],
+        input=_close_step_script(),
+        cwd=work,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, (
+        f"close step failed (rc={result.returncode}):\n"
+        f"stdout: {result.stdout}\nstderr: {result.stderr}"
+    )
+    log_path = tmp_path / "gh.log"
+    assert log_path.is_file(), "fake gh was never invoked"
+    return log_path.read_text().splitlines()
+
+
+def test_close_step_closes_each_open_tracking_issue(tmp_path):
+    """With no stale branches, every open tracking issue is closed."""
+    log = _run_close_step(tmp_path, "317\n318")
+    closed = [line for line in log if line.startswith("close-args")]
+    assert len(closed) == 2, closed
+    assert any("317" in line for line in closed), closed
+    assert any("318" in line for line in closed), closed
+
+
+def test_close_step_noop_when_no_open_issues(tmp_path):
+    """No open tracking issue: the step exits cleanly without calling close."""
+    log = _run_close_step(tmp_path, "")
+    assert not any(line.startswith("close-args") for line in log), log
