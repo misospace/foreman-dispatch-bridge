@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.9.0](https://github.com/misospace/foreman-dispatch-bridge/compare/v0.8.0...v0.9.0) (2026-09-07)
+
+
+### Features
+
+* **review-transition:** close the issue when the coder says already-resolved ([#323](https://github.com/misospace/foreman-dispatch-bridge/issues/323)) ([1101f6e](https://github.com/misospace/foreman-dispatch-bridge/commit/1101f6e9abc8e830015768ef813563fbbec6770f))
+
 ## [0.8.0](https://github.com/misospace/foreman-dispatch-bridge/compare/v0.7.8...v0.8.0) (2026-09-07)
 
 
