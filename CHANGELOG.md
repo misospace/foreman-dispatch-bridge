@@ -1,5 +1,31 @@
 # Changelog
 
+## [0.8.0](https://github.com/misospace/foreman-dispatch-bridge/compare/v0.7.8...v0.8.0) (2026-09-07)
+
+
+### Features
+
+* **lanes:** resolve lanes by role instead of hardcoded lane ids ([#293](https://github.com/misospace/foreman-dispatch-bridge/issues/293)) ([2e1bfb3](https://github.com/misospace/foreman-dispatch-bridge/commit/2e1bfb33f1c313643fd90984a29d778376afc4fa))
+
+
+### Bug Fixes
+
+* **ci:** close the branch-lifecycle tracking issue when no stale branches remain ([#318](https://github.com/misospace/foreman-dispatch-bridge/issues/318)) ([c2b6ce3](https://github.com/misospace/foreman-dispatch-bridge/commit/c2b6ce31dd90ba775a45be14c79608a2ef66f8a5)), closes [#317](https://github.com/misospace/foreman-dispatch-bridge/issues/317)
+* **ci:** ensure the branch-lifecycle label exists before filing the tracking issue ([#306](https://github.com/misospace/foreman-dispatch-bridge/issues/306)) ([c44c3e5](https://github.com/misospace/foreman-dispatch-bridge/commit/c44c3e5525b1c4089174d8fb47a8825a38fb8092)), closes [#303](https://github.com/misospace/foreman-dispatch-bridge/issues/303)
+* **retry:** make branch_pushed_for honor the GitHub branch lookup ([#283](https://github.com/misospace/foreman-dispatch-bridge/issues/283)) ([f62a424](https://github.com/misospace/foreman-dispatch-bridge/commit/f62a424408713bbe38245d7fcb0d46486fe8a342)), closes [#282](https://github.com/misospace/foreman-dispatch-bridge/issues/282)
+* **retry:** park a repeated coder NO-GO instead of spending the budget ([#319](https://github.com/misospace/foreman-dispatch-bridge/issues/319)) ([334142a](https://github.com/misospace/foreman-dispatch-bridge/commit/334142a39612734738227f9e639ecc50b157cf3d))
+* **retry:** park rail-demoted NO-GOs instead of spending the attempt budget ([#288](https://github.com/misospace/foreman-dispatch-bridge/issues/288)) ([f085359](https://github.com/misospace/foreman-dispatch-bridge/commit/f0853598a2fd65fda024401bb072848bf920945d)), closes [#287](https://github.com/misospace/foreman-dispatch-bridge/issues/287)
+* **workload:** make workload_name case-faithful so mixed-case repos don't collide ([#286](https://github.com/misospace/foreman-dispatch-bridge/issues/286)) ([53625f8](https://github.com/misospace/foreman-dispatch-bridge/commit/53625f80f2f2bfdb104dcc58f7143d257054e69f)), closes [#258](https://github.com/misospace/foreman-dispatch-bridge/issues/258)
+
+
+### Chores
+
+* **container:** update image docker.io/library/python (cae66f2 → cad9a2c) ([#289](https://github.com/misospace/foreman-dispatch-bridge/issues/289)) ([f0f84c9](https://github.com/misospace/foreman-dispatch-bridge/commit/f0f84c91e74d494d0b057d6c80d36137a5a43a0a))
+* **deps:** lock file maintenance ([#310](https://github.com/misospace/foreman-dispatch-bridge/issues/310)) ([063470f](https://github.com/misospace/foreman-dispatch-bridge/commit/063470fc77b5bc004510a944939561718cb09134))
+* **docker:** track the TEMPORARY OS-package patch layer so it cannot be forgotten ([#281](https://github.com/misospace/foreman-dispatch-bridge/issues/281)) ([b71a277](https://github.com/misospace/foreman-dispatch-bridge/commit/b71a277cf0e0821e0e2340c92a42c564e0dea1f3)), closes [#254](https://github.com/misospace/foreman-dispatch-bridge/issues/254)
+* **escalation:** tag parked-for-human comments with the parking path ([#284](https://github.com/misospace/foreman-dispatch-bridge/issues/284)) ([f87f2e4](https://github.com/misospace/foreman-dispatch-bridge/commit/f87f2e490605dac2e88701047848d45564d58aa6)), closes [#260](https://github.com/misospace/foreman-dispatch-bridge/issues/260)
+* **workload:** drop dead agent-name annotation from Workload manifest ([#304](https://github.com/misospace/foreman-dispatch-bridge/issues/304)) ([acfd5b2](https://github.com/misospace/foreman-dispatch-bridge/commit/acfd5b24c2f777bc8a66530977fa2a48f20116ab)), closes [#259](https://github.com/misospace/foreman-dispatch-bridge/issues/259)
+
 ## [Unreleased]
 
 ### Migration note (Workload name is now case-faithful)
