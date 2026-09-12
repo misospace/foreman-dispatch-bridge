@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.9.1](https://github.com/misospace/foreman-dispatch-bridge/compare/v0.9.0...v0.9.1) (2026-09-12)
+
+
+### Bug Fixes
+
+* **deps:** update dependency ruff (0.16.6 → 0.16.7) ([#325](https://github.com/misospace/foreman-dispatch-bridge/issues/325)) ([7314727](https://github.com/misospace/foreman-dispatch-bridge/commit/73147279399288eb901cf1087fc3994e3e522d80))
+
 ## [0.9.0](https://github.com/misospace/foreman-dispatch-bridge/compare/v0.8.0...v0.9.0) (2026-09-07)
 
 
