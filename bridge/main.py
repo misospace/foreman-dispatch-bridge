@@ -595,14 +595,33 @@ def _list_agentic_tasks_by_workload(
 
 
 def _coder_agent_name(workload: Dict[str, Any]) -> Optional[str]:
-    """Return a Workload's coder ref, or None when it cannot be resolved."""
+    """Return a Workload's coder ref, or None when it cannot be resolved.
+
+    Standard bridge Workloads name the coder at ``spec.coderAgentRef``. Pipeline-
+    shaped Workloads (``spec.pipeline`` — e.g. a retry re-dispatched with an
+    explicit pipeline) carry no top-level ``coderAgentRef`` and name the coder on
+    the ``issue-fix`` step's ``agentRef`` instead. Without the pipeline fallback
+    those Workloads resolve to None and contribute nothing to
+    ``_load_by_coder_agent``, so their coder never consumes a ``CODER_AGENT_SLOTS``
+    slot and a second coder can be dispatched alongside them (observed: a
+    pipeline-shaped coder and a standard coder both running the ``coder`` agent at
+    once under a ``coder:1`` cap).
+    """
     spec = workload.get("spec") or {}
     if not isinstance(spec, dict):
         return None
-    ref = spec.get("coderAgentRef") or {}
-    if not isinstance(ref, dict):
-        return None
-    return ref.get("name")
+    ref = spec.get("coderAgentRef")
+    if isinstance(ref, dict) and ref.get("name"):
+        return ref.get("name")
+    pipeline = spec.get("pipeline")
+    if isinstance(pipeline, list):
+        for step in pipeline:
+            if not isinstance(step, dict) or step.get("kind") != "issue-fix":
+                continue
+            step_ref = step.get("agentRef")
+            if isinstance(step_ref, dict) and step_ref.get("name"):
+                return step_ref.get("name")
+    return None
 
 
 def _active_workloads(
