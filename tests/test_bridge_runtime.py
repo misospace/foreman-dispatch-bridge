@@ -115,6 +115,22 @@ def _task(name: str, workload: str, *, kind: str = "issue-fix", phase: str) -> d
     }
 
 
+def _pipeline_workload(name: str, phase: str, *, coder: str) -> dict:
+    # Pipeline-shaped Workload: the coder is named on the issue-fix step's
+    # agentRef, with no top-level coderAgentRef (the shape a retry re-dispatch
+    # produces). See _coder_agent_name's pipeline fallback.
+    return {
+        "metadata": {"name": name, "labels": {"created-by": "dispatch-bridge"}},
+        "spec": {
+            "pipeline": [
+                {"name": "code", "kind": "issue-fix", "agentRef": {"name": coder}},
+                {"name": "review", "kind": "review", "agentRef": {"name": "reviewer"}},
+            ]
+        },
+        "status": {"phase": phase},
+    }
+
+
 def _prfix_workload(name: str, phase: str) -> dict:
     return {
         "metadata": {"name": name, "labels": {"created-by": "dispatch-bridge-prfix"}},
@@ -297,6 +313,20 @@ class TestLoadByCoderAgent:
             responses={
                 "list_namespaced_custom_object": [
                     {"items": [_workload("a", "Running", coder="coder-py")]},
+                    {"items": [_task("t1", "a", phase="Running")]},
+                ]
+            }
+        )
+        assert _load_by_coder_agent(api, "ns") == {"coder-py": 1}
+
+    def test_counts_pipeline_shaped_coder(self) -> None:
+        # A pipeline-shaped Workload names its coder on the issue-fix step, not at
+        # spec.coderAgentRef. It must still count toward coder load, or the coder
+        # slot leaks and a second coder runs alongside it under CODER_AGENT_SLOTS.
+        api = FakeAPI(
+            responses={
+                "list_namespaced_custom_object": [
+                    {"items": [_pipeline_workload("a", "Running", coder="coder-py")]},
                     {"items": [_task("t1", "a", phase="Running")]},
                 ]
             }
