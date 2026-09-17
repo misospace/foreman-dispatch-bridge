@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.9.1](https://github.com/misospace/foreman-dispatch-bridge/compare/v0.9.0...v0.9.1) (2026-09-17)
+
+
+### Bug Fixes
+
+* **bridge:** count pipeline-shaped coders toward CODER_AGENT_SLOTS ([#338](https://github.com/misospace/foreman-dispatch-bridge/issues/338)) ([eacce68](https://github.com/misospace/foreman-dispatch-bridge/commit/eacce683699e60e2936a248b6c036022926fba78))
+* **deps:** update dependency ruff (0.16.6 → 0.16.7) ([#325](https://github.com/misospace/foreman-dispatch-bridge/issues/325)) ([7314727](https://github.com/misospace/foreman-dispatch-bridge/commit/73147279399288eb901cf1087fc3994e3e522d80))
+* **deps:** update dependency ruff (0.16.7 → 0.16.8) ([#336](https://github.com/misospace/foreman-dispatch-bridge/issues/336)) ([4a2d794](https://github.com/misospace/foreman-dispatch-bridge/commit/4a2d79417888d403cc71f90808a74f3ff13c87b7))
+
+
+### Chores
+
+* **release:** sync pyproject version with the release-please manifest and auto-bump it on release ([#332](https://github.com/misospace/foreman-dispatch-bridge/issues/332)) ([dd572a8](https://github.com/misospace/foreman-dispatch-bridge/commit/dd572a8a7b3b235d8a5bf864168c9daa2b29bc14)), closes [#330](https://github.com/misospace/foreman-dispatch-bridge/issues/330)
+* remove orphaned uv.lock with no tool.uv config or uv install path ([#331](https://github.com/misospace/foreman-dispatch-bridge/issues/331)) ([e5235e9](https://github.com/misospace/foreman-dispatch-bridge/commit/e5235e92a54bb711fb523ba52ee4a085cf864add)), closes [#328](https://github.com/misospace/foreman-dispatch-bridge/issues/328)
+* update native loop settings ([#339](https://github.com/misospace/foreman-dispatch-bridge/issues/339)) ([afc58e2](https://github.com/misospace/foreman-dispatch-bridge/commit/afc58e28e0428cb908c1cdae3ec5ed099f2fb127))
+
 ## [0.9.0](https://github.com/misospace/foreman-dispatch-bridge/compare/v0.8.0...v0.9.0) (2026-09-07)
 
 
