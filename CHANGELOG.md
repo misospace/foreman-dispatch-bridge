@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.9.3](https://github.com/misospace/foreman-dispatch-bridge/compare/v0.9.2...v0.9.3) (2026-09-17)
+
+
+### Bug Fixes
+
+* **bridge:** cap the retry path by CODER_AGENT_SLOTS + share coder load across the tick ([#344](https://github.com/misospace/foreman-dispatch-bridge/issues/344)) ([6032d28](https://github.com/misospace/foreman-dispatch-bridge/commit/6032d2818a4f7a5b158a06c5d0fa28c3a621a4ed))
+
 ## [0.9.2](https://github.com/misospace/foreman-dispatch-bridge/compare/v0.9.1...v0.9.2) (2026-09-17)
 
 
