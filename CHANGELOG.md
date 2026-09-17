@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.9.2](https://github.com/misospace/foreman-dispatch-bridge/compare/v0.9.1...v0.9.2) (2026-09-17)
+
+
+### Bug Fixes
+
+* **bridge:** cap concurrent pr-fix coders by CODER_AGENT_SLOTS ([#340](https://github.com/misospace/foreman-dispatch-bridge/issues/340)) ([a136630](https://github.com/misospace/foreman-dispatch-bridge/commit/a13663080b52dcc97a52b3744fb6777cbbbf0bfa))
+
 ## [0.9.1](https://github.com/misospace/foreman-dispatch-bridge/compare/v0.9.0...v0.9.1) (2026-09-17)
 
 
