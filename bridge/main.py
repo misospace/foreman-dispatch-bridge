@@ -636,6 +636,30 @@ def _active_workloads(
     return active
 
 
+def _active_coder_pool_workloads(
+    api: client.CustomObjectsApi, namespace: str
+) -> List[Dict[str, Any]]:
+    """Active (non-terminal) Workloads whose coder draws on the shared pool.
+
+    Both issue (``created-by=dispatch-bridge``) and pr-fix
+    (``created-by=dispatch-bridge-prfix``) Workloads, in one set-based list call.
+    A pr-fix coder shares the same coder Agent (and the same GPU) as an issue
+    coder, so it must count toward ``_load_by_coder_agent`` or a pr-fix coder and
+    an issue coder both land on the same single-slot local model. pr-fix
+    Workloads are pipeline-shaped (the coder is named on the ``issue-fix`` step,
+    resolved by ``_coder_agent_name``'s pipeline fallback), not
+    ``spec.coderAgentRef``.
+    """
+    active: List[Dict[str, Any]] = []
+    for workload in _list_workloads_by_label(
+        api, namespace, f"created-by in (dispatch-bridge,{PRFIX_CREATED_BY})"
+    ):
+        phase = (workload.get("status") or {}).get("phase")
+        if phase not in _TERMINAL_PHASES:
+            active.append(workload)
+    return active
+
+
 def _coder_still_busy(tasks: List[Dict[str, Any]]) -> bool:
     """Fail-closed busy check for one Workload's tasks (#180).
 
@@ -690,7 +714,8 @@ def _load_by_coder_agent(
                 load[ref] = load.get(ref, 0) + 1
         return load
 
-    workloads = _active_workloads(api, namespace) if workloads is None else workloads
+    if workloads is None:
+        workloads = _active_coder_pool_workloads(api, namespace)
     tasks_by_workload = _list_agentic_tasks_by_workload(api, namespace)
     if tasks_by_workload is None:
         return _refs(workloads)
@@ -1259,6 +1284,7 @@ def run_tick(
             cfg.gate_profiles, cfg.pr_fix_lane_agents, cfg.agent_name, cfg.namespace,
             verify_enabled=cfg.verify_enabled,
             self_go=cfg.self_go,
+            agent_load=coder_load, agent_slots=cfg.coder_slots,
         ):
             logger.info(line)
 

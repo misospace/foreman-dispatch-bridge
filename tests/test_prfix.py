@@ -193,6 +193,72 @@ def test_drain_isolates_per_item_failure():
     assert any("o/r#5:error:" in line for line in out)
 
 
+def test_drain_caps_concurrent_coders_at_slot_capacity():
+    # Two queued NORMAL items resolve to the same coder; coder:1 means the first
+    # dispatches and the second is left QUEUED (skip:coder-busy) rather than
+    # piling two concurrent coders onto a single-slot local model.
+    created = []
+    out = drain_pr_fixes(
+        list_queued=lambda: [_raw(pr=5), _raw(pr=6)],
+        existing_prfix_names=set(),
+        create_workload=created.append,
+        gate_profiles={}, lane_agents={"NORMAL": "coder"}, agent_name="a",
+        namespace="llm",
+        agent_slots={"coder": 1},
+    )
+    assert [m["metadata"]["name"] for m in created] == ["prfix-o-r-5"]
+    assert "o/r#5:created:prfix-o-r-5" in out
+    assert any("o/r#6:skip:coder-busy:coder" in line for line in out)
+
+
+def test_drain_counts_inflight_load_against_cap():
+    # A coder already in flight (agent_load) occupies the only slot, so a fresh
+    # queued item is held instead of dispatched alongside it.
+    created = []
+    out = drain_pr_fixes(
+        list_queued=lambda: [_raw(pr=7)],
+        existing_prfix_names=set(),
+        create_workload=created.append,
+        gate_profiles={}, lane_agents={"NORMAL": "coder"}, agent_name="a",
+        namespace="llm",
+        agent_load={"coder": 1}, agent_slots={"coder": 1},
+    )
+    assert created == []
+    assert any("o/r#7:skip:coder-busy:coder" in line for line in out)
+
+
+def test_drain_uncapped_when_no_slots_configured():
+    # Empty agent_slots keeps the legacy dispatch-all behavior.
+    created = []
+    drain_pr_fixes(
+        list_queued=lambda: [_raw(pr=5), _raw(pr=6)],
+        existing_prfix_names=set(),
+        create_workload=created.append,
+        gate_profiles={}, lane_agents={"NORMAL": "coder"}, agent_name="a",
+        namespace="llm",
+        agent_slots={},
+    )
+    assert [m["metadata"]["name"] for m in created] == [
+        "prfix-o-r-5", "prfix-o-r-6"
+    ]
+
+
+def test_drain_higher_capacity_lane_dispatches_more():
+    # A lane whose coder has capacity 4 dispatches multiple in one pass.
+    created = []
+    drain_pr_fixes(
+        list_queued=lambda: [_raw(pr=5), _raw(pr=6), _raw(pr=7)],
+        existing_prfix_names=set(),
+        create_workload=created.append,
+        gate_profiles={}, lane_agents={"NORMAL": "coder-frontier"}, agent_name="a",
+        namespace="llm",
+        agent_slots={"coder": 1, "coder-frontier": 4},
+    )
+    assert [m["metadata"]["name"] for m in created] == [
+        "prfix-o-r-5", "prfix-o-r-6", "prfix-o-r-7"
+    ]
+
+
 def test_drain_gateless_creates_issue_fix_only_no_verify():
     """verify_enabled=False drain creates a Workload with issue-fix only, no verify."""
     created = []
