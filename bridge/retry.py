@@ -7,6 +7,7 @@ from bridge.models import ClaimedItem
 from bridge.workload import (
     build_workload,
     coder_agent_for,
+    free_slots,
     gate_profile_for,
     _branch_name,
     ATTEMPT_ANNOTATION,
@@ -640,6 +641,8 @@ def reconcile_failures(
     park_infra: Optional[Callable[[ClaimedItem, str, int], bool]] = None,
     needs_human_for: Optional[NeedsHumanFor] = None,
     ensure_human_label: Optional[EnsureHumanLabel] = None,
+    agent_load: Optional[dict] = None,
+    agent_slots: Optional[dict] = None,
 ) -> list:
     """Retry Failed bridge Workloads, bounded by max_attempts.
 
@@ -679,6 +682,10 @@ def reconcile_failures(
     """
     lane_coder_agents = lane_coder_agents or {}
     base_coder_agents = base_coder_agents or {}
+    slots = agent_slots or {}
+    # Mutated in place as retries recreate, so the caller's shared coder_load
+    # carries this pass's draws into the issue-claim and pr-fix drain passes.
+    load = agent_load if agent_load is not None else {}
     repo_coder_agents = repo_coder_agents or {}
     results = []
     _park_exhausted = _park_exhausted_factory(
@@ -1065,9 +1072,23 @@ def reconcile_failures(
         # deletion never completes, LLMKube#949) or a create that races must
         # not abort the rest of the reconcile pass and the claim pass — one
         # bad Workload previously crashed the whole bridge run every tick.
+        language = gate_profiles.get(item.repo, {}).get("language")
+        coder_agent = coder_agent_for(
+            item.lane, language, lane_coder_agents, base_coder_agents,
+            repo=item.repo, repo_coder_agents=repo_coder_agents,
+            issue_number=item.issue_number,
+        )
+        # Cap the retry by coder capacity. A retried Workload recreated onto a
+        # coder already at its CODER_AGENT_SLOTS capacity would put a second
+        # coder on a single-slot local model — the fresh-dispatch paths (claim
+        # loop, pr-fix drain) are capped, but this recreation path was not.
+        # Defer to a later tick: leave the Failed tombstone (do NOT delete) so
+        # list_failed() re-offers it once a slot frees.
+        if slots and free_slots(coder_agent, load, slots) <= 0:
+            results.append(f"{name}:retry-deferred:coder-busy:{coder_agent}")
+            continue
         try:
             delete_workload(name)
-            language = gate_profiles.get(item.repo, {}).get("language")
             # Infra errors are not real rejections — the request never reached
             # the agent — so a retry against the same backend must not spend
             # the verdict budget. Real verdicts increment as before. Infra
@@ -1086,17 +1107,14 @@ def reconcile_failures(
                 agent_name,
                 next_attempt,
                 infra_attempt=next_infra_attempt,
-                coder_agent=coder_agent_for(
-                    item.lane, language, lane_coder_agents, base_coder_agents,
-                    repo=item.repo, repo_coder_agents=repo_coder_agents,
-                    issue_number=item.issue_number,
-                ),
+                coder_agent=coder_agent,
                 feedback=feedback,
                 verify_enabled=verify_enabled,
                 self_go=self_go,
                 revise_from_branch=revise_from,
             )
             create_workload(manifest)
+            load[coder_agent] = load.get(coder_agent, 0) + 1
         except Exception as e:
             results.append(f"{name}:retry-error:{e}")
             continue

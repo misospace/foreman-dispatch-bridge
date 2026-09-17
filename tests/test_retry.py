@@ -69,6 +69,50 @@ def test_reconcile_retries_below_max_deletes_and_recreates_at_next_attempt():
     assert m["spec"]["gateProfile"] == {"language": "generic"}
 
 
+def test_reconcile_retry_deferred_when_coder_at_capacity():
+    # A retry recreated onto a coder already at CODER_AGENT_SLOTS capacity would
+    # put a second coder on a single-slot local model. Defer: leave the Failed
+    # tombstone (do not delete) so it re-offers once a slot frees.
+    r = _Recorder([_failed_wl("wl-misospace-dispatch-7", attempt=1, lane="local")])
+    out = reconcile_failures(
+        "foreman-coder", r.list_failed, r.create, r.delete,
+        namespace="llm", gate_profiles={}, max_attempts=3,
+        lane_coder_agents={"local": "coder"},
+        agent_load={"coder": 1}, agent_slots={"coder": 1},
+    )
+    assert out == ["wl-misospace-dispatch-7:retry-deferred:coder-busy:coder"]
+    assert r.deleted == []   # tombstone left for the next tick
+    assert r.created == []
+
+
+def test_reconcile_retry_proceeds_and_draws_shared_load_when_slot_free():
+    # With a free slot the retry recreates normally and draws the coder slot
+    # down in place, so the same-tick issue-claim / pr-fix passes see it.
+    load = {}
+    r = _Recorder([_failed_wl("wl-misospace-dispatch-7", attempt=1, lane="local")])
+    out = reconcile_failures(
+        "foreman-coder", r.list_failed, r.create, r.delete,
+        namespace="llm", gate_profiles={}, max_attempts=3,
+        lane_coder_agents={"local": "coder"},
+        agent_load=load, agent_slots={"coder": 1},
+    )
+    assert out == ["wl-misospace-dispatch-7:retry:2/3"]
+    assert len(r.created) == 1
+    assert load == {"coder": 1}   # drawn down in place for downstream passes
+
+
+def test_reconcile_retry_uncapped_when_no_slots_configured():
+    # No agent_slots -> legacy behavior, retry always recreates.
+    r = _Recorder([_failed_wl("wl-misospace-dispatch-7", attempt=1, lane="local")])
+    out = reconcile_failures(
+        "foreman-coder", r.list_failed, r.create, r.delete,
+        namespace="llm", gate_profiles={}, max_attempts=3,
+        agent_load={"coder": 5}, agent_slots={},
+    )
+    assert out == ["wl-misospace-dispatch-7:retry:2/3"]
+    assert len(r.created) == 1
+
+
 def test_reconcile_gives_up_at_max_without_touching_the_workload():
     r = _Recorder([_failed_wl("wl-misospace-dispatch-7", attempt=3)])
     out = reconcile_failures("foreman-coder", r.list_failed, r.create, r.delete,
