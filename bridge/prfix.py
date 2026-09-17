@@ -3,7 +3,7 @@ from typing import Optional
 
 from bridge.workload import (
     CODER_AGENT, VERIFIER_AGENT, ATTEMPT_ANNOTATION, SIGNATURE_ANNOTATION,
-    PROGRESS_ANNOTATION, LANE_CODER_WILDCARD, gate_profile_for,
+    PROGRESS_ANNOTATION, LANE_CODER_WILDCARD, gate_profile_for, free_slots,
 )
 
 # Lane values dispatch assigns to a PR-fix item. NEEDS_HUMAN is never actioned
@@ -194,13 +194,25 @@ def build_fix_workload(item, namespace, gate_profile, agent_name, coder_agent, a
 
 def drain_pr_fixes(list_queued, existing_prfix_names, create_workload,
                    gate_profiles, lane_agents, agent_name, namespace,
-                   verify_enabled: bool = True, self_go: list[str] | None = None) -> list:
-    """Create a fix Workload per newly-QUEUED item. list_queued returns raw
-    dicts already filtered to actionable lanes by the API query. An item is
-    skipped when it has no branch (nothing to amend) or already has an
-    in-flight prfix Workload (reconcile owns it; the item stays QUEUED). One
-    bad item never aborts the pass."""
+                   verify_enabled: bool = True, self_go: list[str] | None = None,
+                   agent_load: Optional[dict] = None,
+                   agent_slots: Optional[dict] = None) -> list:
+    """Create a fix Workload per newly-QUEUED item, bounded by coder capacity.
+
+    list_queued returns raw dicts already filtered to actionable lanes by the
+    API query. An item is skipped when it has no branch (nothing to amend), when
+    it already has an in-flight prfix Workload (reconcile owns it; the item stays
+    QUEUED), or when its coder Agent is already at its ``CODER_AGENT_SLOTS``
+    capacity. Without the capacity guard every queued item dispatched at once:
+    fine when they route to a cloud API, but a pileup of concurrent coders on a
+    single-slot local model thrashes it. ``agent_load`` starts from the coders
+    already in flight (issue + pr-fix, shared pool) and is drawn down as this
+    pass dispatches; a saturated coder leaves its item QUEUED for the next tick.
+    When ``agent_slots`` is empty the guard is inert and the legacy dispatch-all
+    behavior stands. One bad item never aborts the pass."""
     lane_agents = lane_agents or {}
+    slots = agent_slots or {}
+    load = dict(agent_load or {})
     results = []
     for raw in list_queued():
         item = parse_pr_fix_item(raw)
@@ -215,15 +227,20 @@ def drain_pr_fixes(list_queued, existing_prfix_names, create_workload,
         if name in existing_prfix_names:
             results.append(f"{tag}:skip:in-flight")
             continue
+        coder_agent = pr_fix_coder_for(item.lane, lane_agents)
+        if slots and free_slots(coder_agent, load, slots) <= 0:
+            results.append(f"{tag}:skip:coder-busy:{coder_agent}")
+            continue
         try:
             manifest = build_fix_workload(
                 item, namespace, gate_profile_for(item.repo, gate_profiles),
-                agent_name, pr_fix_coder_for(item.lane, lane_agents), attempt=1,
+                agent_name, coder_agent, attempt=1,
                 verify_enabled=verify_enabled,
                 signature=failure_signature(item),
                 self_go=self_go,
             )
             create_workload(manifest)
+            load[coder_agent] = load.get(coder_agent, 0) + 1
             results.append(f"{tag}:created:{name}")
         except Exception as e:
             results.append(f"{tag}:error:{e}")

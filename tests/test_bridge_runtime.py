@@ -333,6 +333,22 @@ class TestLoadByCoderAgent:
         )
         assert _load_by_coder_agent(api, "ns") == {"coder-py": 1}
 
+    def test_counts_prfix_workload_toward_shared_pool(self) -> None:
+        # A pr-fix Workload (created-by=dispatch-bridge-prfix, pipeline-shaped)
+        # shares the coder pool with issue coders, so it must count toward load,
+        # or a pr-fix coder and an issue coder both land on one single-slot model.
+        wl = _pipeline_workload("p", "Running", coder="coder-py")
+        wl["metadata"]["labels"]["created-by"] = "dispatch-bridge-prfix"
+        api = FakeAPI(
+            responses={
+                "list_namespaced_custom_object": [
+                    {"items": [wl]},  # combined issue+prfix pool list
+                    {"items": [_task("t1", "p", phase="Running")]},
+                ]
+            }
+        )
+        assert _load_by_coder_agent(api, "ns") == {"coder-py": 1}
+
     def test_terminal_issue_fix_with_running_review_frees_slot(self) -> None:
         # A terminal issue-fix task plus a running review does NOT hold the
         # coder busy: only issue-fix tasks count, and only while non-terminal.
