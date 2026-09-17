@@ -59,9 +59,12 @@ jobs:
           skip-dirs: usr/local/lib/python3.14/site-packages/pip/_vendor
           format: sarif
           output: trivy.sarif
-          # Gate the release on CRITICAL/HIGH vulns in the OS packages and
-          # language libraries bundled into the image.
-          exit-code: "1"
+          # Report-only: scan and publish findings to the Security tab (the
+          # SARIF upload below) but do not block the release. Matches
+          # misospace/dispatch's gate. Base-image OS CVEs in packages the
+          # bridge never invokes (perl, util-linux) were walling releases;
+          # fixable dependency CVEs still surface in the Security tab + Renovate.
+          exit-code: "0"
           severity: CRITICAL,HIGH
           # Without this the action drops the severity filter for SARIF output
           # and the exit-code gate fires on ANY severity (v0.6.22's SARIF
