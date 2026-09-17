@@ -1084,11 +1084,18 @@ def run_tick(
         current_lane_for = {}
         logger.warning("lane-index-failed", extra={"error": _redact_token(repr(e))})
 
+    # Shared coder-load accounting for the whole tick, computed before the retry
+    # pass so reconcile_failures, the issue-claim loop and the pr-fix drain draw
+    # from one pool -- a retried coder, a fresh issue coder and a pr-fix coder
+    # cannot each independently fill the same single slot. reconcile_failures
+    # mutates it in place as retries recreate.
+    coder_load = load_by_coder_agent() if cfg.coder_slots else {}
     # Retry failed workloads first (so a re-run this tick uses the current config),
     # then claim new work.
     for line in reconcile_failures(
         cfg.agent_name, list_failed_workloads, create_workload, delete_workload,
         cfg.namespace, cfg.gate_profiles, cfg.max_attempts,
+        agent_load=coder_load, agent_slots=cfg.coder_slots,
         escalate=escalate if cfg.escalation_lane else None,
         escalation_lane=cfg.escalation_lane,
         lane_coder_agents=cfg.lane_coder_agents,
@@ -1184,7 +1191,6 @@ def run_tick(
     # Cap concurrent in-progress work so the pipeline drains a bounded set
     # instead of claiming the whole backlog at once (0 = uncapped).
     active = count_active_workloads() if cfg.max_in_progress else 0
-    coder_load = load_by_coder_agent() if cfg.coder_slots else {}
     # Fix-first work-stealing (issue #134): named agents are removed from the
     # issue rotation while they still hold fix work or have a full slot, so
     # the fix lane's single slot stays uncontended. A JSON list ["coder"] or
