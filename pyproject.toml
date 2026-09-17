@@ -1,6 +1,6 @@
 [project]
 name = "foreman-dispatch-bridge"
-version = "0.9.2"
+version = "0.9.3"
 description = "Foreman dispatch bridge — claims issues from the Dispatch API and materialises Kubernetes Workloads for coder agents."
 requires-python = ">=3.13"
 
