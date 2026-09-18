@@ -19,6 +19,7 @@ from bridge.workload import (
     coder_agent_for,
     coder_candidates,
     coders_saturated,
+    free_slots,
     revision_coder_agent_for,
     gate_profile_for,
     parse_gate_profiles,
@@ -1156,17 +1157,26 @@ def run_tick(
             item = replace(item, lane=cfg.lanes[0] if cfg.lanes else "local")
         language = cfg.gate_profiles.get(item.repo, {}).get("language")
         branch = _branch_name(item)
+        redrive_coder = coder_agent_for(
+            item.lane, language, cfg.lane_coder_agents, cfg.base_coder_agents,
+            repo=item.repo, repo_coder_agents=cfg.repo_coder_agents,
+            issue_number=item.issue_number,
+        )
+        # Gate the infra redrive by coder capacity: a batch of infra-failed
+        # issues going healthy at once must not recreate their coders past the
+        # slot cap. Returning False defers -- reconcile_infra_parked keeps the
+        # infra marker and retries next tick.
+        if cfg.coder_slots and free_slots(redrive_coder, coder_load, cfg.coder_slots) <= 0:
+            return False
         manifest = build_workload(
             item, cfg.namespace, gate_profile_for(item.repo, cfg.gate_profiles),
             cfg.agent_name, attempt=1,
-            coder_agent=coder_agent_for(
-                item.lane, language, cfg.lane_coder_agents, cfg.base_coder_agents,
-                repo=item.repo, repo_coder_agents=cfg.repo_coder_agents,
-                issue_number=item.issue_number,
-            ), verify_enabled=cfg.verify_enabled, self_go=cfg.self_go,
+            coder_agent=redrive_coder,
+            verify_enabled=cfg.verify_enabled, self_go=cfg.self_go,
             revise_from_branch=branch,
         )
         create_workload(manifest)
+        coder_load[redrive_coder] = coder_load.get(redrive_coder, 0) + 1
         payload = {
             "issueId": item.issue_id,
             "repoFullName": item.repo,
@@ -1278,6 +1288,7 @@ def run_tick(
             lane_agents=cfg.pr_fix_lane_agents,
             get_pr_fix_signature=get_pr_fix_signature,
             update_pr_branch=update_pr_branch,
+            agent_load=coder_load, agent_slots=cfg.coder_slots,
         ):
             logger.info(line)
 

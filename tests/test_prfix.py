@@ -354,6 +354,80 @@ def test_reconcile_failed_under_max_deletes_and_recreates():
     assert out == ["prfix-o-r-5:retry:2/3"]
 
 
+def test_reconcile_retry_deferred_when_coder_at_capacity():
+    # Same-tier retry onto a coder already at CODER_AGENT_SLOTS capacity would
+    # stack another generation on the single-slot 27B. Defer: leave the tombstone
+    # (no delete, no recreate), retry next tick once a slot frees. Not a BLOCK.
+    created, deleted = [], []
+    out = reconcile_pr_fixes(
+        list_prfix_workloads=lambda: [_wl(5, "Failed", attempt=1, coder="coder")],
+        delete_workload=deleted.append, create_workload=created.append,
+        mark_pr_fix=lambda *a: (_ for _ in ()).throw(AssertionError("no mark")),
+        max_attempts=3,
+        agent_load={"coder": 1}, agent_slots={"coder": 1},
+    )
+    assert created == [] and deleted == []
+    assert out == ["prfix-o-r-5:retry-deferred:coder-busy:coder"]
+
+
+def test_reconcile_retry_proceeds_and_draws_load_when_slot_free():
+    load = {}
+    created, deleted = [], []
+    out = reconcile_pr_fixes(
+        list_prfix_workloads=lambda: [_wl(5, "Failed", attempt=1, coder="coder")],
+        delete_workload=deleted.append, create_workload=created.append,
+        mark_pr_fix=lambda *a: (_ for _ in ()).throw(AssertionError("no mark")),
+        max_attempts=3,
+        agent_load=load, agent_slots={"coder": 1},
+    )
+    assert out == ["prfix-o-r-5:retry:2/3"] and len(created) == 1
+    assert load == {"coder": 1}   # drawn down in place for the drain that follows
+
+
+def test_reconcile_escalate_not_gated_by_busy_qwen():
+    # At the cap, escalation targets coder-frontier (a different tier), so a busy
+    # qwen coder must NOT block it -- only same-tier retries are gated.
+    created, marks = [], []
+    out = reconcile_pr_fixes(
+        list_prfix_workloads=lambda: [_wl(5, "Failed", attempt=3, lane="NORMAL", coder="coder")],
+        delete_workload=lambda n: None, create_workload=created.append,
+        mark_pr_fix=lambda *a: marks.append(a),
+        max_attempts=3, lane_agents=DEFAULT_PRFIX_LANE_AGENTS,
+        agent_load={"coder": 1}, agent_slots={"coder": 1},
+    )
+    assert marks == []                                   # not blocked
+    assert created and created[0]["metadata"]["labels"]["lane"] == "ESCALATED"
+    assert any(":escalate:" in x for x in out)
+
+
+def test_reconcile_retry_uncapped_when_no_slots_configured():
+    created = []
+    out = reconcile_pr_fixes(
+        list_prfix_workloads=lambda: [_wl(5, "Failed", attempt=1, coder="coder")],
+        delete_workload=lambda n: None, create_workload=created.append,
+        mark_pr_fix=lambda *a: (_ for _ in ()).throw(AssertionError("no mark")),
+        max_attempts=3,
+        agent_load={"coder": 9}, agent_slots={},
+    )
+    assert out == ["prfix-o-r-5:retry:2/3"] and len(created) == 1
+
+
+def test_reconcile_escalate_deferred_when_frontier_at_capacity():
+    # Escalation targets coder-frontier; if THAT tier is itself at capacity,
+    # defer (leave the tombstone) rather than exceed its slots too.
+    created, marks = [], []
+    out = reconcile_pr_fixes(
+        list_prfix_workloads=lambda: [_wl(5, "Failed", attempt=3, lane="NORMAL", coder="coder")],
+        delete_workload=lambda n: (_ for _ in ()).throw(AssertionError("no delete on defer")),
+        create_workload=created.append,
+        mark_pr_fix=lambda *a: marks.append(a),
+        max_attempts=3, lane_agents=DEFAULT_PRFIX_LANE_AGENTS,
+        agent_load={"coder-frontier": 4}, agent_slots={"coder": 1, "coder-frontier": 4},
+    )
+    assert created == [] and marks == []
+    assert out == ["prfix-o-r-5:escalate-deferred:coder-busy:coder-frontier"]
+
+
 def test_reconcile_normal_at_max_escalates_to_frontier():
     # NORMAL tier exhausted -> escalate to ESCALATED (coder-frontier) with a fresh
     # attempt budget, NOT straight to BLOCKED/needs-human.
