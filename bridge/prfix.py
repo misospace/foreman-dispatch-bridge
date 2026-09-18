@@ -337,7 +337,8 @@ def reconcile_pr_fixes(list_prfix_workloads, delete_workload, create_workload,
                        lane_agents=None,
                        get_pr_fix_signature=lambda repo, pr: "",
                        update_pr_branch=lambda repo, pr: False,
-                       progress_max_attempts=PR_FIX_PROGRESS_MAX_ATTEMPTS) -> list:
+                       progress_max_attempts=PR_FIX_PROGRESS_MAX_ATTEMPTS,
+                       agent_load=None, agent_slots=None) -> list:
     """Settle prior fix Workloads: Succeeded -> verify the PR is actually
     mergeable (pr_is_mergeable) before marking FIXED, delete only if the mark
     succeeded (else leave the tombstone so the next tick retries the mark);
@@ -351,6 +352,10 @@ def reconcile_pr_fixes(list_prfix_workloads, delete_workload, create_workload,
     untouched. Per-Workload isolation so one wedged delete/create/mark cannot
     abort the pass or the drain that follows."""
     results = []
+    slots = agent_slots or {}
+    # Mutated in place as same-tier retries recreate, so the shared coder_load
+    # carries this pass's draws into the pr-fix drain later in the same tick.
+    load = agent_load if agent_load is not None else {}
     for wl in list_prfix_workloads():
         meta = wl.get("metadata") or {}
         name = meta.get("name") or "?"
@@ -433,6 +438,20 @@ def reconcile_pr_fixes(list_prfix_workloads, delete_workload, create_workload,
                 results.append(f"{name}:checks-pending:{attempt}/{max_attempts}")
             # Mark failed, still failing check, or Failed phase -> retry or BLOCKED
             elif attempt < max_attempts:
+                # Cap the same-tier retry by coder capacity. Recreating this
+                # Workload onto a coder already at its CODER_AGENT_SLOTS capacity
+                # stacks another generation on a single-slot local model. The
+                # drain and issue-retry paths gate this (#344); this pr-fix
+                # retry/recreate path did not, so a batch of failing pr-fixes
+                # recreated concurrently and thrashed the 27B. Defer -- leave the
+                # tombstone (do NOT delete) so it retries once a slot frees; this
+                # is a transient defer, not a BLOCK. Escalation (the else branch
+                # below) targets a different tier/coder and is intentionally not
+                # gated here.
+                retry_coder = _prfix_current_coder(wl)
+                if slots and retry_coder and free_slots(retry_coder, load, slots) <= 0:
+                    results.append(f"{name}:retry-deferred:coder-busy:{retry_coder}")
+                    continue
                 # Signature-aware budgeting: charge the attempt budget by
                 # *failure signature*, not by attempt count (#133). A retry
                 # against the same wall still ticks attempt++; a retry against
@@ -474,6 +493,7 @@ def reconcile_pr_fixes(list_prfix_workloads, delete_workload, create_workload,
                     )
                     manifest["metadata"]["annotations"][PROGRESS_ANNOTATION] = str(next_progress)
                     create_workload(manifest)
+                    load[retry_coder] = load.get(retry_coder, 0) + 1
                     tag = "not-mergeable-retry-progress" if merge_status == "checks_failed" else "retry-progress"
                     results.append(
                         f"{name}:{tag}:{next_progress}/{progress_max_attempts}"
@@ -484,6 +504,7 @@ def reconcile_pr_fixes(list_prfix_workloads, delete_workload, create_workload,
                         wl, attempt + 1,
                         signature=new_sig if new_sig else "",
                     ))
+                    load[retry_coder] = load.get(retry_coder, 0) + 1
                     tag = "not-mergeable-retry" if merge_status == "checks_failed" else "retry"
                     results.append(f"{name}:{tag}:{attempt + 1}/{max_attempts}")
             else:
@@ -496,8 +517,16 @@ def reconcile_pr_fixes(list_prfix_workloads, delete_workload, create_workload,
                 nxt = next_prfix_lane(current_lane)
                 next_coder = pr_fix_coder_for(nxt, lane_agents or {}) if nxt else None
                 if nxt and next_coder and next_coder != _prfix_current_coder(wl):
+                    # Escalation creates a coder on the next tier; gate it by that
+                    # tier's own CODER_AGENT_SLOTS so a burst of escalations cannot
+                    # exceed the stronger coder's capacity either. Defer (leave the
+                    # tombstone) when that tier is full.
+                    if slots and free_slots(next_coder, load, slots) <= 0:
+                        results.append(f"{name}:escalate-deferred:coder-busy:{next_coder}")
+                        continue
                     delete_workload(name)
                     create_workload(escalate_prfix_manifest(wl, nxt, next_coder))
+                    load[next_coder] = load.get(next_coder, 0) + 1
                     results.append(f"{name}:escalate:{current_lane or 'NORMAL'}->{nxt}")
                 else:
                     if repo and pr is not None:
