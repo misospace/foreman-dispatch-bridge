@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.9.4](https://github.com/misospace/foreman-dispatch-bridge/compare/v0.9.3...v0.9.4) (2026-09-18)
+
+
+### Bug Fixes
+
+* **bridge:** cap every coder-creating path by CODER_AGENT_SLOTS (no unbounded coder concurrency) ([#346](https://github.com/misospace/foreman-dispatch-bridge/issues/346)) ([6760ad4](https://github.com/misospace/foreman-dispatch-bridge/commit/6760ad4323b1edf8ecb3c7def2ff10165f3c29bd))
+
 ## [0.9.3](https://github.com/misospace/foreman-dispatch-bridge/compare/v0.9.2...v0.9.3) (2026-09-17)
 
 
