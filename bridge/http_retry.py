@@ -87,6 +87,17 @@ def _redact_token(text: str) -> str:
     return _TOKEN_RE.sub(r"\1***", text)
 
 
+def redact_exc(exc: BaseException) -> str:
+    """Return ``repr(exc)`` with any Bearer token redacted (issue #348).
+
+    The single helper every error-log call site uses to surface an exception
+    (``extra={"error": redact_exc(exc)}``), so no call site can accidentally
+    log a bare ``repr(exc)`` / ``str(exc)`` whose text embeds an
+    ``Authorization: Bearer ...`` header.
+    """
+    return _redact_token(repr(exc))
+
+
 def _is_retryable(exc_or_response):
     """Return True when *exc_or_response* represents a transient failure."""
     if isinstance(exc_or_response, requests.exceptions.Timeout):
