@@ -87,6 +87,17 @@ def _redact_token(text: str) -> str:
     return _TOKEN_RE.sub(r"\1***", text)
 
 
+def redact_exc(exc: BaseException) -> str:
+    """Return ``_redact_token(repr(exc))`` — the one way to log an exception.
+
+    Every ``extra={"error": ...}`` field that surfaces an exception must go
+    through this helper so a Bearer token embedded in the exception's repr
+    (a client error that includes request headers, URL, or line) is redacted
+    before it reaches the log.
+    """
+    return _redact_token(repr(exc))
+
+
 def _is_retryable(exc_or_response):
     """Return True when *exc_or_response* represents a transient failure."""
     if isinstance(exc_or_response, requests.exceptions.Timeout):

@@ -52,7 +52,7 @@ from bridge.prfix import (
 from bridge.prune import prune_workloads, stamp_terminal_since, terminal_since_key
 from bridge.reconcile import reconcile_stranded_issues, release_stuck_claims
 from bridge.review_transition import transition_to_in_review
-from bridge.http_retry import _redact_token, _retry_k8s_request
+from bridge.http_retry import redact_exc, _retry_k8s_request
 
 
 # The lane list this bridge polled before Dispatch could describe its own
@@ -217,7 +217,7 @@ def update_pull_request_branch(repo, pr, *, http_put, github_token) -> bool:
     except Exception as e:
         logger.info(
             "prfix-branch-update-failed",
-            extra={"repo": repo, "pr": pr, "error": _redact_token(repr(e))},
+            extra={"repo": repo, "pr": pr, "error": redact_exc(e)},
         )
         return False
     if r.status_code in (200, 202):
@@ -257,7 +257,7 @@ def check_pr_mergeable(repo, pr, *, http_get, github_token) -> str:
     except Exception as e:
         logger.warning(
             "prfix-mergeable-check-failed",
-            extra={"repo": repo, "pr": pr, "error": _redact_token(repr(e))},
+            extra={"repo": repo, "pr": pr, "error": redact_exc(e)},
         )
         return "checks_pending"
 
@@ -336,7 +336,7 @@ def check_pr_mergeable(repo, pr, *, http_get, github_token) -> str:
     except Exception as exc:
         logger.error(
             "prfix-check-runs-error",
-            extra={"repo": repo, "pr": pr, "error": repr(exc)},
+            extra={"repo": repo, "pr": pr, "error": redact_exc(exc)},
         )
         # A lookup failure is treated as not mergeable (conservative): #93
         # reconcile_pr_fixes just retries under its attempt cap rather
@@ -374,7 +374,7 @@ def check_pr_mergeable(repo, pr, *, http_get, github_token) -> str:
         except Exception as exc:
             logger.error(
                 "prfix-reviews-error",
-                extra={"repo": repo, "pr": pr, "error": repr(exc)},
+                extra={"repo": repo, "pr": pr, "error": redact_exc(exc)},
             )
             # Unknown: fall through to "blocked" so an API failure parks the PR
             # rather than burning attempts on a guess.
@@ -807,7 +807,7 @@ def run_tick(
         except Exception as e:
             logger.warning(
                 "declared-escalation-read-failed",
-                extra={"workload": workload_name, "error": _redact_token(repr(e))},
+                extra={"workload": workload_name, "error": redact_exc(e)},
             )
             return None
 
@@ -1020,7 +1020,7 @@ def run_tick(
         except Exception as e:
             logger.warning(
                 "branch-evidence-lookup-failed",
-                extra={"workload": workload_name, "error": _redact_token(repr(e))},
+                extra={"workload": workload_name, "error": redact_exc(e)},
             )
             return False
 
@@ -1030,7 +1030,7 @@ def run_tick(
         except Exception as e:  # feedback is best-effort; never block a retry on it
             logger.warning(
                 "feedback-lookup-failed",
-                extra={"workload": workload_name, "error": _redact_token(repr(e))},
+                extra={"workload": workload_name, "error": redact_exc(e)},
             )
             return ""
 
@@ -1046,7 +1046,7 @@ def run_tick(
                 extra={
                     "repo": item.repo,
                     "issue_number": item.issue_number,
-                    "error": _redact_token(repr(e)),
+                    "error": redact_exc(e),
                 },
             )
             return ""
@@ -1068,7 +1068,7 @@ def run_tick(
     except Exception as e:  # best-effort; consumers fall back to per-call GETs
         queue_snapshot = {}
         logger.warning(
-            "queue-snapshot-failed", extra={"error": _redact_token(repr(e))}
+            "queue-snapshot-failed", extra={"error": redact_exc(e)}
         )
 
     def queue_for(lane: str) -> list:
@@ -1083,7 +1083,7 @@ def run_tick(
         )
     except Exception as e:  # best-effort; falling back to the label is the old behavior
         current_lane_for = {}
-        logger.warning("lane-index-failed", extra={"error": _redact_token(repr(e))})
+        logger.warning("lane-index-failed", extra={"error": redact_exc(e)})
 
     # Shared coder-load accounting for the whole tick, computed before the retry
     # pass so reconcile_failures, the issue-claim loop and the pr-fix drain draw
@@ -1126,7 +1126,7 @@ def run_tick(
                 if INFRA_BLOCKED_LABEL in (issue.get("labels") or [])
             ]
         except Exception as e:
-            logger.warning("infra-parked-list-failed", extra={"error": repr(e)})
+            logger.warning("infra-parked-list-failed", extra={"error": redact_exc(e)})
             return []
 
     def clear_infra_marker(issue: dict) -> bool:
@@ -1243,7 +1243,7 @@ def run_tick(
                         "repo": repo,
                         "pr": pr,
                         "status": status,
-                        "error": _redact_token(repr(e)),
+                        "error": redact_exc(e),
                     },
                 )
                 return False
@@ -1275,7 +1275,7 @@ def run_tick(
                     continue
                 pr_fix_signatures[(repo, pr)] = failure_signature(item)
         except Exception as exc:
-            logger.warning("pr-fix-signature-snapshot-failed", extra={"error": str(exc)})
+            logger.warning("pr-fix-signature-snapshot-failed", extra={"error": redact_exc(exc)})
 
         def get_pr_fix_signature(repo, pr) -> str:
             return pr_fix_signatures.get((repo, pr), "")
@@ -1332,7 +1332,7 @@ def run_tick(
         except Exception as e:
             logger.warning(
                 "already-resolved-close-failed",
-                extra={"repo": repo, "issue": number, "error": _redact_token(repr(e))},
+                extra={"repo": repo, "issue": number, "error": redact_exc(e)},
             )
             return False
         logger.info("already-resolved-closed", extra={"repo": repo, "issue": number})
@@ -1578,7 +1578,7 @@ def _real_main() -> None:  # pragma: no cover - thin wiring, exercised in the cl
             except Exception as e:
                 logger.info(
                     "infra-model-unhealthy",
-                    extra={"model": model, "error": _redact_token(repr(e))},
+                    extra={"model": model, "error": redact_exc(e)},
                 )
                 return False
 

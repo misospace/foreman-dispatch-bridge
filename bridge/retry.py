@@ -3,6 +3,7 @@ import re
 from dataclasses import replace
 from typing import Callable, Optional
 
+from bridge.http_retry import redact_exc
 from bridge.models import ClaimedItem
 from bridge.workload import (
     build_workload,
@@ -706,7 +707,7 @@ def reconcile_failures(
             except Exception as e:
                 logger.warning(
                     "infra-task-lookup-failed",
-                    extra={"workload": name, "error": repr(e)},
+                    extra={"workload": name, "error": redact_exc(e)},
                 )
         is_infra = task_failed_with_executor_error(wl) or tasks_failed_with_executor_error(tasks)
 
@@ -731,7 +732,7 @@ def reconcile_failures(
                 state = None
                 logger.warning(
                     "issue-state-check-failed",
-                    extra={"workload": name, "error": repr(e)},
+                    extra={"workload": name, "error": redact_exc(e)},
                 )
             if state == "closed":
                 msg = f"{name}:skip-retry:issue-closed"
@@ -763,7 +764,7 @@ def reconcile_failures(
                 reason = None
                 logger.warning(
                     "declared-escalation-lookup-failed",
-                    extra={"workload": name, "error": repr(e)},
+                    extra={"workload": name, "error": redact_exc(e)},
                 )
             if reason and reason not in PARKING_ESCALATIONS:
                 # A non-parking declaration (BUDGET-EXHAUSTED) is a request for
@@ -787,7 +788,7 @@ def reconcile_failures(
                     except Exception as e:
                         logger.warning(
                             "needs-human-lookup-failed",
-                            extra={"workload": name, "error": repr(e)},
+                            extra={"workload": name, "error": redact_exc(e)},
                         )
 
                 if already_parked:
@@ -807,7 +808,7 @@ def reconcile_failures(
                                 extra={
                                     "workload": name,
                                     "reason": reason,
-                                    "error": repr(e),
+                                    "error": redact_exc(e),
                                 },
                             )
                     # Parking already succeeded on an earlier tick. Keep the
@@ -826,7 +827,7 @@ def reconcile_failures(
                         except Exception as e:
                             logger.warning(
                                 "park-for-human-failed",
-                                extra={"workload": name, "reason": reason, "error": repr(e)},
+                                extra={"workload": name, "reason": reason, "error": redact_exc(e)},
                             )
                     if parked:
                         msg = f"{name}:human-escalation:{reason}"
@@ -862,7 +863,7 @@ def reconcile_failures(
                 demoted = None
                 logger.warning(
                     "rail-demotion-lookup-failed",
-                    extra={"workload": name, "error": repr(e)},
+                    extra={"workload": name, "error": redact_exc(e)},
                 )
             if demoted:
                 demoted_rail, demoted_reason = demoted
@@ -876,7 +877,7 @@ def reconcile_failures(
                     except Exception as e:
                         logger.warning(
                             "needs-human-lookup-failed",
-                            extra={"workload": name, "error": repr(e)},
+                            extra={"workload": name, "error": redact_exc(e)},
                         )
                 if already_parked:
                     if ensure_human_label is not None:
@@ -892,7 +893,7 @@ def reconcile_failures(
                                 extra={
                                     "workload": name,
                                     "reason": demoted_reason,
-                                    "error": repr(e),
+                                    "error": redact_exc(e),
                                 },
                             )
                     msg = f"{name}:rail-demoted:parked"
@@ -911,7 +912,7 @@ def reconcile_failures(
                     except Exception as e:
                         logger.warning(
                             "park-for-human-failed",
-                            extra={"workload": name, "reason": demoted_reason, "error": repr(e)},
+                            extra={"workload": name, "reason": demoted_reason, "error": redact_exc(e)},
                         )
                 if parked:
                     msg = f"{name}:rail-demoted:parked"
@@ -944,7 +945,7 @@ def reconcile_failures(
                 except Exception as e:
                     logger.warning(
                         "infra-model-lookup-failed",
-                        extra={"workload": name, "error": repr(e)},
+                        extra={"workload": name, "error": redact_exc(e)},
                     )
             if park_infra is not None:
                 try:

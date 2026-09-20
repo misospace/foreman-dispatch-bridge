@@ -4,7 +4,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Callable, Optional
 from urllib.parse import urlencode
 from bridge.models import ClaimedItem
-from bridge.http_retry import _redact_token
+from bridge.http_retry import redact_exc
 
 logger = logging.getLogger("bridge.claim")
 
@@ -217,7 +217,7 @@ class DispatchClient:
                 try:
                     results[lane] = future.result()
                 except Exception as exc:
-                    logger.warning("lane-fetch-failed", extra={"lane": lane, "error": str(exc)})
+                    logger.warning("lane-fetch-failed", extra={"lane": lane, "error": redact_exc(exc)})
                     results[lane] = []
         return results
 
@@ -255,7 +255,7 @@ class DispatchClient:
             except Exception as e:
                 logger.warning(
                     "claim-failed",
-                    extra={"number": item.get("number"), "error": repr(e)},
+                    extra={"number": item.get("number"), "error": redact_exc(e)},
                 )
                 continue
         return None
@@ -385,7 +385,7 @@ class DispatchClient:
                 try:
                     results[lane] = future.result()
                 except Exception as exc:
-                    logger.warning("pr-fix-lane-fetch-failed", extra={"lane": lane, "error": str(exc)})
+                    logger.warning("pr-fix-lane-fetch-failed", extra={"lane": lane, "error": redact_exc(exc)})
                     results[lane] = []
 
         # Preserve lane order for deterministic concatenation.
@@ -407,7 +407,7 @@ class DispatchClient:
         except Exception as e:
             logger.warning(
                 "issue-state-lookup-failed",
-                extra={"repo": repo, "number": number, "error": repr(e)},
+                extra={"repo": repo, "number": number, "error": redact_exc(e)},
             )
             return None
         return data if isinstance(data, dict) else None
