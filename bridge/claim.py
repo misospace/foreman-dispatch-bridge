@@ -4,7 +4,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Callable, Optional
 from urllib.parse import urlencode
 from bridge.models import ClaimedItem
-from bridge.http_retry import redact_exc
+from bridge.http_retry import redact_exc, _redact_token
 
 logger = logging.getLogger("bridge.claim")
 
